@@ -1079,6 +1079,80 @@ async function startServer() {
     }
   });
 
+  // API 15D: Safaricom C2B sandbox simulation trigger
+  app.post('/api/mpesa/simulate-c2b', authenticateSaccoUser, async (req, res) => {
+    try {
+      const { consumerKey, consumerSecret, shortcode, mode, amount, msisdn, billRefNumber } = req.body;
+
+      if (!consumerKey || !consumerSecret || !shortcode || !amount || !msisdn) {
+        return res.status(400).json({
+          error: 'Missing required parameters: consumerKey, consumerSecret, shortcode, amount, and msisdn are required.'
+        });
+      }
+
+      const numAmount = Number(amount);
+      if (!Number.isFinite(numAmount) || numAmount <= 0) {
+        return res.status(400).json({ error: 'Amount must be greater than zero.' });
+      }
+
+      const isProduction = mode === 'production';
+      if (isProduction) {
+        return res.status(400).json({ error: 'C2B simulation is only available in Daraja sandbox mode.' });
+      }
+
+      const baseUrl = 'https://sandbox.safaricom.co.ke';
+      const authHeader = Buffer.from(`${consumerKey.trim()}:${consumerSecret.trim()}`).toString('base64');
+      const tokenRes = await fetch(`${baseUrl}/oauth/v1/generate?grant_type=client_credentials`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Basic ${authHeader}`
+        }
+      });
+
+      if (!tokenRes.ok) {
+        const errText = await tokenRes.text();
+        return res.status(400).json({
+          error: `Failed to authenticate with Safaricom Daraja sandbox. Status: ${tokenRes.status}`,
+          details: errText
+        });
+      }
+
+      const tokenData = await tokenRes.json() as any;
+      const accessToken = tokenData.access_token;
+      if (!accessToken) {
+        return res.status(400).json({
+          error: 'Safaricom response did not contain an access_token.',
+          details: tokenData
+        });
+      }
+
+      const simulateRes = await fetch(`${baseUrl}/mpesa/c2b/v1/simulate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${accessToken}`
+        },
+        body: JSON.stringify({
+          ShortCode: String(shortcode).trim(),
+          CommandID: 'CustomerPayBillOnline',
+          Amount: numAmount,
+          Msisdn: String(msisdn).replace(/\D/g, ''),
+          BillRefNumber: String(billRefNumber || '').trim()
+        })
+      });
+
+      const simulateData = await simulateRes.json() as any;
+      return res.status(simulateRes.ok ? 200 : 400).json({
+        status: simulateRes.ok ? 'success' : 'failed',
+        statusCode: simulateRes.status,
+        response: simulateData
+      });
+    } catch (error: any) {
+      console.error('M-Pesa Sandbox C2B Simulation Error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+  });
+
   // API 15A: Safaricom C2B validation webhook (Public - called by Daraja)
   app.post('/api/mpesa/c2b-validation', async (req, res) => {
     try {

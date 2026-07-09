@@ -43,19 +43,16 @@ export default function PaybillView({
   
   // Simulator State
   const [simAmount, setSimAmount] = useState('1500');
-  const [simRef, setSimRef] = useState('');
   const [simAccount, setSimAccount] = useState('');
   const [simPhone, setSimPhone] = useState('254712345678');
-  const [simShortcode, setSimShortcode] = useState('8249102');
-  const [simFirstName, setSimFirstName] = useState('Peter');
-  const [simLastName, setSimLastName] = useState('Mwangi');
+  const [simShortcode, setSimShortcode] = useState('600000');
   const [simResult, setSimResult] = useState<any>(null);
   const [isSimulating, setIsSimulating] = useState(false);
 
   // Webhook Registration Tool State
   const [regConsumerKey, setRegConsumerKey] = useState('Aw0MwYUv30Rekn214WOmtnwLd1G2Pwsrzx7MHjmna16z6KUP');
   const [regConsumerSecret, setRegConsumerSecret] = useState('m1eXDG1Fs9IPjIoGF9dvqECG5pCggAjfWWLF82BmjwITQmkSTpFWozqoPRMNOz6d');
-  const [regShortcode, setRegShortcode] = useState('8249102');
+  const [regShortcode, setRegShortcode] = useState('600000');
   const [regMode, setRegMode] = useState<'sandbox' | 'production'>('sandbox');
   const [callbackBaseUrl, setCallbackBaseUrl] = useState(() => window.location.origin);
   const [regResult, setRegResult] = useState<any>(null);
@@ -115,18 +112,8 @@ export default function PaybillView({
     setRefCode(code);
   };
 
-  const generateSimRef = () => {
-    const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    let code = 'RK';
-    for (let i = 0; i < 8; i++) {
-      code += letters.charAt(Math.floor(Math.random() * letters.length));
-    }
-    setSimRef(code);
-  };
-
   useEffect(() => {
     generateRandomRefCode();
-    generateSimRef();
     if (members.length > 0) {
       setSimAccount(members[0].id);
       setSimPhone(members[0].phoneNumber.replace(/\+/g, '').trim());
@@ -262,7 +249,7 @@ export default function PaybillView({
     }
   };
 
-  // Handle webhook simulation submission
+  // Handle real Daraja sandbox C2B simulation submission
   const handleSimulateWebhook = async (e: React.FormEvent) => {
     e.preventDefault();
     setSimResult(null);
@@ -274,53 +261,39 @@ export default function PaybillView({
       return;
     }
 
-    if (!simRef.trim()) {
-      setErrorMsg('Simulated Safaricom TransID is required.');
-      return;
-    }
-
     setIsSimulating(true);
     try {
-      // Simulate Safaricom C2B payload structure
-      const payload = {
-        TransactionType: 'Pay Bill',
-        TransID: simRef.trim().toUpperCase(),
-        TransTime: new Date().toISOString().replace(/\D/g, '').slice(0, 14), // YYYYMMDDHHMMSS
-        TransAmount: String(Number(simAmount)),
-        BusinessShortCode: simShortcode,
-        BillRefNumber: simAccount.trim(),
-        MSISDN: simPhone.trim().replace(/\D/g, ''),
-        FirstName: simFirstName.trim(),
-        MiddleName: '',
-        LastName: simLastName.trim()
-      };
-
-      const res = await fetch('/api/mpesa/c2b-confirmation', {
+      const res = await fetch('/api/mpesa/simulate-c2b', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(payload)
+        headers: getSaccoSecurityHeaders(),
+        body: JSON.stringify({
+          consumerKey: regConsumerKey.trim(),
+          consumerSecret: regConsumerSecret.trim(),
+          shortcode: simShortcode.trim(),
+          mode: regMode,
+          amount: Number(simAmount),
+          msisdn: simPhone.trim().replace(/\D/g, ''),
+          billRefNumber: simAccount.trim()
+        })
       });
 
       const data = await res.json();
       setSimResult(data);
 
-      if (res.ok && data.ResultCode === 0) {
-        setSuccessMsg(`Simulated Daraja C2B webhook completed successfully. Account auto-reconciled.`);
-        generateSimRef();
+      if (res.ok && data.status === 'success') {
+        setSuccessMsg(`Daraja sandbox C2B simulation accepted. Waiting for Safaricom callback on the registered confirmation URL.`);
         
         // Refresh local views
-        fetchHistory();
+        setTimeout(fetchHistory, 2500);
         if (onRefreshData) {
           onRefreshData();
         }
       } else {
-        setErrorMsg(`Safaricom webhook rejected: ${JSON.stringify(data)}`);
+        setErrorMsg(`Safaricom sandbox rejected the simulation: ${JSON.stringify(data.response || data)}`);
       }
 
     } catch (err: any) {
-      setErrorMsg(`Simulation failed: ${err.message}`);
+      setErrorMsg(`Daraja sandbox simulation failed: ${err.message}`);
     } finally {
       setIsSimulating(false);
     }
@@ -903,13 +876,13 @@ export default function PaybillView({
               <form onSubmit={handleSimulateWebhook} className="space-y-3.5 text-xs">
                 <div>
                   <h4 className="text-[10px] font-black uppercase text-emerald-800 tracking-wider font-mono flex items-center justify-between">
-                    <span>Live Daraja Sandbox Simulator</span>
+                    <span>Real Daraja Sandbox Test</span>
                     <span className="bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded font-bold font-sans">
                       Test Webhook Code
                     </span>
                   </h4>
                   <p className="text-[11px] text-slate-500 mt-0.5 leading-normal">
-                    Trigger a mock Safaricom API payload post to test the database routing and shares splitting.
+                    Trigger Safaricom's sandbox C2B simulator. When callbacks are registered to a public HTTPS URL, Safaricom will call this app and the payment will reconcile automatically.
                   </p>
                 </div>
 
@@ -923,6 +896,7 @@ export default function PaybillView({
                     onChange={(e) => setSimShortcode(e.target.value)}
                     className="w-full px-2.5 py-2 border-2 border-slate-200 bg-white rounded-lg focus:outline-none focus:border-slate-900 font-bold"
                   >
+                    <option value="600000">Sandbox Paybill 600000</option>
                     <option value="8249102">Vehicle Fleet Till No. 824 9102</option>
                     <option value="4810294">Operating Utility Till No. 481 0294</option>
                   </select>
@@ -941,9 +915,6 @@ export default function PaybillView({
                       const m = members.find(x => x.id === mId);
                       if (m) {
                         setSimPhone(m.phoneNumber.replace(/\+/g, '').trim());
-                        const names = m.name.split(' ');
-                        setSimFirstName(names[0] || 'Peter');
-                        setSimLastName(names[1] || 'Mwangi');
                       }
                     }}
                     className="w-full px-2.5 py-2 border-2 border-slate-200 bg-white rounded-lg focus:outline-none focus:border-slate-900 font-bold text-slate-800"
@@ -998,51 +969,6 @@ export default function PaybillView({
                   </div>
                 </div>
 
-                {/* NAMES & RECEIPT */}
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-[10px] font-black uppercase text-slate-600 tracking-wider mb-1 font-mono">
-                      First Name
-                    </label>
-                    <input
-                      type="text"
-                      value={simFirstName}
-                      onChange={(e) => setSimFirstName(e.target.value)}
-                      className="w-full px-3 py-2 border-2 border-slate-200 rounded-lg focus:outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-black uppercase text-slate-600 tracking-wider mb-1 font-mono">
-                      Last Name
-                    </label>
-                    <input
-                      type="text"
-                      value={simLastName}
-                      onChange={(e) => setSimLastName(e.target.value)}
-                      className="w-full px-3 py-2 border-2 border-slate-200 rounded-lg focus:outline-none"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-[10px] font-black uppercase text-slate-600 tracking-wider mb-1 font-mono flex justify-between items-center">
-                    <span>Receipt No (TransID)</span>
-                    <button
-                      type="button"
-                      onClick={generateSimRef}
-                      className="text-[9px] text-emerald-600 font-bold hover:underline"
-                    >
-                      Regenerate
-                    </button>
-                  </label>
-                  <input
-                    type="text"
-                    value={simRef}
-                    onChange={(e) => setSimRef(e.target.value.toUpperCase())}
-                    className="w-full px-3 py-2 border-2 border-slate-200 rounded-lg focus:outline-none font-mono font-black text-[12px] uppercase text-slate-900"
-                  />
-                </div>
-
                 {/* SIMULATOR RESPONSE STATUS */}
                 {simResult && (
                   <div className="bg-slate-900 text-slate-300 p-2.5 rounded-lg border border-slate-950 font-mono text-[10px] space-y-1">
@@ -1066,7 +992,7 @@ export default function PaybillView({
                   ) : (
                     <ArrowRight className="w-4 h-4 text-white" />
                   )}
-                  <span>Post M-Pesa IPN Event</span>
+                  <span>Run Daraja Sandbox C2B</span>
                 </button>
 
               </form>
