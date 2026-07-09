@@ -17,7 +17,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Database,
-  MessageSquare,
   Smartphone
 } from 'lucide-react';
 
@@ -59,7 +58,6 @@ export default function Sidebar({
     { name: 'Expenses', icon: <Receipt className="w-4 h-4" /> },
     { name: 'Members', icon: <Users className="w-4 h-4" /> },
     { name: 'Fleet', icon: <Bus className="w-4 h-4" /> },
-    { name: 'Message Logs', icon: <MessageSquare className="w-4 h-4" /> },
     { name: 'Paybill Link', icon: <Smartphone className="w-4 h-4" /> },
     { name: 'Reports', icon: <FileSpreadsheet className="w-4 h-4" /> },
     { name: 'Blueprint', icon: <FileCode className="w-4 h-4" /> }

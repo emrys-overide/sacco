@@ -16,7 +16,6 @@ import ReportsView from './components/ReportsView';
 import DailyCollectionsView from './components/DailyCollectionsView';
 import BlueprintView from './components/BlueprintView';
 import ExpensesView from './components/ExpensesView';
-import MessageLogsView from './components/MessageLogsView';
 import PaybillView from './components/PaybillView';
 
 const MEMBER_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary', 'Treasurer'];
@@ -359,14 +358,6 @@ export default function App() {
             onApprove={handleApproveBlueprint}
             isApproved={blueprintApproved}
             signerName={signerName}
-          />
-        );
-      case 'Message Logs':
-        return (
-          <MessageLogsView
-            members={members}
-            currentUserRole={currentUser?.role || 'Member'}
-            currentUserName={currentUser?.name || 'Anonymous Member'}
           />
         );
       case 'Paybill Link':

@@ -30,14 +30,14 @@ The Sacco Management System is built using a modern, scalable multi-tier archite
                          |                                     |
                          v                                     v
                [ PostgreSQL Database ]                   [ Redis Cache ]
-               (Master + Read Replicas)             (Session, Token Blocklist, SMS)
+               (Master + Read Replicas)             (Session, Token Blocklist)
 \`\`\`
 
 ### 1.2 Component Responsibilities
 *   **Frontend (React + Vite + Tailwind CSS):** A lightweight, responsive Single Page Application (SPA) optimized for low-bandwidth mobile networks in Kenya (Edge/3G). It uses aggressive client-side caching via LocalStorage and IndexedDB.
 *   **Backend (Python Django + DRF):** A secure, robust, enterprise-grade REST API utilizing Python 3.12 and Django. Handles complex business logic, transactional consistency, PDF generation, and external integration hooks.
 *   **Database (PostgreSQL 16):** Houses relational models including complex constraint checks for member accounts, shares, loans, and transaction history.
-*   **Caching & Queue Layer (Redis + Celery):** Offloads long-running tasks like M-Pesa IPN validation, daily financial report generation, and SMS notifications (via Africa's Talking API).`
+*   **Caching & Queue Layer (Redis + Celery):** Offloads long-running tasks like M-Pesa IPN validation and daily financial report generation.`
   },
   {
     id: 'database',
@@ -225,7 +225,7 @@ services:
     subtitle: 'Agile phases moving from foundation to full financial OS',
     content: `### 6.1 Phase Breakdown
 *   **Phase 1 (Current Core):** Role-based Authentication, Members Registry, Vehicle Fleets, M-Pesa transactions recording, Daily aggregates, PDF summaries.
-*   **Phase 2 (Savings & Shares):** Integration of shares ledger, interest calculators, custom withdraw vouchers, and passive SMS balance check systems.
+*   **Phase 2 (Savings & Shares):** Integration of shares ledger, interest calculators, and custom withdraw vouchers.
 *   **Phase 3 (Mobile Loan Matrix):** Loan application pipelines, automated credit scoring based on historic daily contributions, guarantor lockups, and auto-disbursal API.
 *   **Phase 4 (AI Integration & OCR):** Deep optical character recognition (OCR) of paper cash receipts, automated dashboard forecasting, and Gemini voice assistant for non-technical members.
 

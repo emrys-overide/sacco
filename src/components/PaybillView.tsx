@@ -1,23 +1,20 @@
 import React, { useState, useEffect } from 'react';
-import { Member, Transaction, SaccoMessage } from '../types';
+import type { Member, Transaction } from '../types';
 import { 
   Smartphone, 
   CheckCircle2, 
   AlertCircle, 
   RefreshCw, 
   Database, 
-  Send, 
   CreditCard, 
   ArrowRight,
   PlusCircle,
   Check,
   FileSpreadsheet,
-  MessageSquare,
   Sparkles,
   Search,
   User,
-  Hash,
-  Activity
+  Hash
 } from 'lucide-react';
 
 interface PaybillViewProps {
@@ -73,7 +70,6 @@ export default function PaybillView({
 
   // Ledgers State
   const [mpesaTransactions, setMpesaTransactions] = useState<Transaction[]>([]);
-  const [smsLogs, setSmsLogs] = useState<SaccoMessage[]>([]);
   const [isDataLoading, setIsDataLoading] = useState(false);
 
   // Security headers helper
@@ -148,24 +144,16 @@ export default function PaybillView({
     }
   };
 
-  // Fetch transaction and message history
+  // Fetch transaction history
   const fetchHistory = async () => {
     setIsDataLoading(true);
     try {
       const headers = getSaccoSecurityHeaders();
       
-      // 1. Fetch Transactions
       const txRes = await fetch('/api/transactions', { headers });
       let txs: Transaction[] = [];
       if (txRes.ok) {
         txs = await txRes.json();
-      }
-
-      // 2. Fetch SMS Logs
-      const msgRes = await fetch('/api/messages', { headers });
-      let msgs: SaccoMessage[] = [];
-      if (msgRes.ok) {
-        msgs = await msgRes.json();
       }
 
       // Filter M-Pesa transactions (containing mpesa or matching TillType)
@@ -178,18 +166,8 @@ export default function PaybillView({
 
       // Sort by newest first
       filteredTxs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-      
-      // Filter M-Pesa SMS messages
-      const filteredMsgs = msgs.filter((m: SaccoMessage) => 
-        m.messageText.includes('Till 8249102') || 
-        m.messageText.includes('Till 4810294') ||
-        m.messageText.toLowerCase().includes('mpesa') ||
-        m.refCode?.toUpperCase().startsWith('Q')
-      );
-      filteredMsgs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
       setMpesaTransactions(filteredTxs);
-      setSmsLogs(filteredMsgs);
 
     } catch (err) {
       console.error('Error fetching paybill history:', err);
@@ -228,7 +206,6 @@ export default function PaybillView({
           amount: Number(amount),
           category,
           refCode: refCode.trim(),
-          phoneNumber: phoneNumber || null,
           tillNumber: targetTill
         })
       });
@@ -238,8 +215,8 @@ export default function PaybillView({
         throw new Error(err.error || 'Failed to log cashless payment.');
       }
 
-      const data = await res.json();
-      setSuccessMsg(`Cashless payment logged & SMS notification sent successfully! Ref: ${refCode.toUpperCase()}`);
+      await res.json();
+      setSuccessMsg(`Cashless payment logged successfully. Ref: ${refCode.toUpperCase()}`);
       
       // Reset form variables
       setAmount('');
@@ -308,7 +285,7 @@ export default function PaybillView({
       setSimResult(data);
 
       if (res.ok && data.ResultCode === 0) {
-        setSuccessMsg(`Simulated Daraja C2B webhook completed successfully! Account auto-reconciled and SMS queued.`);
+        setSuccessMsg(`Simulated Daraja C2B webhook completed successfully. Account auto-reconciled.`);
         generateSimRef();
         
         // Refresh local views
@@ -381,12 +358,6 @@ export default function PaybillView({
     t.category.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
-  const filteredSms = smsLogs.filter(s => 
-    (s.refCode || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (s.memberName || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-    s.messageText.toLowerCase().includes(searchTerm.toLowerCase())
-  );
-
   return (
     <div className="flex-1 p-8 overflow-y-auto bg-slate-50 font-sans flex flex-col space-y-6 min-h-0">
       
@@ -403,10 +374,10 @@ export default function PaybillView({
           </div>
           <h2 className="text-xl font-bold font-display text-slate-100 mt-1.5 flex items-center">
             <Smartphone className="w-5.5 h-5.5 text-emerald-400 mr-2.5" />
-            Cashless Paybill & SMS Log Gateway
+            Cashless Paybill Gateway
           </h2>
           <p className="text-xs text-slate-400 max-w-2xl leading-normal">
-            Sowetamu Sacco processes cashless mobile payments using two segregated M-Pesa tills. Use this screen to record received payments manually. Reconciled entries automatically update member shares/savings balances and dispatch real-time Africa's Talking SMS alerts.
+            Sowetamu Sacco processes cashless mobile payments using two segregated M-Pesa tills. Use this screen to record received payments manually. Reconciled entries automatically update member shares and savings balances.
           </p>
         </div>
 
@@ -684,9 +655,9 @@ export default function PaybillView({
                   {isLoading ? (
                     <RefreshCw className="w-4 h-4 text-emerald-400 animate-spin" />
                   ) : (
-                    <Send className="w-4 h-4 text-emerald-400" />
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
                   )}
-                  <span>Commit &amp; Send Notification</span>
+                  <span>Commit Payment</span>
                 </button>
 
               </form>
@@ -731,7 +702,7 @@ export default function PaybillView({
                       className="bg-transparent text-emerald-400 font-bold border-none outline-none w-full select-all"
                     />
                     <span className="text-[9px] text-slate-400 block font-sans">
-                      Safaricom hits this URL with the finalized transaction receipt. This triggers our ledger update and SMS dispatch.
+                      Safaricom hits this URL with the finalized transaction receipt. This triggers the ledger update and balance reconciliation.
                     </span>
                   </div>
                 </div>
@@ -842,7 +813,7 @@ export default function PaybillView({
                     </span>
                   </h4>
                   <p className="text-[11px] text-slate-500 mt-0.5 leading-normal">
-                    Trigger a mock Safaricom API payload post to test the database routing, shares splitting, and SMS gateway.
+                    Trigger a mock Safaricom API payload post to test the database routing and shares splitting.
                   </p>
                 </div>
 
@@ -1000,7 +971,7 @@ export default function PaybillView({
                   {isSimulating ? (
                     <RefreshCw className="w-4 h-4 animate-spin text-white" />
                   ) : (
-                    <Send className="w-4 h-4 text-white" />
+                    <ArrowRight className="w-4 h-4 text-white" />
                   )}
                   <span>Post M-Pesa IPN Event</span>
                 </button>
@@ -1092,58 +1063,6 @@ export default function PaybillView({
                       ))}
                     </tbody>
                   </table>
-                )}
-              </div>
-            </div>
-
-            {/* 2. SMS DISPATCH & NOTIFICATION LOGS */}
-            <div className="bg-white border-2 border-slate-200 rounded-xl p-5 shadow-xs flex flex-col min-h-0 max-h-[350px]">
-              <div className="flex justify-between items-center border-b border-slate-100 pb-3 shrink-0">
-                <h3 className="text-xs font-black text-slate-950 uppercase tracking-widest flex items-center">
-                  <MessageSquare className="w-4 h-4 text-indigo-600 mr-2" />
-                  Africa's Talking SMS Dispatch Logs
-                </h3>
-                <span className="text-[10px] font-mono text-slate-500 bg-slate-100 px-2 py-0.5 rounded font-bold">
-                  {filteredSms.length} messages
-                </span>
-              </div>
-
-              <div className="overflow-y-auto flex-1 mt-3 space-y-3">
-                {isDataLoading ? (
-                  <div className="flex flex-col items-center justify-center py-12 text-slate-400 space-y-2">
-                    <RefreshCw className="w-6 h-6 animate-spin text-indigo-500" />
-                    <span className="text-[10px] font-mono">Loading SMS dispatch log queue...</span>
-                  </div>
-                ) : filteredSms.length === 0 ? (
-                  <div className="text-center py-12 text-slate-400 text-xs border border-dashed border-slate-200 rounded-xl bg-slate-50/50">
-                    <MessageSquare className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-                    <p className="font-bold font-mono text-slate-600">No M-Pesa SMS logs found.</p>
-                    <p className="text-[10px] text-slate-500 mt-0.5">Recorded cashless transactions generate SMS alerts automatically.</p>
-                  </div>
-                ) : (
-                  filteredSms.map((sms) => (
-                    <div 
-                      key={sms.id} 
-                      className="p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-1.5 hover:border-slate-350 transition-all text-[11px]"
-                    >
-                      <div className="flex justify-between items-center text-[10px]">
-                        <span className="font-bold text-slate-800">
-                          To: {sms.memberName || 'Cashless Depositor'} ({sms.phoneNumber || 'N/A'})
-                        </span>
-                        <span className="text-[9px] font-mono text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded font-black flex items-center">
-                          <Activity className="w-3 h-3 mr-0.5 animate-pulse" />
-                          {sms.status}
-                        </span>
-                      </div>
-                      
-                      <p className="text-slate-600 leading-relaxed font-sans">{sms.messageText}</p>
-                      
-                      <div className="flex justify-between items-center text-[9px] font-mono text-slate-400 pt-1 border-t border-slate-150">
-                        <span>Gateway: Africa's Talking API v1</span>
-                        <span>Ref: {sms.refCode || 'N/A'}</span>
-                      </div>
-                    </div>
-                  ))
                 )}
               </div>
             </div>

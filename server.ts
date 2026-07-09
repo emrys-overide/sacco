@@ -38,48 +38,6 @@ const mockTransactions = [
   { id: 't-5', timestamp: '2026-06-29T16:10:00Z', description: 'Printer toners and stationary procurement', refCode: 'VCH00220B', type: 'Debit', category: 'Office Expenses', amount: 2500, recorderName: 'Beatrice Ndwiga', tillNumber: 'None' }
 ];
 
-const mockMessages = [
-  {
-    id: 'msg-1',
-    timestamp: '2026-06-29T10:31:00Z',
-    memberId: 'm-1',
-    memberName: 'Samuel Gichuru',
-    phoneNumber: '+254 710 440 330',
-    messageText: 'SOWETAMU SACCO: Confirmed! KES 3,500 Daily fleet collection contribution received. Ref: MPX87A29DF. Shares: +KES 1,050, Savings: +KES 2,450. Thank you for your continued contribution!',
-    status: 'Delivered',
-    category: 'Savings',
-    amount: 3500,
-    refCode: 'MPX87A29DF',
-    smsGatewayResponse: 'AT_GW_ID_99214_SUCCESS'
-  },
-  {
-    id: 'msg-2',
-    timestamp: '2026-06-29T11:16:00Z',
-    memberId: 'm-2',
-    memberName: 'James Kamau',
-    phoneNumber: '+254 720 123 456',
-    messageText: 'SOWETAMU SACCO: Confirmed! KES 5,000 Monthly driver registration fee payment received. Ref: MPX91K882S. Welcome to the Sacco operational route network!',
-    status: 'Delivered',
-    category: 'Registration',
-    amount: 5000,
-    refCode: 'MPX91K882S',
-    smsGatewayResponse: 'AT_GW_ID_99182_SUCCESS'
-  },
-  {
-    id: 'msg-3',
-    timestamp: '2026-06-29T15:46:00Z',
-    memberId: 'm-3',
-    memberName: 'Patrick Njoroge',
-    phoneNumber: '+254 735 999 888',
-    messageText: 'SOWETAMU SACCO: Confirmed! KES 8,000 Route operation management levy payment received. Ref: MPX72J009K. Thank you!',
-    status: 'Delivered',
-    category: 'General',
-    amount: 8000,
-    refCode: 'MPX72J009K',
-    smsGatewayResponse: 'AT_GW_ID_98721_SUCCESS'
-  }
-];
-
 const mockMPesaConfig = {
   consumerKey: 'DARAJA_SANDBOX_CONSUMER_KEY_824910',
   consumerSecret: 'DARAJA_SANDBOX_CONSUMER_SECRET_824910',
@@ -102,7 +60,6 @@ const localStore = {
   members: [...mockMembers],
   vehicles: [...mockVehicles],
   transactions: [...mockTransactions],
-  messages: [...mockMessages],
   mpesaConfig: { ...mockMPesaConfig }
 };
 
@@ -207,16 +164,7 @@ async function seedDatabaseIfEmpty() {
       }
     }
 
-    // 5. Seed Messages
-    const messagesSnap = await db.collection('messages').limit(1).get();
-    if (messagesSnap.empty) {
-      console.log("Seeding messages collection...");
-      for (const msg of mockMessages) {
-        await db.collection('messages').doc(msg.id).set(msg);
-      }
-    }
-
-    // 6. Seed M-Pesa Config
+    // 5. Seed M-Pesa Config
     const mpesaConfigSnap = await db.collection('mpesaConfig').limit(1).get();
     if (mpesaConfigSnap.empty) {
       console.log("Seeding mpesaConfig collection...");
@@ -555,161 +503,6 @@ async function startServer() {
     }
   });
 
-  // API 10: Get Message Logs (with Firestore / Local Store dual integration)
-  app.get('/api/messages', authenticateSaccoUser, async (req, res) => {
-    try {
-      const list = await safeDbOperation(
-        async (firestoreDb) => {
-          const snap = await firestoreDb.collection('messages').get();
-          return snap.docs.map(doc => doc.data());
-        },
-        () => localStore.messages,
-        'messages'
-      );
-      // Sort messages descending by timestamp
-      list.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-      res.json(list);
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // API 11: Create / Send a message confirmation log
-  app.post('/api/messages', authenticateSaccoUser, async (req, res) => {
-    try {
-      const msgData = req.body;
-      const id = msgData.id || `msg-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-      const newMessage = {
-        id,
-        timestamp: msgData.timestamp || new Date().toISOString(),
-        memberId: msgData.memberId || null,
-        memberName: msgData.memberName || null,
-        phoneNumber: msgData.phoneNumber || '',
-        messageText: msgData.messageText || '',
-        status: msgData.status || 'Sent',
-        category: msgData.category || 'General',
-        amount: msgData.amount ? Number(msgData.amount) : null,
-        refCode: msgData.refCode || null,
-        smsGatewayResponse: msgData.smsGatewayResponse || `AT_GW_ID_${Math.floor(Math.random() * 100000)}_SUCCESS`
-      };
-
-      await safeDbOperation(
-        async (firestoreDb) => {
-          await firestoreDb.collection('messages').doc(id).set(newMessage);
-        },
-        () => {
-          localStore.messages.push(newMessage);
-        },
-        'messages'
-      );
-
-      res.status(201).json(newMessage);
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // API 12: Resend a message (triggers simulated delivery)
-  app.post('/api/messages/:id/resend', authenticateSaccoUser, async (req, res) => {
-    try {
-      const { id } = req.params;
-      let targetMsg: any = null;
-
-      await safeDbOperation(
-        async (firestoreDb) => {
-          const ref = firestoreDb.collection('messages').doc(id);
-          const snap = await ref.get();
-          if (snap.exists) {
-            targetMsg = snap.data();
-            if (targetMsg) {
-              targetMsg.status = 'Delivered';
-              targetMsg.timestamp = new Date().toISOString();
-              targetMsg.smsGatewayResponse = `AT_GW_ID_${Math.floor(Math.random() * 100000)}_RETRY_SUCCESS`;
-              await ref.set(targetMsg);
-            }
-          }
-        },
-        () => {
-          const idx = localStore.messages.findIndex(m => m.id === id);
-          if (idx >= 0) {
-            localStore.messages[idx].status = 'Delivered';
-            localStore.messages[idx].timestamp = new Date().toISOString();
-            localStore.messages[idx].smsGatewayResponse = `AT_GW_ID_${Math.floor(Math.random() * 100000)}_RETRY_SUCCESS`;
-            targetMsg = localStore.messages[idx];
-          }
-        },
-        'messages'
-      );
-
-      if (!targetMsg) {
-        return res.status(404).json({ error: 'Sacco SMS logs: Message ID not found.' });
-      }
-
-      res.json(targetMsg);
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // API 13: Broadcast custom SMS notification
-  app.post('/api/messages/broadcast', authenticateSaccoUser, async (req, res) => {
-    try {
-      const { memberIds, messageTemplate, category } = req.body;
-      if (!memberIds || !Array.isArray(memberIds) || !messageTemplate) {
-        return res.status(400).json({ error: 'Broadcast validation failed: Member list and message text are required.' });
-      }
-
-      // Fetch all members
-      const allMembers = await safeDbOperation(
-        async (firestoreDb) => {
-          const snap = await firestoreDb.collection('members').get();
-          return snap.docs.map(doc => doc.data());
-        },
-        () => localStore.members,
-        'members'
-      );
-
-      const sentMessages = [];
-      for (const mId of memberIds) {
-        const member = allMembers.find(m => m.id === mId);
-        if (member && member.phoneNumber) {
-          // Replace placeholders like {name}
-          const text = messageTemplate.replace(/\{name\}/gi, member.name);
-          const msgId = `msg-bc-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-          const newMessage = {
-            id: msgId,
-            timestamp: new Date().toISOString(),
-            memberId: member.id,
-            memberName: member.name,
-            phoneNumber: member.phoneNumber,
-            messageText: text,
-            status: 'Delivered' as const,
-            category: (category || 'General') as any,
-            amount: null as any,
-            refCode: null as any,
-            smsGatewayResponse: `AT_GW_ID_${Math.floor(Math.random() * 100000)}_SUCCESS`
-          };
-
-          await safeDbOperation(
-            async (firestoreDb) => {
-              await firestoreDb.collection('messages').doc(msgId).set(newMessage);
-            },
-            () => {
-              localStore.messages.push(newMessage);
-            },
-            'messages'
-          );
-
-          sentMessages.push(newMessage);
-        }
-      }
-
-      res.status(201).json({ status: 'success', sentCount: sentMessages.length, messages: sentMessages });
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
   // =========================================================================
   // M-PESA PAYBILL & DARJA API INTEGRATION GATEWAY
   // =========================================================================
@@ -876,7 +669,6 @@ async function startServer() {
 
       const formattedRef = TransID.toUpperCase().trim();
       const numAmount = Number(TransAmount);
-      const payerPhone = MSISDN ? '+' + MSISDN.replace(/\+/g, '') : '';
       const rawBillRef = (BillRefNumber || '').trim();
 
       // Determine which Till received the payment
@@ -884,12 +676,10 @@ async function startServer() {
       // If we are in Sandbox, any other shortcode will map based on account reference or default to VehicleTill
       let tillNumber: 'VehicleTill' | 'UtilityTill' = 'VehicleTill';
       let paybillName = 'Vehicle Fleet Till (No. 824 9102)';
-      let paybillShortcode = '8249102';
 
       if (String(BusinessShortCode) === '4810294') {
         tillNumber = 'UtilityTill';
         paybillName = 'Operating Utility Till (No. 481 0294)';
-        paybillShortcode = '4810294';
       }
 
       // Determine Category based on Till
@@ -997,43 +787,6 @@ async function startServer() {
         'transactions'
       );
 
-      // Dispatch SMS
-      const msgId = `msg-mpesa-c2b-${Date.now()}`;
-      let messageText = '';
-      if (member) {
-        if (category === 'Daily Contribution') {
-          messageText = `SOWETAMU SACCO: Confirmed! KES ${numAmount.toLocaleString()} received on Till ${paybillShortcode} from ${member.name}. Ref: ${formattedRef}. Shares: +KES ${Math.round(numAmount * 0.3).toLocaleString()}, Savings: +KES ${Math.round(numAmount * 0.7).toLocaleString()}. Ledger reconciled.`;
-        } else {
-          messageText = `SOWETAMU SACCO: Confirmed! KES ${numAmount.toLocaleString()} received on Till ${paybillShortcode} from ${member.name} for ${category}. Ref: ${formattedRef}. Thank you!`;
-        }
-      } else {
-        messageText = `SOWETAMU SACCO: Confirmed! Direct Cashless Payment of KES ${numAmount.toLocaleString()} received on Till ${paybillShortcode} from ${payerName}. Ref: ${formattedRef}. Account Reference: ${rawBillRef}. Ledger reconciled.`;
-      }
-
-      const smsLog = {
-        id: msgId,
-        timestamp: new Date().toISOString(),
-        memberId: member ? member.id : null,
-        memberName: member ? member.name : payerName,
-        phoneNumber: payerPhone || (member ? member.phoneNumber : ''),
-        messageText,
-        status: 'Delivered' as const,
-        category: (category === 'Daily Contribution' ? 'Savings' : 'General') as any,
-        amount: numAmount,
-        refCode: formattedRef,
-        smsGatewayResponse: `AT_GW_ID_${Math.floor(Math.random() * 100000)}_SUCCESS`
-      };
-
-      await safeDbOperation(
-        async (firestoreDb) => {
-          await firestoreDb.collection('messages').doc(msgId).set(smsLog);
-        },
-        () => {
-          localStore.messages.push(smsLog);
-        },
-        'messages'
-      );
-
       return res.status(200).json({
         ResultCode: 0,
         ResultDesc: 'Confirmation received successfully'
@@ -1048,7 +801,7 @@ async function startServer() {
   // API 16: Log direct M-Pesa cashless payment for both paybills
   app.post('/api/mpesa/log-payment', authenticateSaccoUser, async (req, res) => {
     try {
-      const { memberId, amount, category, refCode, phoneNumber, tillNumber } = req.body;
+      const { memberId, amount, category, refCode, tillNumber } = req.body;
 
       if (!amount || !category || !refCode || !tillNumber) {
         return res.status(400).json({ error: 'Parameters (amount, category, refCode, tillNumber) are required.' });
@@ -1061,7 +814,6 @@ async function startServer() {
       const formattedRef = refCode.toUpperCase().trim();
       const numAmount = Number(amount);
       const paybillName = tillNumber === 'VehicleTill' ? 'Vehicle Fleet Till (No. 824 9102)' : 'Operating Utility Till (No. 481 0294)';
-      const paybillShortcode = tillNumber === 'VehicleTill' ? '8249102' : '4810294';
 
       let member: any = null;
 
@@ -1137,47 +889,9 @@ async function startServer() {
         'transactions'
       );
 
-      // Dispatch SMS Confirmation Notification log
-      const msgId = `msg-mpesa-${Date.now()}`;
-      let messageText = '';
-      if (member) {
-        if (category === 'Daily Contribution') {
-          messageText = `SOWETAMU SACCO: Confirmed! KES ${numAmount.toLocaleString()} M-Pesa payment received on Till ${paybillShortcode}. Ref: ${formattedRef}. Shares: +KES ${Math.round(numAmount * 0.3).toLocaleString()}, Savings: +KES ${Math.round(numAmount * 0.7).toLocaleString()}. Ledger reconciled.`;
-        } else {
-          messageText = `SOWETAMU SACCO: Confirmed! KES ${numAmount.toLocaleString()} received on Till ${paybillShortcode} for ${category}. Ref: ${formattedRef}. Thank you!`;
-        }
-      } else {
-        messageText = `SOWETAMU SACCO: Confirmed! Direct Cashless Payment of KES ${numAmount.toLocaleString()} received on Till ${paybillShortcode} for ${category}. Ref: ${formattedRef}. Reconciled successfully.`;
-      }
-
-      const smsLog = {
-        id: msgId,
-        timestamp: new Date().toISOString(),
-        memberId: member ? member.id : null,
-        memberName: member ? member.name : 'Cashless Depositor',
-        phoneNumber: phoneNumber || (member ? member.phoneNumber : ''),
-        messageText,
-        status: 'Delivered' as const,
-        category: (category === 'Daily Contribution' ? 'Savings' : 'General') as any,
-        amount: numAmount,
-        refCode: formattedRef,
-        smsGatewayResponse: `AT_GW_ID_${Math.floor(Math.random() * 100000)}_SUCCESS`
-      };
-
-      await safeDbOperation(
-        async (firestoreDb) => {
-          await firestoreDb.collection('messages').doc(msgId).set(smsLog);
-        },
-        () => {
-          localStore.messages.push(smsLog);
-        },
-        'messages'
-      );
-
       res.status(200).json({
         status: 'success',
-        transaction: newTx,
-        sms: smsLog
+        transaction: newTx
       });
 
     } catch (error: any) {

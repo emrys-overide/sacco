@@ -60,20 +60,6 @@ export interface TargetCollection {
   unit: string;
 }
 
-export interface SaccoMessage {
-  id: string;
-  timestamp: string;
-  memberId?: string;
-  memberName?: string;
-  phoneNumber: string;
-  messageText: string;
-  status: 'Sent' | 'Delivered' | 'Failed' | 'Pending';
-  category: 'Savings' | 'Shares' | 'LoanRepay' | 'System' | 'Registration' | 'General';
-  amount?: number;
-  refCode?: string;
-  smsGatewayResponse?: string;
-}
-
 export interface MPesaConfig {
   consumerKey: string;
   consumerSecret: string;
@@ -83,5 +69,4 @@ export interface MPesaConfig {
   mode: 'sandbox' | 'production';
   stkPushEnabled: boolean;
 }
-
 
