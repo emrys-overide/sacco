@@ -1,0 +1,35 @@
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, 
+  collection, 
+  getDocs, 
+  setDoc, 
+  doc, 
+  getDoc,
+  enableIndexedDbPersistence
+} from 'firebase/firestore';
+
+const firebaseConfig = {
+  projectId: "gen-lang-client-0172640004",
+  appId: "1:549942549357:web:af6fc0818e9ae993f81864",
+  apiKey: "AIzaSyCkFHqPzhX63rdYBbwJtLXRTCbOew7t85E",
+  authDomain: "gen-lang-client-0172640004.firebaseapp.com",
+  firestoreDatabaseId: "ai-studio-matatusaccomanag-cd852607-4b11-4562-8401-e653d5fca910",
+  storageBucket: "gen-lang-client-0172640004.firebasestorage.app",
+  messagingSenderId: "549942549357"
+};
+
+const app = initializeApp(firebaseConfig);
+export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+
+// Check connections
+export async function testConnection() {
+  try {
+    const testDoc = await getDoc(doc(db, 'system', 'status'));
+    console.log("Firestore connection test: ok", testDoc.exists());
+    return true;
+  } catch (error) {
+    console.error("Firestore connection failed:", error);
+    return false;
+  }
+}

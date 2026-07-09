@@ -1,0 +1,87 @@
+/**
+ * Domain types for Matatu Sacco Management System (v1.0 Blueprint)
+ */
+
+export type UserRole = 'Chairman' | 'Secretary' | 'Treasurer' | 'Auditor' | 'Member' | 'Accountant';
+
+export interface User {
+  id: string;
+  name: string;
+  email: string;
+  role: UserRole;
+  phone: string;
+}
+
+export interface Member {
+  id: string;
+  name: string;
+  idNumber: string;
+  phoneNumber: string;
+  status: 'Active' | 'Inactive' | 'Pending';
+  dateRegistered: string;
+  vehicleAssigned?: string; // Vehicle registration number
+  sharesAmount: number;     // Future capability prepared
+  savingsAmount: number;    // Future capability prepared
+}
+
+export interface Vehicle {
+  id: string;
+  plateNumber: string; // e.g. KCJ 402X
+  ownerId: string;     // Member ID
+  ownerName: string;
+  driverName: string;
+  driverPhone: string;
+  route: string;       // e.g. "Nairobi - Thika (Route 237)"
+  status: 'Active' | 'Maintenance' | 'Suspended';
+  capacity: 14 | 33 | 50;
+}
+
+export type TillType = 'VehicleTill' | 'UtilityTill' | 'None';
+
+export interface Transaction {
+  id: string;
+  timestamp: string;
+  memberId?: string;
+  memberName?: string;
+  vehiclePlate?: string;
+  description: string;
+  refCode: string; // M-Pesa or Cash voucher code
+  type: 'Credit' | 'Debit';
+  category: 'Daily Contribution' | 'Registration Fee' | 'Management Fee' | 'Office Expenses' | 'Petty Cash' | 'Penalty' | 'Utilities' | 'Equipment';
+  amount: number;
+  recorderName: string;
+  tillNumber: TillType;
+}
+
+export interface TargetCollection {
+  name: string;
+  current: number;
+  target: number;
+  unit: string;
+}
+
+export interface SaccoMessage {
+  id: string;
+  timestamp: string;
+  memberId?: string;
+  memberName?: string;
+  phoneNumber: string;
+  messageText: string;
+  status: 'Sent' | 'Delivered' | 'Failed' | 'Pending';
+  category: 'Savings' | 'Shares' | 'LoanRepay' | 'System' | 'Registration' | 'General';
+  amount?: number;
+  refCode?: string;
+  smsGatewayResponse?: string;
+}
+
+export interface MPesaConfig {
+  consumerKey: string;
+  consumerSecret: string;
+  shortcode: string;
+  passkey: string;
+  callbackUrl: string;
+  mode: 'sandbox' | 'production';
+  stkPushEnabled: boolean;
+}
+
+

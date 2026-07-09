@@ -1,0 +1,6 @@
+{
+  "firestore": {
+    "rules": "firestore.rules",
+    "database": "ai-studio-matatusaccomanag-cd852607-4b11-4562-8401-e653d5fca910"
+  }
+}

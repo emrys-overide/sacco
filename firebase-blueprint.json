@@ -1,0 +1,89 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile with Sacco role",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string", "enum": ["Chairman", "Secretary", "Treasurer", "Auditor", "Member", "Accountant"] },
+        "phone": { "type": "string" }
+      },
+      "required": ["id", "name", "email", "role", "phone"]
+    },
+    "Member": {
+      "title": "Member",
+      "description": "Registered Sacco Member",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "idNumber": { "type": "string" },
+        "phoneNumber": { "type": "string" },
+        "status": { "type": "string", "enum": ["Active", "Inactive", "Pending"] },
+        "dateRegistered": { "type": "string" },
+        "vehicleAssigned": { "type": "string" },
+        "sharesAmount": { "type": "number" },
+        "savingsAmount": { "type": "number" }
+      },
+      "required": ["id", "name", "idNumber", "phoneNumber", "status", "dateRegistered", "sharesAmount", "savingsAmount"]
+    },
+    "Vehicle": {
+      "title": "Vehicle",
+      "description": "Registered Matatu vehicle in fleet",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "plateNumber": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "ownerName": { "type": "string" },
+        "driverName": { "type": "string" },
+        "driverPhone": { "type": "string" },
+        "route": { "type": "string" },
+        "status": { "type": "string", "enum": ["Active", "Maintenance", "Suspended"] },
+        "capacity": { "type": "number", "enum": [14, 33, 50] }
+      },
+      "required": ["id", "plateNumber", "ownerId", "ownerName", "driverName", "driverPhone", "route", "status", "capacity"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Ledger double-entry transaction record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "memberId": { "type": "string" },
+        "memberName": { "type": "string" },
+        "vehiclePlate": { "type": "string" },
+        "description": { "type": "string" },
+        "refCode": { "type": "string" },
+        "type": { "type": "string", "enum": ["Credit", "Debit"] },
+        "category": { "type": "string", "enum": ["Daily Contribution", "Registration Fee", "Management Fee", "Office Expenses", "Petty Cash", "Penalty", "Utilities", "Equipment"] },
+        "amount": { "type": "number" },
+        "recorderName": { "type": "string" },
+        "tillNumber": { "type": "string", "enum": ["VehicleTill", "UtilityTill", "None"] }
+      },
+      "required": ["id", "timestamp", "description", "refCode", "type", "category", "amount", "recorderName", "tillNumber"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Collection of user security roles"
+    },
+    "/members/{memberId}": {
+      "schema": { "$ref": "#/entities/Member" },
+      "description": "Collection of Sacco members"
+    },
+    "/vehicles/{vehicleId}": {
+      "schema": { "$ref": "#/entities/Vehicle" },
+      "description": "Collection of fleet vehicles"
+    },
+    "/transactions/{transactionId}": {
+      "schema": { "$ref": "#/entities/Transaction" },
+      "description": "Collection of financial transaction records"
+    }
+  }
+}
