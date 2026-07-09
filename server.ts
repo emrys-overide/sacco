@@ -3,7 +3,18 @@ import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { Firestore } from '@google-cloud/firestore';
 import { getSaccoUserKey } from './src/lib/auth';
-import type { TillType, Transaction, TransactionCategory, TransactionType, UserRole } from './src/types';
+import type {
+  Member,
+  PaymentMatchMethod,
+  PaymentRecord,
+  PaymentSource,
+  PaymentStatus,
+  TillType,
+  Transaction,
+  TransactionCategory,
+  TransactionType,
+  UserRole
+} from './src/types';
 
 const TRANSACTION_TYPES: readonly TransactionType[] = ['Credit', 'Debit'];
 const TRANSACTION_CATEGORIES: readonly TransactionCategory[] = [
@@ -36,6 +47,20 @@ type LedgerInput = Partial<Transaction> & {
   description?: string;
   refCode?: string;
   amount?: number | string;
+};
+
+type IncomingPaymentInput = {
+  source: PaymentSource;
+  refCode: string;
+  amount: number | string;
+  shortcode: string;
+  accountReference?: string;
+  payerPhone?: string;
+  payerName?: string;
+  memberId?: string;
+  category?: TransactionCategory;
+  rawPayload?: unknown;
+  recorderName: string;
 };
 
 // Standard mock data to seed if database collections are empty
@@ -93,6 +118,7 @@ const localStore = {
   members: [...mockMembers],
   vehicles: [...mockVehicles],
   transactions: [...mockTransactions],
+  payments: [] as PaymentRecord[],
   mpesaConfig: { ...mockMPesaConfig }
 };
 
@@ -305,6 +331,247 @@ function sendApiError(res: express.Response, error: any) {
   return res.status(500).json({ error: error.message || 'Unexpected server error.' });
 }
 
+function getTillFromShortcode(shortcode: unknown): { tillNumber: 'VehicleTill' | 'UtilityTill'; category: TransactionCategory; paybillName: string } {
+  if (String(shortcode) === '4810294') {
+    return {
+      tillNumber: 'UtilityTill',
+      category: 'Management Fee',
+      paybillName: 'Operating Utility Till (No. 481 0294)'
+    };
+  }
+
+  return {
+    tillNumber: 'VehicleTill',
+    category: 'Daily Contribution',
+    paybillName: 'Vehicle Fleet Till (No. 824 9102)'
+  };
+}
+
+function getLast9Digits(value: unknown): string {
+  return String(value || '').replace(/\D/g, '').slice(-9);
+}
+
+function matchPaymentMember(
+  members: Member[],
+  accountReference: string,
+  payerPhone: string,
+  preferredMemberId?: string
+): { member: Member | null; matchMethod: PaymentMatchMethod } {
+  if (preferredMemberId) {
+    const member = members.find(m => m.id === preferredMemberId);
+    if (member) return { member, matchMethod: 'Manual Assignment' };
+  }
+
+  const normalizedRef = accountReference.trim().toUpperCase().replace(/\s+/g, '');
+  if (normalizedRef) {
+    const byId = members.find(m => m.id.trim().toUpperCase() === normalizedRef);
+    if (byId) return { member: byId, matchMethod: 'Member ID' };
+
+    const byPlate = members.find(m => {
+      const plate = (m.vehicleAssigned || '').trim().toUpperCase().replace(/\s+/g, '');
+      return plate && plate === normalizedRef;
+    });
+    if (byPlate) return { member: byPlate, matchMethod: 'Vehicle Plate' };
+  }
+
+  const payerLast9 = getLast9Digits(payerPhone);
+  if (payerLast9.length === 9) {
+    const byPhone = members.find(m => getLast9Digits(m.phoneNumber) === payerLast9);
+    if (byPhone) return { member: byPhone, matchMethod: 'Phone Number' };
+  }
+
+  return { member: null, matchMethod: 'None' };
+}
+
+async function listPaymentRecords(): Promise<PaymentRecord[]> {
+  const list = await safeDbOperation<PaymentRecord[]>(
+    async (firestoreDb) => {
+      const snap = await firestoreDb.collection('payments').get();
+      return snap.docs.map(doc => doc.data() as PaymentRecord);
+    },
+    () => localStore.payments,
+    'payments'
+  );
+
+  return [...list].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+}
+
+async function savePaymentRecord(record: PaymentRecord): Promise<PaymentRecord> {
+  await safeDbOperation(
+    async (firestoreDb) => {
+      await firestoreDb.collection('payments').doc(record.id).set(record);
+    },
+    () => {
+      const idx = localStore.payments.findIndex(payment => payment.id === record.id);
+      if (idx >= 0) {
+        localStore.payments[idx] = record;
+      } else {
+        localStore.payments.push(record);
+      }
+    },
+    'payments'
+  );
+
+  return record;
+}
+
+async function findPaymentByRef(refCode: string): Promise<PaymentRecord | null> {
+  return safeDbOperation<PaymentRecord | null>(
+    async (firestoreDb) => {
+      const snap = await firestoreDb.collection('payments').where('refCode', '==', refCode).limit(1).get();
+      return snap.empty ? null : snap.docs[0].data() as PaymentRecord;
+    },
+    () => localStore.payments.find(payment => payment.refCode === refCode) || null,
+    'payments'
+  );
+}
+
+async function getAllMembers(): Promise<Member[]> {
+  return safeDbOperation<Member[]>(
+    async (firestoreDb) => {
+      const snap = await firestoreDb.collection('members').get();
+      return snap.docs.map(doc => doc.data() as Member);
+    },
+    () => localStore.members as Member[],
+    'members'
+  );
+}
+
+async function processIncomingPayment(input: IncomingPaymentInput): Promise<PaymentRecord> {
+  const refCode = normalizeRefCode(input.refCode);
+  const amount = Number(input.amount);
+  if (!refCode) {
+    throw new HttpError(400, 'Payment reference code is required.', 'MISSING_PAYMENT_REF');
+  }
+  if (!Number.isFinite(amount) || amount <= 0) {
+    const tillConfig = getTillFromShortcode(input.shortcode);
+    const rejected = await savePaymentRecord({
+      id: `pay-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      timestamp: new Date().toISOString(),
+      source: input.source,
+      status: 'Rejected',
+      refCode: refCode || `INVALID-${Date.now()}`,
+      amount: Number.isFinite(amount) ? amount : 0,
+      tillNumber: tillConfig.tillNumber,
+      category: input.category || tillConfig.category,
+      accountReference: input.accountReference || '',
+      payerName: input.payerName || 'Unknown Payer',
+      payerPhone: input.payerPhone || '',
+      matchMethod: 'None',
+      note: 'Invalid payment amount.',
+      rawPayload: input.rawPayload
+    });
+    return rejected;
+  }
+
+  const existing = await findPaymentByRef(refCode);
+  if (existing) {
+    return {
+      ...existing,
+      status: existing.status === 'Reconciled' ? 'Duplicate' : existing.status,
+      note: `Duplicate callback or manual entry detected for ${refCode}.`
+    };
+  }
+
+  const tillConfig = getTillFromShortcode(input.shortcode);
+  const category = input.category || tillConfig.category;
+  const allMembers = await getAllMembers();
+  const accountReference = String(input.accountReference || '').trim();
+  const payerPhone = String(input.payerPhone || '').trim();
+  const { member, matchMethod } = matchPaymentMember(allMembers, accountReference, payerPhone, input.memberId);
+  const payerName = input.payerName || (member ? member.name : 'Unmatched M-Pesa Payer');
+
+  let payment: PaymentRecord = {
+    id: `pay-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+    timestamp: new Date().toISOString(),
+    source: input.source,
+    status: member ? 'Pending' : 'Unmatched',
+    refCode,
+    amount,
+    tillNumber: tillConfig.tillNumber,
+    category,
+    accountReference,
+    payerName,
+    payerPhone,
+    memberId: member?.id,
+    memberName: member?.name,
+    vehiclePlate: member?.vehicleAssigned || accountReference,
+    matchMethod,
+    rawPayload: input.rawPayload,
+    note: member ? `Matched by ${matchMethod}.` : 'Awaiting accountant reconciliation.'
+  };
+
+  if (!member) {
+    return savePaymentRecord(payment);
+  }
+
+  const transaction = await createLedgerTransaction({
+    id: `t-mpesa-${Date.now()}`,
+    timestamp: payment.timestamp,
+    memberId: member.id,
+    memberName: member.name,
+    vehiclePlate: member.vehicleAssigned || accountReference,
+    description: `M-Pesa ${input.source.toLowerCase()} payment of KES ${amount.toLocaleString()} received on ${tillConfig.paybillName} (Account Ref: ${accountReference || 'N/A'}). Reconciled automatically.`,
+    refCode,
+    type: 'Credit',
+    category,
+    amount,
+    recorderName: input.recorderName,
+    tillNumber: tillConfig.tillNumber
+  });
+
+  payment = {
+    ...payment,
+    status: 'Reconciled',
+    transactionId: transaction.id,
+    note: `Auto-reconciled by ${matchMethod}.`
+  };
+  return savePaymentRecord(payment);
+}
+
+async function reconcilePaymentRecord(paymentId: string, memberId: string, recorderName: string): Promise<PaymentRecord> {
+  const payments = await listPaymentRecords();
+  const payment = payments.find(item => item.id === paymentId);
+  if (!payment) {
+    throw new HttpError(404, 'Payment record was not found.', 'PAYMENT_NOT_FOUND');
+  }
+  if (payment.status === 'Reconciled') {
+    throw new HttpError(409, 'Payment has already been reconciled.', 'PAYMENT_ALREADY_RECONCILED');
+  }
+
+  const members = await getAllMembers();
+  const member = members.find(item => item.id === memberId);
+  if (!member) {
+    throw new HttpError(404, 'Selected member was not found.', 'MEMBER_NOT_FOUND');
+  }
+
+  const transaction = await createLedgerTransaction({
+    id: `t-mpesa-${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    memberId: member.id,
+    memberName: member.name,
+    vehiclePlate: member.vehicleAssigned || payment.accountReference,
+    description: `M-Pesa unmatched payment of KES ${payment.amount.toLocaleString()} assigned to ${member.name}. Original Account Ref: ${payment.accountReference || 'N/A'}.`,
+    refCode: payment.refCode,
+    type: 'Credit',
+    category: payment.category,
+    amount: payment.amount,
+    recorderName,
+    tillNumber: payment.tillNumber
+  });
+
+  return savePaymentRecord({
+    ...payment,
+    status: 'Reconciled',
+    memberId: member.id,
+    memberName: member.name,
+    vehiclePlate: member.vehicleAssigned || payment.vehiclePlate,
+    matchMethod: 'Manual Assignment',
+    transactionId: transaction.id,
+    note: `Manually reconciled by ${recorderName}.`
+  });
+}
+
 // Sacco Security OS Authentication Middleware
 const authenticateSaccoUser = (req: express.Request, res: express.Response, next: express.NextFunction) => {
   const email = req.headers['x-sacco-user-email'] as string;
@@ -422,6 +689,7 @@ async function startServer() {
   app.use('/api/members', authenticateSaccoUser);
   app.use('/api/vehicles', authenticateSaccoUser);
   app.use('/api/transactions', authenticateSaccoUser);
+  app.use('/api/payments', authenticateSaccoUser);
   app.use('/api/system', authenticateSaccoUser);
 
   // API 2: Get Users
@@ -597,6 +865,25 @@ async function startServer() {
     }
   });
 
+  // API 8C: Payment reconciliation register
+  app.get('/api/payments', async (req, res) => {
+    try {
+      res.json(await listPaymentRecords());
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.post('/api/payments/:id/reconcile', requireRoles(['Chairman', 'Treasurer', 'Accountant']), async (req, res) => {
+    try {
+      const user = (req as any).user;
+      const payment = await reconcilePaymentRecord(req.params.id, req.body.memberId, user?.name || 'Sacco Ledger OS');
+      res.json(payment);
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
   // API 9: Sacco Dynamic Ledger Status (computed on server side)
   app.get('/api/system/status', async (req, res) => {
     try {
@@ -734,7 +1021,7 @@ async function startServer() {
       }
 
       const isProduction = mode === 'production';
-      const baseUrl = isProduction ? 'https://api.safaricom.co.ke' : 'https://sandbox.safaricom.co.uk';
+      const baseUrl = isProduction ? 'https://api.safaricom.co.ke' : 'https://sandbox.safaricom.co.ke';
 
       // 1. Generate Auth Token
       const authHeader = Buffer.from(`${consumerKey.trim()}:${consumerSecret.trim()}`).toString('base64');
@@ -821,119 +1108,34 @@ async function startServer() {
   // API 15B: Safaricom C2B confirmation webhook (Public - called by Daraja)
   app.post('/api/mpesa/c2b-confirmation', async (req, res) => {
     try {
-      const {
-        TransactionType,
-        TransID,
-        TransTime,
-        TransAmount,
-        BusinessShortCode,
-        BillRefNumber,
-        MSISDN,
-        FirstName,
-        MiddleName,
-        LastName
-      } = req.body;
+      const { TransID, TransAmount, BusinessShortCode, BillRefNumber, MSISDN, FirstName, MiddleName, LastName } = req.body;
 
       if (!TransID || !TransAmount || !BusinessShortCode) {
         return res.status(400).json({ error: 'Missing required C2B confirmation payload parameters.' });
       }
 
-      const formattedRef = TransID.toUpperCase().trim();
-      const numAmount = Number(TransAmount);
-      const rawBillRef = (BillRefNumber || '').trim();
-
-      // Determine which Till received the payment
-      // Till 8249102 = VehicleTill, Till 4810294 = UtilityTill
-      // If we are in Sandbox, any other shortcode will map based on account reference or default to VehicleTill
-      let tillNumber: 'VehicleTill' | 'UtilityTill' = 'VehicleTill';
-      let paybillName = 'Vehicle Fleet Till (No. 824 9102)';
-
-      if (String(BusinessShortCode) === '4810294') {
-        tillNumber = 'UtilityTill';
-        paybillName = 'Operating Utility Till (No. 481 0294)';
-      }
-
-      // Determine Category based on Till
-      let category: 'Daily Contribution' | 'Registration Fee' | 'Management Fee' | 'Penalty' = 'Daily Contribution';
-      if (tillNumber === 'UtilityTill') {
-        category = 'Management Fee';
-      }
-
-      // Fetch all members to find a match
-      const allMembers = await safeDbOperation(
-        async (firestoreDb) => {
-          const snap = await firestoreDb.collection('members').get();
-          return snap.docs.map(doc => doc.data());
-        },
-        () => localStore.members,
-        'members'
-      );
-
-      // Match logic
-      let member: any = null;
-      if (rawBillRef || MSISDN) {
-        const normalizedBillRef = rawBillRef.toUpperCase().replace(/\s+/g, '');
-        
-        // 1. Match by Member ID
-        member = allMembers.find(m => m.id.trim().toUpperCase() === normalizedBillRef);
-
-        // 2. Match by Vehicle plate if not matched
-        if (!member) {
-          member = allMembers.find(m => {
-            const plate = (m.vehicleAssigned || '').trim().toUpperCase().replace(/\s+/g, '');
-            return plate && plate === normalizedBillRef;
-          });
-        }
-
-        // 3. Match by Phone Number (Last 9 digits)
-        if (!member && MSISDN) {
-          const getLast9Digits = (numStr: string) => {
-            const cleaned = numStr.replace(/\D/g, '');
-            return cleaned.slice(-9);
-          };
-          const payerLast9 = getLast9Digits(String(MSISDN));
-          if (payerLast9.length === 9) {
-            member = allMembers.find(m => {
-              const memberLast9 = getLast9Digits(m.phoneNumber || '');
-              return memberLast9 === payerLast9;
-            });
-          }
-        }
-      }
-
       const payerName = [FirstName, MiddleName, LastName].filter(Boolean).join(' ').trim() || 'Direct Cashless Depositor';
-      const txId = 't-mpesa-' + Date.now();
-
-      const newTx = {
-        id: txId,
-        timestamp: new Date().toISOString(),
-        memberId: member ? member.id : '',
-        memberName: member ? member.name : payerName,
-        vehiclePlate: member ? (member.vehicleAssigned || '') : rawBillRef,
-        description: `M-Pesa IPN C2B: Payment of KES ${numAmount.toLocaleString()} received on ${paybillName} (Account Ref: ${rawBillRef}). Reconciled automatically.`,
-        refCode: formattedRef,
-        type: 'Credit' as const,
-        category: category,
-        amount: numAmount,
-        recorderName: 'M-Pesa Gateway API',
-        tillNumber: tillNumber
-      };
-
-      await createLedgerTransaction(newTx);
+      const payment = await processIncomingPayment({
+        source: 'Webhook',
+        refCode: TransID,
+        amount: TransAmount,
+        shortcode: BusinessShortCode,
+        accountReference: BillRefNumber,
+        payerPhone: MSISDN ? '+' + String(MSISDN).replace(/\+/g, '') : '',
+        payerName,
+        rawPayload: req.body,
+        recorderName: 'M-Pesa Gateway API'
+      });
 
       return res.status(200).json({
         ResultCode: 0,
-        ResultDesc: 'Confirmation received successfully'
+        ResultDesc: payment.status === 'Unmatched'
+          ? 'Confirmation received; payment queued for reconciliation'
+          : 'Confirmation received and reconciled successfully'
       });
 
     } catch (error: any) {
       console.error('M-Pesa Confirmation Webhook Error:', error);
-      if (error instanceof HttpError && error.code === 'DUPLICATE_LEDGER_REF') {
-        return res.status(200).json({
-          ResultCode: 0,
-          ResultDesc: 'Duplicate confirmation ignored; transaction already exists'
-        });
-      }
       return res.status(500).json({ error: error.message });
     }
   });
@@ -951,50 +1153,19 @@ async function startServer() {
         return res.status(400).json({ error: 'Invalid paybill selection. Must be VehicleTill (824 9102) or UtilityTill (481 0294).' });
       }
 
-      const formattedRef = refCode.toUpperCase().trim();
-      const numAmount = Number(amount);
-      const paybillName = tillNumber === 'VehicleTill' ? 'Vehicle Fleet Till (No. 824 9102)' : 'Operating Utility Till (No. 481 0294)';
-
-      let member: any = null;
-
-      if (memberId) {
-        // Fetch All Members
-        const allMembers = await safeDbOperation(
-          async (firestoreDb) => {
-            const snap = await firestoreDb.collection('members').get();
-            return snap.docs.map(doc => doc.data());
-          },
-          () => localStore.members,
-          'members'
-        );
-
-        member = allMembers.find(m => m.id === memberId);
-        if (!member) {
-          return res.status(404).json({ error: 'Sacco Member profile not found.' });
-        }
-      }
-
-      const txId = 't-mpesa-' + Date.now();
-      const newTx = {
-        id: txId,
-        timestamp: new Date().toISOString(),
-        memberId: member ? member.id : '',
-        memberName: member ? member.name : 'Direct Cashless Depositor',
-        vehiclePlate: member ? (member.vehicleAssigned || '') : '',
-        description: `M-Pesa payment of KES ${numAmount.toLocaleString()} received on ${paybillName} for ${category}. Ref: ${formattedRef}. Reconciled.`,
-        refCode: formattedRef,
-        type: 'Credit' as const,
-        category: category,
-        amount: numAmount,
-        recorderName: `M-Pesa Gateway (${req.headers['x-sacco-user-role'] || 'System'})`,
-        tillNumber: tillNumber
-      };
-
-      const savedTx = await createLedgerTransaction(newTx);
+      const payment = await processIncomingPayment({
+        source: 'Manual',
+        refCode,
+        amount,
+        shortcode: tillNumber === 'UtilityTill' ? '4810294' : '8249102',
+        memberId,
+        category,
+        recorderName: `M-Pesa Gateway (${req.headers['x-sacco-user-role'] || 'System'})`
+      });
 
       res.status(200).json({
         status: 'success',
-        transaction: savedTx
+        payment
       });
 
     } catch (error: any) {

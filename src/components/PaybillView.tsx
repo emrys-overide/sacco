@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import type { Member, Transaction } from '../types';
+import type { Member, PaymentRecord, Transaction } from '../types';
 import { 
   Smartphone, 
   CheckCircle2, 
@@ -57,6 +57,7 @@ export default function PaybillView({
   const [regConsumerSecret, setRegConsumerSecret] = useState('m1eXDG1Fs9IPjIoGF9dvqECG5pCggAjfWWLF82BmjwITQmkSTpFWozqoPRMNOz6d');
   const [regShortcode, setRegShortcode] = useState('8249102');
   const [regMode, setRegMode] = useState<'sandbox' | 'production'>('sandbox');
+  const [callbackBaseUrl, setCallbackBaseUrl] = useState(() => window.location.origin);
   const [regResult, setRegResult] = useState<any>(null);
   const [isRegistering, setIsRegistering] = useState(false);
 
@@ -70,6 +71,9 @@ export default function PaybillView({
 
   // Ledgers State
   const [mpesaTransactions, setMpesaTransactions] = useState<Transaction[]>([]);
+  const [paymentRecords, setPaymentRecords] = useState<PaymentRecord[]>([]);
+  const [reconcileSelections, setReconcileSelections] = useState<Record<string, string>>({});
+  const [reconcilingPaymentId, setReconcilingPaymentId] = useState('');
   const [isDataLoading, setIsDataLoading] = useState(false);
 
   // Security headers helper
@@ -156,6 +160,12 @@ export default function PaybillView({
         txs = await txRes.json();
       }
 
+      const paymentsRes = await fetch('/api/payments', { headers });
+      let payments: PaymentRecord[] = [];
+      if (paymentsRes.ok) {
+        payments = await paymentsRes.json();
+      }
+
       // Filter M-Pesa transactions (containing mpesa or matching TillType)
       const filteredTxs = txs.filter((t: Transaction) => 
         t.tillNumber === 'VehicleTill' || 
@@ -168,6 +178,7 @@ export default function PaybillView({
       filteredTxs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
       setMpesaTransactions(filteredTxs);
+      setPaymentRecords(payments);
 
     } catch (err) {
       console.error('Error fetching paybill history:', err);
@@ -196,6 +207,13 @@ export default function PaybillView({
       return;
     }
 
+    const refExists = paymentRecords.some(payment => payment.refCode.toUpperCase() === refCode.trim().toUpperCase()) ||
+      mpesaTransactions.some(tx => tx.refCode.toUpperCase() === refCode.trim().toUpperCase());
+    if (refExists) {
+      setErrorMsg(`Reference ${refCode.trim().toUpperCase()} already exists. Confirm the payment before trying again.`);
+      return;
+    }
+
     setIsLoading(true);
     try {
       const res = await fetch('/api/mpesa/log-payment', {
@@ -215,8 +233,12 @@ export default function PaybillView({
         throw new Error(err.error || 'Failed to log cashless payment.');
       }
 
-      await res.json();
-      setSuccessMsg(`Cashless payment logged successfully. Ref: ${refCode.toUpperCase()}`);
+      const data = await res.json();
+      setSuccessMsg(
+        data.payment?.status === 'Unmatched'
+          ? `Payment ${refCode.toUpperCase()} was captured and queued for reconciliation.`
+          : `Payment ${refCode.toUpperCase()} was captured and reconciled.`
+      );
       
       // Reset form variables
       setAmount('');
@@ -318,8 +340,9 @@ export default function PaybillView({
 
     setIsRegistering(true);
     try {
-      const confirmationUrl = `${window.location.origin}/api/mpesa/c2b-confirmation`;
-      const validationUrl = `${window.location.origin}/api/mpesa/c2b-validation`;
+      const baseUrl = callbackBaseUrl.replace(/\/+$/, '');
+      const confirmationUrl = `${baseUrl}/api/mpesa/c2b-confirmation`;
+      const validationUrl = `${baseUrl}/api/mpesa/c2b-validation`;
 
       const res = await fetch('/api/mpesa/register-url', {
         method: 'POST',
@@ -351,12 +374,55 @@ export default function PaybillView({
     }
   };
 
+  const handleReconcilePayment = async (paymentId: string) => {
+    const memberId = reconcileSelections[paymentId];
+    if (!memberId) {
+      setErrorMsg('Select a member before reconciling this payment.');
+      return;
+    }
+
+    setReconcilingPaymentId(paymentId);
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    try {
+      const res = await fetch(`/api/payments/${paymentId}/reconcile`, {
+        method: 'POST',
+        headers: getSaccoSecurityHeaders(),
+        body: JSON.stringify({ memberId })
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Payment reconciliation failed.');
+      }
+
+      setSuccessMsg(`Payment ${data.refCode} reconciled to ${data.memberName}.`);
+      await fetchHistory();
+      if (onRefreshData) {
+        onRefreshData();
+      }
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Payment reconciliation failed.');
+    } finally {
+      setReconcilingPaymentId('');
+    }
+  };
+
   // Helper to filter items in the tables based on searching
   const filteredTxs = mpesaTransactions.filter(t => 
     t.refCode.toLowerCase().includes(searchTerm.toLowerCase()) ||
     (t.memberName || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
     t.category.toLowerCase().includes(searchTerm.toLowerCase())
   );
+  const filteredPayments = paymentRecords.filter(payment =>
+    payment.refCode.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    payment.status.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    payment.payerName.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    (payment.memberName || '').toLowerCase().includes(searchTerm.toLowerCase())
+  );
+  const unmatchedPayments = filteredPayments.filter(payment => payment.status === 'Unmatched');
+  const reconciledPayments = filteredPayments.filter(payment => payment.status === 'Reconciled');
+  const duplicatePayments = filteredPayments.filter(payment => payment.status === 'Duplicate');
 
   return (
     <div className="flex-1 p-8 overflow-y-auto bg-slate-50 font-sans flex flex-col space-y-6 min-h-0">
@@ -377,7 +443,7 @@ export default function PaybillView({
             Cashless Paybill Gateway
           </h2>
           <p className="text-xs text-slate-400 max-w-2xl leading-normal">
-            Sowetamu Sacco processes cashless mobile payments using two segregated M-Pesa tills. Use this screen to record received payments manually. Reconciled entries automatically update member shares and savings balances.
+            Sowetamu Sacco processes cashless mobile payments using two segregated M-Pesa tills. Live Daraja callbacks create payment records automatically and post matched payments into the ledger.
           </p>
         </div>
 
@@ -457,6 +523,25 @@ export default function PaybillView({
           </div>
         </div>
 
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 shrink-0">
+        <div className="bg-white border border-slate-200 rounded-lg p-3">
+          <p className="text-[9px] font-black uppercase text-slate-400 tracking-wider font-mono">Payment Records</p>
+          <p className="text-lg font-black text-slate-900 mt-1">{paymentRecords.length}</p>
+        </div>
+        <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3">
+          <p className="text-[9px] font-black uppercase text-emerald-700 tracking-wider font-mono">Reconciled</p>
+          <p className="text-lg font-black text-emerald-800 mt-1">{reconciledPayments.length}</p>
+        </div>
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+          <p className="text-[9px] font-black uppercase text-amber-700 tracking-wider font-mono">Unmatched</p>
+          <p className="text-lg font-black text-amber-800 mt-1">{unmatchedPayments.length}</p>
+        </div>
+        <div className="bg-rose-50 border border-rose-200 rounded-lg p-3">
+          <p className="text-[9px] font-black uppercase text-rose-700 tracking-wider font-mono">Duplicates</p>
+          <p className="text-lg font-black text-rose-800 mt-1">{duplicatePayments.length}</p>
+        </div>
       </div>
 
       {/* CORE WORKSPACE CONTENT */}
@@ -669,10 +754,27 @@ export default function PaybillView({
                   Safaricom Webhook API Config
                 </h3>
                 <p className="text-[11px] text-slate-500 mt-1 leading-normal">
-                  Connect your real Safaricom M-Pesa C2B Paybill in production or sandbox. Copy these live endpoints into your Safaricom Developer Portal (Daraja) dashboard:
+                  Connect your real Safaricom M-Pesa C2B Paybill in production or sandbox. The callback base must be a public HTTPS URL reachable by Safaricom.
                 </p>
 
                 <div className="mt-3 space-y-2 text-[10px] font-mono">
+                  <div>
+                    <label className="block text-[8px] uppercase tracking-wider font-bold text-slate-500 font-sans mb-1">
+                      Public Callback Base URL
+                    </label>
+                    <input
+                      type="url"
+                      value={callbackBaseUrl}
+                      onChange={(e) => setCallbackBaseUrl(e.target.value)}
+                      className="w-full px-2.5 py-2 border border-slate-300 rounded bg-white text-[11px] font-mono text-slate-800"
+                    />
+                    {!callbackBaseUrl.startsWith('https://') && (
+                      <p className="text-[9px] text-amber-700 mt-1 font-sans">
+                        Live Daraja callbacks require a public HTTPS URL. Use your deployed domain or an HTTPS tunnel during testing.
+                      </p>
+                    )}
+                  </div>
+
                   <div className="bg-slate-900 text-slate-200 p-2.5 rounded-lg border border-slate-950 space-y-1 relative group">
                     <span className="text-[8px] uppercase tracking-wider font-bold text-amber-400 block font-sans">
                       1. C2B Validation URL (POST)
@@ -680,7 +782,7 @@ export default function PaybillView({
                     <input
                       type="text"
                       readOnly
-                      value={`${window.location.origin}/api/mpesa/c2b-validation`}
+                      value={`${callbackBaseUrl.replace(/\/+$/, '')}/api/mpesa/c2b-validation`}
                       className="bg-transparent text-emerald-400 font-bold border-none outline-none w-full select-all"
                     />
                     <span className="text-[9px] text-slate-400 block font-sans">
@@ -695,7 +797,7 @@ export default function PaybillView({
                     <input
                       type="text"
                       readOnly
-                      value={`${window.location.origin}/api/mpesa/c2b-confirmation`}
+                      value={`${callbackBaseUrl.replace(/\/+$/, '')}/api/mpesa/c2b-confirmation`}
                       className="bg-transparent text-emerald-400 font-bold border-none outline-none w-full select-all"
                     />
                     <span className="text-[9px] text-slate-400 block font-sans">
@@ -988,6 +1090,66 @@ export default function PaybillView({
 
           {/* DUAL-TILL LEDGERS JUXTAPOSITION */}
           <div className="grid grid-cols-1 gap-6">
+            <div className="bg-white border-2 border-amber-200 rounded-xl p-5 shadow-xs flex flex-col min-h-0 max-h-[360px]">
+              <div className="flex justify-between items-center border-b border-slate-100 pb-3 shrink-0">
+                <h3 className="text-xs font-black text-slate-950 uppercase tracking-widest flex items-center">
+                  <AlertCircle className="w-4 h-4 text-amber-600 mr-2" />
+                  Unmatched Payment Queue
+                </h3>
+                <span className="text-[10px] font-mono text-amber-700 bg-amber-50 px-2 py-0.5 rounded font-bold">
+                  {unmatchedPayments.length} pending
+                </span>
+              </div>
+
+              <div className="overflow-y-auto flex-1 mt-3 space-y-3">
+                {unmatchedPayments.length === 0 ? (
+                  <div className="text-center py-10 text-slate-400 text-xs border border-dashed border-slate-200 rounded-xl bg-slate-50/50">
+                    <CheckCircle2 className="w-8 h-8 text-emerald-400 mx-auto mb-2" />
+                    <p className="font-bold font-mono text-slate-600">No unmatched payments.</p>
+                    <p className="text-[10px] text-slate-500 mt-0.5">Live callbacks that cannot match a member will appear here.</p>
+                  </div>
+                ) : (
+                  unmatchedPayments.map(payment => (
+                    <div key={payment.id} className="border border-amber-200 bg-amber-50/40 rounded-lg p-3 space-y-2">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-[11px] font-black text-slate-900 font-mono">{payment.refCode}</p>
+                          <p className="text-[10px] text-slate-500">
+                            {payment.payerName} • KES {payment.amount.toLocaleString()} • {payment.accountReference || 'No account ref'}
+                          </p>
+                          <p className="text-[9px] text-amber-700 font-mono mt-0.5">{payment.note}</p>
+                        </div>
+                        <span className="text-[9px] font-black uppercase tracking-wider text-amber-700 bg-amber-100 px-2 py-0.5 rounded">
+                          {payment.source}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-[1fr_auto] gap-2">
+                        <select
+                          value={reconcileSelections[payment.id] || ''}
+                          onChange={(e) => setReconcileSelections(prev => ({ ...prev, [payment.id]: e.target.value }))}
+                          className="w-full px-2 py-1.5 border border-amber-200 bg-white rounded text-[11px] font-bold text-slate-700"
+                        >
+                          <option value="">Select member</option>
+                          {members.map(member => (
+                            <option key={member.id} value={member.id}>
+                              {member.name} ({member.vehicleAssigned || member.phoneNumber})
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => handleReconcilePayment(payment.id)}
+                          disabled={reconcilingPaymentId === payment.id}
+                          className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded text-[10px] font-black uppercase tracking-wider"
+                        >
+                          {reconcilingPaymentId === payment.id ? 'Saving' : 'Reconcile'}
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
             
             {/* 1. M-PESA CASHLESS TRANSACTIONS */}
             <div className="bg-white border-2 border-slate-200 rounded-xl p-5 shadow-xs flex flex-col min-h-0 max-h-[350px]">

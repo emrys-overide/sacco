@@ -58,6 +58,31 @@ export interface Transaction {
   reversedBy?: string;
 }
 
+export type PaymentStatus = 'Pending' | 'Reconciled' | 'Unmatched' | 'Rejected' | 'Duplicate';
+export type PaymentSource = 'Manual' | 'Webhook';
+export type PaymentMatchMethod = 'Member ID' | 'Vehicle Plate' | 'Phone Number' | 'Manual Assignment' | 'None';
+
+export interface PaymentRecord {
+  id: string;
+  timestamp: string;
+  source: PaymentSource;
+  status: PaymentStatus;
+  refCode: string;
+  amount: number;
+  tillNumber: Exclude<TillType, 'None'>;
+  category: TransactionCategory;
+  accountReference: string;
+  payerName: string;
+  payerPhone: string;
+  memberId?: string;
+  memberName?: string;
+  vehiclePlate?: string;
+  matchMethod: PaymentMatchMethod;
+  transactionId?: string;
+  note?: string;
+  rawPayload?: unknown;
+}
+
 export interface TargetCollection {
   name: string;
   current: number;
