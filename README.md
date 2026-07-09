@@ -1,17 +1,16 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# Sacco
 
-# Run and deploy your AI Studio app
+A finance app that tracks transactions and simplifies ledger filling and report writing.
 
-This contains everything you need to run your app locally.
+## Run and Deploy
+
+This contains everything you need to run the app locally.
 
 View your app in AI Studio: https://ai.studio/apps/cd852607-4b11-4562-8401-e653d5fca910
 
 ## Run Locally
 
-**Prerequisites:**  Node.js
-
+**Prerequisites:** Node.js
 
 1. Install dependencies:
    `npm install`
