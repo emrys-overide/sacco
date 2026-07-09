@@ -314,8 +314,8 @@ export default function PaybillView({
     setIsRegistering(true);
     try {
       const baseUrl = callbackBaseUrl.replace(/\/+$/, '');
-      const confirmationUrl = `${baseUrl}/api/mpesa/c2b-confirmation`;
-      const validationUrl = `${baseUrl}/api/mpesa/c2b-validation`;
+      const confirmationUrl = `${baseUrl}/api/daraja/c2b-confirmation`;
+      const validationUrl = `${baseUrl}/api/daraja/c2b-validation`;
 
       const res = await fetch('/api/mpesa/register-url', {
         method: 'POST',
@@ -755,7 +755,7 @@ export default function PaybillView({
                     <input
                       type="text"
                       readOnly
-                      value={`${callbackBaseUrl.replace(/\/+$/, '')}/api/mpesa/c2b-validation`}
+                      value={`${callbackBaseUrl.replace(/\/+$/, '')}/api/daraja/c2b-validation`}
                       className="bg-transparent text-emerald-400 font-bold border-none outline-none w-full select-all"
                     />
                     <span className="text-[9px] text-slate-400 block font-sans">
@@ -770,7 +770,7 @@ export default function PaybillView({
                     <input
                       type="text"
                       readOnly
-                      value={`${callbackBaseUrl.replace(/\/+$/, '')}/api/mpesa/c2b-confirmation`}
+                      value={`${callbackBaseUrl.replace(/\/+$/, '')}/api/daraja/c2b-confirmation`}
                       className="bg-transparent text-emerald-400 font-bold border-none outline-none w-full select-all"
                     />
                     <span className="text-[9px] text-slate-400 block font-sans">

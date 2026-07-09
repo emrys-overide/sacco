@@ -1154,7 +1154,7 @@ async function startServer() {
   });
 
   // API 15A: Safaricom C2B validation webhook (Public - called by Daraja)
-  app.post('/api/mpesa/c2b-validation', async (req, res) => {
+  const handleC2BValidation = async (req: express.Request, res: express.Response) => {
     try {
       const { TransAmount } = req.body;
       const numAmount = Number(TransAmount);
@@ -1177,10 +1177,13 @@ async function startServer() {
         ResultDesc: 'Rejected: Internal Validation Exception'
       });
     }
-  });
+  };
+
+  app.post('/api/mpesa/c2b-validation', handleC2BValidation);
+  app.post('/api/daraja/c2b-validation', handleC2BValidation);
 
   // API 15B: Safaricom C2B confirmation webhook (Public - called by Daraja)
-  app.post('/api/mpesa/c2b-confirmation', async (req, res) => {
+  const handleC2BConfirmation = async (req: express.Request, res: express.Response) => {
     try {
       const { TransID, TransAmount, BusinessShortCode, BillRefNumber, MSISDN, FirstName, MiddleName, LastName } = req.body;
 
@@ -1212,7 +1215,10 @@ async function startServer() {
       console.error('M-Pesa Confirmation Webhook Error:', error);
       return res.status(500).json({ error: error.message });
     }
-  });
+  };
+
+  app.post('/api/mpesa/c2b-confirmation', handleC2BConfirmation);
+  app.post('/api/daraja/c2b-confirmation', handleC2BConfirmation);
 
   // API 16: Log direct M-Pesa cashless payment for both paybills
   app.post('/api/mpesa/log-payment', authenticateSaccoUser, async (req, res) => {
