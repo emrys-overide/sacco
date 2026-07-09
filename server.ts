@@ -1,5 +1,7 @@
+import 'dotenv/config';
 import express from 'express';
 import path from 'path';
+import crypto from 'node:crypto';
 import { createServer as createViteServer } from 'vite';
 import { Firestore } from '@google-cloud/firestore';
 import { getSaccoUserKey } from './src/lib/auth';
@@ -96,21 +98,180 @@ const mockTransactions: Transaction[] = [
   { id: 't-5', timestamp: '2026-06-29T16:10:00Z', description: 'Printer toners and stationary procurement', refCode: 'VCH00220B', type: 'Debit', category: 'Office Expenses', amount: 2500, recorderName: 'Beatrice Ndwiga', tillNumber: 'None' }
 ];
 
-const mockMPesaConfig = {
-  consumerKey: 'DARAJA_SANDBOX_CONSUMER_KEY_824910',
-  consumerSecret: 'DARAJA_SANDBOX_CONSUMER_SECRET_824910',
-  shortcode: '824910',
-  passkey: 'bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919',
-  callbackUrl: 'https://api.sowetamusacco.co.ke/v1/mpesa/callback',
-  mode: 'sandbox' as const,
-  stkPushEnabled: true
+type AuthorizedUser = typeof mockUsers[number];
+type DarajaMode = 'sandbox' | 'production';
+
+const JWT_ISSUER = 'matatu-sacco-management-system';
+const JWT_AUDIENCE = 'sacco-api';
+const DEFAULT_JWT_EXPIRES_SECONDS = 60 * 60 * 8;
+const DEV_JWT_SECRET = 'dev-only-change-me-sacco-jwt-secret';
+
+function base64Url(input: string | Buffer): string {
+  return Buffer.from(input)
+    .toString('base64')
+    .replace(/=/g, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_');
+}
+
+function decodeBase64Url(input: string): Buffer {
+  const normalized = input.replace(/-/g, '+').replace(/_/g, '/');
+  return Buffer.from(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '='), 'base64');
+}
+
+function getJwtSecret(): string {
+  const secret = process.env.JWT_SECRET;
+  if (!secret && process.env.NODE_ENV === 'production') {
+    throw new HttpError(500, 'JWT_SECRET must be configured in production.', 'JWT_SECRET_MISSING');
+  }
+  return secret || DEV_JWT_SECRET;
+}
+
+function getJwtExpiresSeconds(): number {
+  const seconds = Number(process.env.JWT_EXPIRES_SECONDS || DEFAULT_JWT_EXPIRES_SECONDS);
+  return Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds) : DEFAULT_JWT_EXPIRES_SECONDS;
+}
+
+function signJwt(user: AuthorizedUser): { token: string; expiresAt: string } {
+  const now = Math.floor(Date.now() / 1000);
+  const exp = now + getJwtExpiresSeconds();
+  const header = { alg: 'HS256', typ: 'JWT' };
+  const payload = {
+    iss: JWT_ISSUER,
+    aud: JWT_AUDIENCE,
+    sub: user.id,
+    email: user.email,
+    role: user.role,
+    name: user.name,
+    iat: now,
+    exp
+  };
+
+  const encodedHeader = base64Url(JSON.stringify(header));
+  const encodedPayload = base64Url(JSON.stringify(payload));
+  const signingInput = `${encodedHeader}.${encodedPayload}`;
+  const signature = crypto.createHmac('sha256', getJwtSecret()).update(signingInput).digest();
+
+  return {
+    token: `${signingInput}.${base64Url(signature)}`,
+    expiresAt: new Date(exp * 1000).toISOString()
+  };
+}
+
+function verifyJwt(token: string): AuthorizedUser {
+  const parts = token.split('.');
+  if (parts.length !== 3) {
+    throw new HttpError(401, 'Invalid authentication token format.', 'INVALID_JWT');
+  }
+
+  const [encodedHeader, encodedPayload, encodedSignature] = parts;
+  const header = JSON.parse(decodeBase64Url(encodedHeader).toString('utf8'));
+  if (header.alg !== 'HS256' || header.typ !== 'JWT') {
+    throw new HttpError(401, 'Unsupported authentication token algorithm.', 'INVALID_JWT_ALG');
+  }
+
+  const expectedSignature = crypto
+    .createHmac('sha256', getJwtSecret())
+    .update(`${encodedHeader}.${encodedPayload}`)
+    .digest();
+  const suppliedSignature = decodeBase64Url(encodedSignature);
+
+  if (
+    suppliedSignature.length !== expectedSignature.length ||
+    !crypto.timingSafeEqual(suppliedSignature, expectedSignature)
+  ) {
+    throw new HttpError(401, 'Authentication token signature validation failed.', 'INVALID_JWT_SIGNATURE');
+  }
+
+  const payload = JSON.parse(decodeBase64Url(encodedPayload).toString('utf8'));
+  const now = Math.floor(Date.now() / 1000);
+  if (payload.iss !== JWT_ISSUER || payload.aud !== JWT_AUDIENCE || Number(payload.exp) <= now) {
+    throw new HttpError(401, 'Authentication token is expired or not valid for this API.', 'JWT_EXPIRED');
+  }
+
+  const user = mockUsers.find(item => item.id === payload.sub && item.email === payload.email);
+  if (!user || user.role !== payload.role) {
+    throw new HttpError(401, 'Authentication token user is no longer authorized.', 'JWT_USER_REVOKED');
+  }
+
+  return user;
+}
+
+function getDarajaMode(value: unknown = process.env.DARAJA_MODE): DarajaMode {
+  return value === 'production' ? 'production' : 'sandbox';
+}
+
+function getDarajaBaseUrl(mode: DarajaMode): string {
+  return mode === 'production' ? 'https://api.safaricom.co.ke' : 'https://sandbox.safaricom.co.ke';
+}
+
+function getDarajaSafeConfig(overrides: { shortcode?: unknown; mode?: unknown } = {}) {
+  const mode = getDarajaMode(overrides.mode);
+  const shortcode = String(overrides.shortcode || process.env.DARAJA_SHORTCODE || '').trim();
+  const callbackBaseUrl = String(process.env.DARAJA_CALLBACK_BASE_URL || process.env.APP_URL || '').replace(/\/+$/, '');
+  const consumerKey = process.env.DARAJA_CONSUMER_KEY || '';
+  const consumerSecret = process.env.DARAJA_CONSUMER_SECRET || '';
+
+  return {
+    mode,
+    shortcode,
+    callbackBaseUrl,
+    hasConsumerKey: Boolean(consumerKey),
+    hasConsumerSecret: Boolean(consumerSecret),
+    credentialsConfigured: Boolean(consumerKey && consumerSecret),
+    stkPushEnabled: process.env.DARAJA_STK_PUSH_ENABLED !== 'false'
+  };
+}
+
+function getDarajaCredentials() {
+  const consumerKey = process.env.DARAJA_CONSUMER_KEY || '';
+  const consumerSecret = process.env.DARAJA_CONSUMER_SECRET || '';
+  if (!consumerKey || !consumerSecret) {
+    throw new HttpError(400, 'Daraja credentials are not configured. Set DARAJA_CONSUMER_KEY and DARAJA_CONSUMER_SECRET on the server.', 'DARAJA_CREDENTIALS_MISSING');
+  }
+  return { consumerKey, consumerSecret };
+}
+
+async function getDarajaAccessToken(mode: DarajaMode): Promise<string> {
+  const { consumerKey, consumerSecret } = getDarajaCredentials();
+  const authHeader = Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64');
+  const tokenRes = await fetch(`${getDarajaBaseUrl(mode)}/oauth/v1/generate?grant_type=client_credentials`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Basic ${authHeader}`
+    }
+  });
+
+  if (!tokenRes.ok) {
+    const errText = await tokenRes.text();
+    throw new HttpError(400, `Failed to authenticate with Safaricom Daraja API. Status: ${tokenRes.status}`, errText);
+  }
+
+  const tokenData = await tokenRes.json() as any;
+  if (!tokenData.access_token) {
+    throw new HttpError(400, 'Safaricom response did not contain an access_token.', 'DARAJA_TOKEN_MISSING');
+  }
+
+  return tokenData.access_token;
+}
+
+const defaultMPesaConfig = {
+  shortcode: process.env.DARAJA_SHORTCODE || '',
+  callbackUrl: process.env.DARAJA_CALLBACK_BASE_URL || '',
+  mode: getDarajaMode(),
+  stkPushEnabled: process.env.DARAJA_STK_PUSH_ENABLED !== 'false'
 };
 
-// Firebase Setup - Utilizing direct server access via @google-cloud/firestore
-const db = new Firestore({
-  projectId: "gen-lang-client-0172640004",
-  databaseId: "ai-studio-matatusaccomanag-cd852607-4b11-4562-8401-e653d5fca910"
-});
+// Firestore Setup - credentials and project identifiers are supplied by environment.
+const firestoreOptions: ConstructorParameters<typeof Firestore>[0] = {};
+const firestoreProjectId = process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT;
+if (firestoreProjectId) {
+  firestoreOptions.projectId = firestoreProjectId;
+}
+if (process.env.FIRESTORE_DATABASE_ID) {
+  firestoreOptions.databaseId = process.env.FIRESTORE_DATABASE_ID;
+}
+const db = new Firestore(firestoreOptions);
 
 // Sacco Memory-Backed Ledger Storage (Fallback engine for development and sandbox stability)
 const localStore = {
@@ -119,7 +280,7 @@ const localStore = {
   vehicles: [...mockVehicles],
   transactions: [...mockTransactions],
   payments: [] as PaymentRecord[],
-  mpesaConfig: { ...mockMPesaConfig }
+  mpesaConfig: { ...defaultMPesaConfig }
 };
 
 // State flag indicating if we are using Firestore or Local Fallback
@@ -572,32 +733,53 @@ async function reconcilePaymentRecord(paymentId: string, memberId: string, recor
   });
 }
 
-// Sacco Security OS Authentication Middleware
-const authenticateSaccoUser = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+function authenticateLegacyHeaders(req: express.Request): AuthorizedUser {
   const email = req.headers['x-sacco-user-email'] as string;
   const role = req.headers['x-sacco-user-role'] as UserRole;
   const key = req.headers['x-sacco-user-key'] as string;
 
   if (!email || !role || !key) {
-    return res.status(401).json({ error: 'Sacco Security OS: Missing authentication credentials headers.' });
+    throw new HttpError(401, 'Sacco Security OS: Missing authentication credentials.', 'AUTH_MISSING');
   }
 
   const user = mockUsers.find(u => u.email.toLowerCase() === email.toLowerCase());
   if (!user) {
-    return res.status(401).json({ error: 'Sacco Security OS: User not found in authorized register.' });
+    throw new HttpError(401, 'Sacco Security OS: User not found in authorized register.', 'AUTH_USER_NOT_FOUND');
   }
 
   if (user.role !== role) {
-    return res.status(401).json({ error: 'Sacco Security OS: Role validation mismatch.' });
+    throw new HttpError(401, 'Sacco Security OS: Role validation mismatch.', 'AUTH_ROLE_MISMATCH');
   }
 
   if (key !== getSaccoUserKey(user.role as UserRole)) {
-    return res.status(401).json({ error: 'Sacco Security OS: Invalid role security credential key.' });
+    throw new HttpError(401, 'Sacco Security OS: Invalid role security credential key.', 'AUTH_BAD_KEY');
   }
 
-  // Attach user to request
-  (req as any).user = user;
-  next();
+  return user;
+}
+
+// Sacco Security OS Authentication Middleware
+const authenticateSaccoUser = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  try {
+    const authHeader = req.headers.authorization || '';
+    if (authHeader.startsWith('Bearer ')) {
+      (req as any).user = verifyJwt(authHeader.slice('Bearer '.length).trim());
+      return next();
+    }
+
+    const allowLegacyHeaders = process.env.ALLOW_LEGACY_AUTH_HEADERS === 'true' || process.env.NODE_ENV !== 'production';
+    if (allowLegacyHeaders) {
+      (req as any).user = authenticateLegacyHeaders(req);
+      return next();
+    }
+
+    return res.status(401).json({ error: 'Bearer JWT authentication is required.' });
+  } catch (error: any) {
+    if (error instanceof HttpError) {
+      return res.status(error.status).json({ error: error.message, code: error.code });
+    }
+    return res.status(401).json({ error: 'Invalid authentication token.' });
+  }
 };
 
 const requireRoles = (allowedRoles: string[]) => {
@@ -657,12 +839,6 @@ async function seedDatabaseIfEmpty() {
       }
     }
 
-    // 5. Seed M-Pesa Config
-    const mpesaConfigSnap = await db.collection('mpesaConfig').limit(1).get();
-    if (mpesaConfigSnap.empty) {
-      console.log("Seeding mpesaConfig collection...");
-      await db.collection('mpesaConfig').doc('active').set(mockMPesaConfig);
-    }
     console.log("Firestore seeding checks complete.");
   } catch (error: any) {
     console.warn("[Sacco Ledger OS] Firestore connection/permission unavailable on startup. Automatically operating in high-security Local Ledger Fallback Mode.", error.message || error);
@@ -672,7 +848,7 @@ async function seedDatabaseIfEmpty() {
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT || 3000);
 
   app.use(express.json());
 
@@ -682,6 +858,26 @@ async function startServer() {
   // API 1: Healthcheck
   app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', database: useFirestore ? 'connected' : 'local_fallback', timestamp: new Date().toISOString() });
+  });
+
+  app.post('/api/auth/login', (req, res) => {
+    try {
+      const { email, password } = req.body || {};
+      const user = mockUsers.find(item => item.email.toLowerCase() === String(email || '').toLowerCase());
+      if (!user || password !== getSaccoUserKey(user.role as UserRole)) {
+        return res.status(401).json({ error: 'Invalid Sacco profile or password.' });
+      }
+
+      const signed = signJwt(user);
+      res.json({
+        user,
+        token: signed.token,
+        expiresAt: signed.expiresAt,
+        tokenType: 'Bearer'
+      });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
   });
 
   // Protect all functional API endpoints with Sacco Zero-Trust validation
@@ -967,32 +1163,17 @@ async function startServer() {
 
   // API 14: Get active M-Pesa configuration
   app.get('/api/mpesa/config', authenticateSaccoUser, async (req, res) => {
-    try {
-      const config = await safeDbOperation(
-        async (firestoreDb) => {
-          const doc = await firestoreDb.collection('mpesaConfig').doc('active').get();
-          return doc.exists ? doc.data() : localStore.mpesaConfig;
-        },
-        () => localStore.mpesaConfig,
-        'mpesaConfig'
-      );
-      res.json(config);
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
+    res.json(getDarajaSafeConfig());
   });
 
-  // API 15: Save/Update active M-Pesa configuration (Admin/Treasurer)
-  app.post('/api/mpesa/config', requireRoles(['Chairman', 'Treasurer']), async (req, res) => {
+  // API 15: Save/Update non-secret M-Pesa configuration (Admin/Treasurer)
+  app.post('/api/mpesa/config', authenticateSaccoUser, requireRoles(['Chairman', 'Treasurer']), async (req, res) => {
     try {
       const newConfig = req.body;
       const updated = {
-        consumerKey: newConfig.consumerKey || '',
-        consumerSecret: newConfig.consumerSecret || '',
         shortcode: newConfig.shortcode || '',
-        passkey: newConfig.passkey || '',
         callbackUrl: newConfig.callbackUrl || '',
-        mode: newConfig.mode || 'sandbox',
+        mode: getDarajaMode(newConfig.mode),
         stkPushEnabled: newConfig.stkPushEnabled !== false
       };
 
@@ -1005,60 +1186,39 @@ async function startServer() {
         },
         'mpesaConfig'
       );
-      res.json(updated);
+      res.json({
+        ...updated,
+        ...getDarajaSafeConfig({ shortcode: updated.shortcode, mode: updated.mode })
+      });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
 
-  // API 15C: Safaricom C2B register URL (Allows user to programmatically register Webhook URLs using their keys)
+  // API 15C: Safaricom C2B register URL using server-side Daraja credentials
   app.post('/api/mpesa/register-url', authenticateSaccoUser, async (req, res) => {
     try {
-      const { consumerKey, consumerSecret, shortcode, mode, confirmationUrl, validationUrl } = req.body;
+      const { shortcode, mode, confirmationUrl, validationUrl } = req.body;
+      const darajaConfig = getDarajaSafeConfig({ shortcode, mode });
       
-      if (!consumerKey || !consumerSecret || !shortcode) {
-        return res.status(400).json({ error: 'Missing required parameters: consumerKey, consumerSecret, and shortcode are required.' });
+      if (!darajaConfig.shortcode) {
+        return res.status(400).json({ error: 'Missing required parameter: shortcode is required or DARAJA_SHORTCODE must be configured.' });
+      }
+      if (!confirmationUrl || !validationUrl) {
+        return res.status(400).json({ error: 'Confirmation and validation callback URLs are required.' });
       }
 
-      const isProduction = mode === 'production';
-      const baseUrl = isProduction ? 'https://api.safaricom.co.ke' : 'https://sandbox.safaricom.co.ke';
-
-      // 1. Generate Auth Token
-      const authHeader = Buffer.from(`${consumerKey.trim()}:${consumerSecret.trim()}`).toString('base64');
-      const tokenRes = await fetch(`${baseUrl}/oauth/v1/generate?grant_type=client_credentials`, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Basic ${authHeader}`
-        }
-      });
-
-      if (!tokenRes.ok) {
-        const errText = await tokenRes.text();
-        return res.status(400).json({ 
-          error: `Failed to authenticate with Safaricom Daraja API. Status: ${tokenRes.status}`,
-          details: errText 
-        });
-      }
-
-      const tokenData = await tokenRes.json() as any;
-      const accessToken = tokenData.access_token;
-
-      if (!accessToken) {
-        return res.status(400).json({ 
-          error: 'Safaricom response did not contain an access_token.', 
-          details: tokenData 
-        });
-      }
+      const accessToken = await getDarajaAccessToken(darajaConfig.mode);
 
       // 2. Call Safaricom C2B Register URL API
-      const registerRes = await fetch(`${baseUrl}/mpesa/c2b/v1/registerurl`, {
+      const registerRes = await fetch(`${getDarajaBaseUrl(darajaConfig.mode)}/mpesa/c2b/v1/registerurl`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${accessToken}`
         },
         body: JSON.stringify({
-          ShortCode: String(shortcode).trim(),
+          ShortCode: darajaConfig.shortcode,
           ResponseType: 'Completed',
           ConfirmationURL: confirmationUrl,
           ValidationURL: validationUrl
@@ -1075,18 +1235,19 @@ async function startServer() {
 
     } catch (error: any) {
       console.error('M-Pesa Webhook Registration Error:', error);
-      return res.status(500).json({ error: error.message });
+      return sendApiError(res, error);
     }
   });
 
   // API 15D: Safaricom C2B sandbox simulation trigger
   app.post('/api/mpesa/simulate-c2b', authenticateSaccoUser, async (req, res) => {
     try {
-      const { consumerKey, consumerSecret, shortcode, mode, amount, msisdn, billRefNumber } = req.body;
+      const { shortcode, mode, amount, msisdn, billRefNumber } = req.body;
+      const darajaConfig = getDarajaSafeConfig({ shortcode, mode });
 
-      if (!consumerKey || !consumerSecret || !shortcode || !amount || !msisdn) {
+      if (!darajaConfig.shortcode || !amount || !msisdn) {
         return res.status(400).json({
-          error: 'Missing required parameters: consumerKey, consumerSecret, shortcode, amount, and msisdn are required.'
+          error: 'Missing required parameters: shortcode, amount, and msisdn are required.'
         });
       }
 
@@ -1095,45 +1256,20 @@ async function startServer() {
         return res.status(400).json({ error: 'Amount must be greater than zero.' });
       }
 
-      const isProduction = mode === 'production';
-      if (isProduction) {
+      if (darajaConfig.mode === 'production') {
         return res.status(400).json({ error: 'C2B simulation is only available in Daraja sandbox mode.' });
       }
 
-      const baseUrl = 'https://sandbox.safaricom.co.ke';
-      const authHeader = Buffer.from(`${consumerKey.trim()}:${consumerSecret.trim()}`).toString('base64');
-      const tokenRes = await fetch(`${baseUrl}/oauth/v1/generate?grant_type=client_credentials`, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Basic ${authHeader}`
-        }
-      });
+      const accessToken = await getDarajaAccessToken('sandbox');
 
-      if (!tokenRes.ok) {
-        const errText = await tokenRes.text();
-        return res.status(400).json({
-          error: `Failed to authenticate with Safaricom Daraja sandbox. Status: ${tokenRes.status}`,
-          details: errText
-        });
-      }
-
-      const tokenData = await tokenRes.json() as any;
-      const accessToken = tokenData.access_token;
-      if (!accessToken) {
-        return res.status(400).json({
-          error: 'Safaricom response did not contain an access_token.',
-          details: tokenData
-        });
-      }
-
-      const simulateRes = await fetch(`${baseUrl}/mpesa/c2b/v1/simulate`, {
+      const simulateRes = await fetch(`${getDarajaBaseUrl('sandbox')}/mpesa/c2b/v1/simulate`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${accessToken}`
         },
         body: JSON.stringify({
-          ShortCode: String(shortcode).trim(),
+          ShortCode: darajaConfig.shortcode,
           CommandID: 'CustomerPayBillOnline',
           Amount: numAmount,
           Msisdn: String(msisdn).replace(/\D/g, ''),
@@ -1149,7 +1285,7 @@ async function startServer() {
       });
     } catch (error: any) {
       console.error('M-Pesa Sandbox C2B Simulation Error:', error);
-      return res.status(500).json({ error: error.message });
+      return sendApiError(res, error);
     }
   });
 
@@ -1240,7 +1376,7 @@ async function startServer() {
         shortcode: tillNumber === 'UtilityTill' ? '4810294' : '8249102',
         memberId,
         category,
-        recorderName: `M-Pesa Gateway (${req.headers['x-sacco-user-role'] || 'System'})`
+        recorderName: `M-Pesa Gateway (${(req as any).user?.role || 'System'})`
       });
 
       res.status(200).json({

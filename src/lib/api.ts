@@ -13,10 +13,10 @@ export class ApiError extends Error {
   }
 }
 
-export async function fetchSaccoJson<T>(url: string, user: User, init: RequestInit = {}): Promise<T> {
+export async function fetchSaccoJson<T>(url: string, user: User, init: RequestInit = {}, token?: string): Promise<T> {
   const headers = new Headers(init.headers);
 
-  Object.entries(buildSaccoAuthHeaders(user)).forEach(([key, value]) => {
+  Object.entries(buildSaccoAuthHeaders(user, token)).forEach(([key, value]) => {
     headers.set(key, value);
   });
 
@@ -47,7 +47,8 @@ export async function fetchSaccoJson<T>(url: string, user: User, init: RequestIn
 export function postSaccoJson<TResponse, TPayload>(
   url: string,
   user: User,
-  payload: TPayload
+  payload: TPayload,
+  token?: string
 ): Promise<TResponse> {
   return fetchSaccoJson<TResponse>(url, user, {
     method: 'POST',
@@ -55,5 +56,5 @@ export function postSaccoJson<TResponse, TPayload>(
       'Content-Type': 'application/json'
     },
     body: JSON.stringify(payload)
-  });
+  }, token);
 }

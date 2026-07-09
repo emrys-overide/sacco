@@ -20,14 +20,24 @@ import {
 interface PaybillViewProps {
   members: Member[];
   currentUserRole: string;
-  currentUserName: string;
+  authToken: string;
   onRefreshData?: () => void;
+}
+
+interface DarajaPublicConfig {
+  mode: 'sandbox' | 'production';
+  shortcode: string;
+  callbackBaseUrl: string;
+  hasConsumerKey: boolean;
+  hasConsumerSecret: boolean;
+  credentialsConfigured: boolean;
+  stkPushEnabled: boolean;
 }
 
 export default function PaybillView({
   members,
   currentUserRole,
-  currentUserName,
+  authToken,
   onRefreshData
 }: PaybillViewProps) {
   // Logger Form State
@@ -50,13 +60,12 @@ export default function PaybillView({
   const [isSimulating, setIsSimulating] = useState(false);
 
   // Webhook Registration Tool State
-  const [regConsumerKey, setRegConsumerKey] = useState('Aw0MwYUv30Rekn214WOmtnwLd1G2Pwsrzx7MHjmna16z6KUP');
-  const [regConsumerSecret, setRegConsumerSecret] = useState('m1eXDG1Fs9IPjIoGF9dvqECG5pCggAjfWWLF82BmjwITQmkSTpFWozqoPRMNOz6d');
   const [regShortcode, setRegShortcode] = useState('600000');
   const [regMode, setRegMode] = useState<'sandbox' | 'production'>('sandbox');
   const [callbackBaseUrl, setCallbackBaseUrl] = useState(() => window.location.origin);
   const [regResult, setRegResult] = useState<any>(null);
   const [isRegistering, setIsRegistering] = useState(false);
+  const [darajaConfig, setDarajaConfig] = useState<DarajaPublicConfig | null>(null);
 
   // Status states
   const [isLoading, setIsLoading] = useState(false);
@@ -75,30 +84,9 @@ export default function PaybillView({
 
   // Security headers helper
   const getSaccoSecurityHeaders = () => {
-    let key = 'saccopass123';
-    let email = 'treasurer@sacco.co.ke';
-    if (currentUserRole === 'Treasurer') {
-      email = 'treasurer@sacco.co.ke';
-      key = 'treasurer@sacco';
-    } else if (currentUserRole === 'Secretary') {
-      email = 'secretary@sacco.co.ke';
-      key = 'secretary@sacco';
-    } else if (currentUserRole === 'Chairman') {
-      email = 'chairman@sacco.co.ke';
-      key = 'chairman@sacco';
-    } else if (currentUserRole === 'Auditor') {
-      email = 'auditor@sacco.co.ke';
-      key = 'auditor@sacco';
-    } else if (currentUserRole === 'Accountant') {
-      email = 'accountant@sacco.co.ke';
-      key = 'accountant@sacco';
-    }
-
     return {
       'Content-Type': 'application/json',
-      'x-sacco-user-email': email,
-      'x-sacco-user-role': currentUserRole,
-      'x-sacco-user-key': key
+      Authorization: `Bearer ${authToken}`
     };
   };
 
@@ -140,6 +128,19 @@ export default function PaybillView({
     setIsDataLoading(true);
     try {
       const headers = getSaccoSecurityHeaders();
+      const configRes = await fetch('/api/mpesa/config', { headers });
+      if (configRes.ok) {
+        const config = await configRes.json();
+        setDarajaConfig(config);
+        setRegMode(config.mode || 'sandbox');
+        if (config.shortcode) {
+          setRegShortcode(config.shortcode);
+          setSimShortcode(config.shortcode);
+        }
+        if (config.callbackBaseUrl) {
+          setCallbackBaseUrl(config.callbackBaseUrl);
+        }
+      }
       
       const txRes = await fetch('/api/transactions', { headers });
       let txs: Transaction[] = [];
@@ -176,7 +177,7 @@ export default function PaybillView({
 
   useEffect(() => {
     fetchHistory();
-  }, [currentUserRole]);
+  }, [currentUserRole, authToken]);
 
   // Handle direct logging submission
   const handleSubmitLog = async (e: React.FormEvent) => {
@@ -267,8 +268,6 @@ export default function PaybillView({
         method: 'POST',
         headers: getSaccoSecurityHeaders(),
         body: JSON.stringify({
-          consumerKey: regConsumerKey.trim(),
-          consumerSecret: regConsumerSecret.trim(),
           shortcode: simShortcode.trim(),
           mode: regMode,
           amount: Number(simAmount),
@@ -306,8 +305,13 @@ export default function PaybillView({
     setSuccessMsg(null);
     setErrorMsg(null);
 
-    if (!regConsumerKey.trim() || !regConsumerSecret.trim() || !regShortcode.trim()) {
-      setErrorMsg('Consumer Key, Secret, and Shortcode are required for registration.');
+    if (!darajaConfig?.credentialsConfigured) {
+      setErrorMsg('Daraja server credentials are not configured. Set DARAJA_CONSUMER_KEY and DARAJA_CONSUMER_SECRET in the server environment.');
+      return;
+    }
+
+    if (!regShortcode.trim()) {
+      setErrorMsg('Shortcode is required for registration.');
       return;
     }
 
@@ -321,8 +325,6 @@ export default function PaybillView({
         method: 'POST',
         headers: getSaccoSecurityHeaders(),
         body: JSON.stringify({
-          consumerKey: regConsumerKey.trim(),
-          consumerSecret: regConsumerSecret.trim(),
           shortcode: regShortcode.trim(),
           mode: regMode,
           confirmationUrl,
@@ -790,33 +792,22 @@ export default function PaybillView({
                     </span>
                   </h4>
                   <p className="text-[11px] text-slate-600 mt-0.5 leading-normal">
-                    Enter your Consumer Key and Secret to automatically register the above Webhook URLs with your Safaricom Sandbox/Production paybill:
+                    Daraja credentials are read from the server environment. This screen never exposes the Consumer Key or Secret to the browser.
                   </p>
                 </div>
 
                 <form onSubmit={handleRegisterUrls} className="space-y-2">
-                  <div>
-                    <label className="block text-[9px] font-bold uppercase text-slate-500 font-mono">
-                      Consumer Key
-                    </label>
-                    <input
-                      type="text"
-                      value={regConsumerKey}
-                      onChange={(e) => setRegConsumerKey(e.target.value)}
-                      className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-[11px] font-mono"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-[9px] font-bold uppercase text-slate-500 font-mono">
-                      Consumer Secret
-                    </label>
-                    <input
-                      type="password"
-                      value={regConsumerSecret}
-                      onChange={(e) => setRegConsumerSecret(e.target.value)}
-                      className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-[11px] font-mono"
-                    />
+                  <div className={`p-2.5 rounded border text-[10px] ${
+                    darajaConfig?.credentialsConfigured
+                      ? 'bg-emerald-100 border-emerald-200 text-emerald-900'
+                      : 'bg-amber-50 border-amber-200 text-amber-800'
+                  }`}>
+                    <p className="font-black uppercase tracking-wider font-mono">
+                      {darajaConfig?.credentialsConfigured ? 'Server Credentials Ready' : 'Server Credentials Missing'}
+                    </p>
+                    <p className="mt-0.5 leading-normal">
+                      Consumer Key: {darajaConfig?.hasConsumerKey ? 'configured' : 'missing'} • Consumer Secret: {darajaConfig?.hasConsumerSecret ? 'configured' : 'missing'}
+                    </p>
                   </div>
 
                   <div className="grid grid-cols-2 gap-2">
@@ -859,7 +850,7 @@ export default function PaybillView({
 
                   <button
                     type="submit"
-                    disabled={isRegistering}
+                    disabled={isRegistering || !darajaConfig?.credentialsConfigured}
                     className="w-full py-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-black text-[10px] uppercase tracking-wider rounded border border-slate-950 flex items-center justify-center space-x-1.5 transition-all shadow-sm"
                   >
                     {isRegistering ? (
@@ -984,7 +975,7 @@ export default function PaybillView({
                 {/* SIMULATE BUTTON */}
                 <button
                   type="submit"
-                  disabled={isSimulating}
+                  disabled={isSimulating || !darajaConfig?.credentialsConfigured}
                   className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-black text-xs uppercase tracking-wider rounded-lg border border-emerald-700 flex items-center justify-center space-x-2 transition-all shadow-md"
                 >
                   {isSimulating ? (

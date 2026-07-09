@@ -91,11 +91,11 @@ export interface TargetCollection {
 }
 
 export interface MPesaConfig {
-  consumerKey: string;
-  consumerSecret: string;
   shortcode: string;
-  passkey: string;
   callbackUrl: string;
   mode: 'sandbox' | 'production';
   stkPushEnabled: boolean;
+  hasConsumerKey?: boolean;
+  hasConsumerSecret?: boolean;
+  credentialsConfigured?: boolean;
 }

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import type { User, Member, Vehicle, Transaction, UserRole } from './types';
 import { mockUsers, mockMembers, mockVehicles, mockTransactions } from './data/mockData';
 import { Menu, ShieldAlert, Search, X } from 'lucide-react';
-import { canRole, STORAGE_KEYS } from './lib/auth';
+import { canRole, getSaccoUserKey, STORAGE_KEYS } from './lib/auth';
 import { ApiError, fetchSaccoJson, postSaccoJson } from './lib/api';
 
 // Subcomponents
@@ -27,6 +27,9 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
     const stored = localStorage.getItem(STORAGE_KEYS.currentUser);
     return stored ? JSON.parse(stored) : null;
+  });
+  const [authToken, setAuthToken] = useState<string>(() => {
+    return localStorage.getItem(STORAGE_KEYS.authToken) || '';
   });
 
   // Security Alert State
@@ -64,7 +67,7 @@ export default function App() {
 
   // Sync state from server on component mount or profile switch
   useEffect(() => {
-    if (!currentUser) {
+    if (!currentUser || !authToken) {
       setIsLoading(false);
       return;
     }
@@ -74,9 +77,9 @@ export default function App() {
       try {
         setIsLoading(true);
         const [mData, vData, tData] = await Promise.all([
-          fetchSaccoJson<Member[]>('/api/members', currentUser),
-          fetchSaccoJson<Vehicle[]>('/api/vehicles', currentUser),
-          fetchSaccoJson<Transaction[]>('/api/transactions', currentUser)
+          fetchSaccoJson<Member[]>('/api/members', currentUser, {}, authToken),
+          fetchSaccoJson<Vehicle[]>('/api/vehicles', currentUser, {}, authToken),
+          fetchSaccoJson<Transaction[]>('/api/transactions', currentUser, {}, authToken)
         ]);
 
         if (active) {
@@ -94,25 +97,52 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [currentUser, refreshTrigger]);
+  }, [currentUser, authToken, refreshTrigger]);
 
   const handleRefreshData = () => {
     setRefreshTrigger(prev => prev + 1);
   };
 
-  const handleLogin = (user: User) => {
+  const handleLogin = (user: User, token: string) => {
     setCurrentUser(user);
+    setAuthToken(token);
     localStorage.setItem(STORAGE_KEYS.currentUser, JSON.stringify(user));
+    localStorage.setItem(STORAGE_KEYS.authToken, token);
   };
 
   const handleLogout = () => {
     setCurrentUser(null);
+    setAuthToken('');
     localStorage.removeItem(STORAGE_KEYS.currentUser);
+    localStorage.removeItem(STORAGE_KEYS.authToken);
   };
 
-  const handleSwitchUser = (user: User) => {
-    setCurrentUser(user);
-    localStorage.setItem(STORAGE_KEYS.currentUser, JSON.stringify(user));
+  const handleSwitchUser = async (user: User) => {
+    try {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          email: user.email,
+          password: getSaccoUserKey(user.role)
+        })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Could not switch Sacco profile.');
+      }
+      setCurrentUser(data.user);
+      setAuthToken(data.token);
+      localStorage.setItem(STORAGE_KEYS.currentUser, JSON.stringify(data.user));
+      localStorage.setItem(STORAGE_KEYS.authToken, data.token);
+    } catch (error: any) {
+      setSecurityAlert({
+        title: "Profile Switch Blocked",
+        message: error.message || 'The server could not issue a JWT for the selected profile.'
+      });
+    }
   };
 
   const handleApproveBlueprint = () => {
@@ -182,7 +212,7 @@ export default function App() {
       return;
     }
     
-    postSaccoJson<Member, typeof newMemberData>('/api/members', currentUser, newMemberData)
+    postSaccoJson<Member, typeof newMemberData>('/api/members', currentUser, newMemberData, authToken)
     .then(newMember => {
       setMembers(prev => [newMember, ...prev]);
     })
@@ -216,10 +246,10 @@ export default function App() {
       return;
     }
 
-    postSaccoJson<Vehicle, typeof newVehicleData>('/api/vehicles', currentUser, newVehicleData)
+    postSaccoJson<Vehicle, typeof newVehicleData>('/api/vehicles', currentUser, newVehicleData, authToken)
     .then(newVehicle => {
       setVehicles(prev => [newVehicle, ...prev]);
-      fetchSaccoJson<Member[]>('/api/members', currentUser).then(data => setMembers(data));
+      fetchSaccoJson<Member[]>('/api/members', currentUser, {}, authToken).then(data => setMembers(data));
     })
     .catch(err => {
       console.error("Error registering vehicle:", err);
@@ -254,9 +284,9 @@ export default function App() {
     };
 
     try {
-      const newTx = await postSaccoJson<Transaction, typeof payload>('/api/transactions', currentUser, payload);
+      const newTx = await postSaccoJson<Transaction, typeof payload>('/api/transactions', currentUser, payload, authToken);
       setTransactions(prev => [newTx, ...prev]);
-      const data = await fetchSaccoJson<Member[]>('/api/members', currentUser);
+      const data = await fetchSaccoJson<Member[]>('/api/members', currentUser, {}, authToken);
       setMembers(data);
     } catch (err) {
       console.error("Error posting ledger entry:", err);
@@ -282,14 +312,14 @@ export default function App() {
 
     const reversal = await fetchSaccoJson<Transaction>(`/api/transactions/${transactionId}/reverse`, currentUser, {
       method: 'POST'
-    });
+    }, authToken);
     setTransactions(prev => [reversal, ...prev]);
-    const data = await fetchSaccoJson<Member[]>('/api/members', currentUser);
+    const data = await fetchSaccoJson<Member[]>('/api/members', currentUser, {}, authToken);
     setMembers(data);
   };
 
   // Auth Screen Guard
-  if (!currentUser) {
+  if (!currentUser || !authToken) {
     return <LoginModal onLoginSuccess={handleLogin} />;
   }
 
@@ -400,7 +430,7 @@ export default function App() {
           <PaybillView
             members={members}
             currentUserRole={currentUser?.role || 'Member'}
-            currentUserName={currentUser?.name || 'Anonymous Member'}
+            authToken={authToken}
             onRefreshData={handleRefreshData}
           />
         );

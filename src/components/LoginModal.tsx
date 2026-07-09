@@ -1,16 +1,17 @@
 import React, { useState } from 'react';
-import { User, UserRole } from '../types';
+import { User } from '../types';
 import { mockUsers } from '../data/mockData';
-import { ShieldCheck, LogIn, Sparkles, UserCheck } from 'lucide-react';
+import { ShieldCheck, LogIn } from 'lucide-react';
 
 interface LoginModalProps {
-  onLoginSuccess: (user: User) => void;
+  onLoginSuccess: (user: User, token: string) => void;
 }
 
 export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
   const [selectedEmail, setSelectedEmail] = useState(mockUsers[0].email);
   const [password, setPassword] = useState('treasurer@sacco');
   const [error, setError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Automatically update pre-populated password on profile change to make user testing seamless
   React.useEffect(() => {
@@ -23,23 +24,34 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
     }
   }, [selectedEmail]);
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    const user = mockUsers.find(u => u.email === selectedEmail);
-    if (user) {
-      let expectedPass = 'saccopass123';
-      if (user.role === 'Treasurer') expectedPass = 'treasurer@sacco';
-      else if (user.role === 'Secretary') expectedPass = 'secretary@sacco';
-      else if (user.role === 'Chairman') expectedPass = 'chairman@sacco';
-      else if (user.role === 'Auditor') expectedPass = 'auditor@sacco';
+    setError('');
+    setIsSubmitting(true);
 
-      if (password === expectedPass) {
-        onLoginSuccess(user);
-      } else {
-        setError(`Incorrect password for ${user.role}. Secure systems require the correct role-specific key.`);
+    try {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          email: selectedEmail,
+          password
+        })
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Login failed.');
       }
-    } else {
-      setError('Invalid user selected.');
+
+      onLoginSuccess(data.user, data.token);
+    } catch (err: any) {
+      const user = mockUsers.find(u => u.email === selectedEmail);
+      setError(err.message || `Incorrect password for ${user?.role || 'selected user'}. Secure systems require the correct role-specific key.`);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -124,11 +136,12 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
             <div>
               <button
                 type="submit"
+                disabled={isSubmitting}
                 id="login-submit-button"
-                className="w-full py-3 px-4 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs uppercase tracking-wider rounded-xl shadow-xs transition-all flex items-center justify-center space-x-2 cursor-pointer"
+                className="w-full py-3 px-4 bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white font-bold text-xs uppercase tracking-wider rounded-xl shadow-xs transition-all flex items-center justify-center space-x-2 cursor-pointer"
               >
                 <LogIn className="w-4 h-4" />
-                <span>Log In Securely</span>
+                <span>{isSubmitting ? 'Issuing Token...' : 'Log In Securely'}</span>
               </button>
             </div>
           </form>
