@@ -569,7 +569,6 @@ export default function PaybillView({
                     type="text"
                     value={phoneNumber}
                     onChange={(e) => setPhoneNumber(e.target.value)}
-                    placeholder="e.g. +254 712 345 678"
                     className="w-full px-3 py-2 border-2 border-slate-200 rounded-lg focus:outline-none focus:border-slate-900 font-mono text-[11px]"
                   />
                 </div>
@@ -592,7 +591,6 @@ export default function PaybillView({
                       type="text"
                       value={refCode}
                       onChange={(e) => setRefCode(e.target.value.toUpperCase())}
-                      placeholder="e.g. QG910AD8"
                       maxLength={10}
                       className="w-full pl-9 pr-3 py-2 border-2 border-slate-200 rounded-lg focus:outline-none focus:border-slate-900 font-mono font-bold text-slate-900 text-[12px] uppercase"
                     />
@@ -625,7 +623,6 @@ export default function PaybillView({
                       type="number"
                       value={amount}
                       onChange={(e) => setAmount(e.target.value)}
-                      placeholder="e.g. 1500"
                       className="w-full px-3 py-2 border-2 border-slate-200 rounded-lg focus:outline-none focus:border-slate-900 font-bold text-emerald-600 text-[13px]"
                     />
                   </div>
@@ -731,7 +728,6 @@ export default function PaybillView({
                       type="text"
                       value={regConsumerKey}
                       onChange={(e) => setRegConsumerKey(e.target.value)}
-                      placeholder="Enter Consumer Key"
                       className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-[11px] font-mono"
                     />
                   </div>
@@ -744,7 +740,6 @@ export default function PaybillView({
                       type="password"
                       value={regConsumerSecret}
                       onChange={(e) => setRegConsumerSecret(e.target.value)}
-                      placeholder="Enter Consumer Secret"
                       className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-[11px] font-mono"
                     />
                   </div>
@@ -758,7 +753,6 @@ export default function PaybillView({
                         type="text"
                         value={regShortcode}
                         onChange={(e) => setRegShortcode(e.target.value)}
-                        placeholder="e.g. 8249102"
                         className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-[11px] font-mono font-bold"
                       />
                     </div>
@@ -871,7 +865,6 @@ export default function PaybillView({
                     type="text"
                     value={simAccount}
                     onChange={(e) => setSimAccount(e.target.value)}
-                    placeholder="e.g. m-1 or KCB 123A"
                     className="w-full px-3 py-2 border-2 border-slate-200 rounded-lg focus:outline-none focus:border-slate-900 font-mono font-bold"
                   />
                 </div>
@@ -886,7 +879,6 @@ export default function PaybillView({
                       type="text"
                       value={simPhone}
                       onChange={(e) => setSimPhone(e.target.value)}
-                      placeholder="e.g. 254712345678"
                       className="w-full px-3 py-2 border-2 border-slate-200 rounded-lg focus:outline-none focus:border-slate-900 font-mono"
                     />
                   </div>
@@ -899,7 +891,6 @@ export default function PaybillView({
                       type="number"
                       value={simAmount}
                       onChange={(e) => setSimAmount(e.target.value)}
-                      placeholder="e.g. 1500"
                       className="w-full px-3 py-2 border-2 border-slate-200 rounded-lg focus:outline-none focus:border-slate-900 font-bold text-emerald-600"
                     />
                   </div>
@@ -991,7 +982,6 @@ export default function PaybillView({
               type="text"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              placeholder="Quick search ledgers by M-Pesa Ref, Payer Name, Category, etc..."
               className="w-full pl-9 pr-3 py-2.5 border-2 border-slate-200 rounded-xl bg-white text-xs focus:outline-none focus:border-slate-900"
             />
           </div>

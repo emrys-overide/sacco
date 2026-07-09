@@ -225,7 +225,6 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
               </span>
               <input
                 type="text"
-                placeholder="Search name, ID or phone..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 className="w-full pl-9 pr-4 py-2 border border-slate-200 rounded text-xs bg-slate-50 focus:outline-none focus:border-slate-900 focus:bg-white transition-colors"
@@ -506,7 +505,6 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                       </span>
                       <input
                         type="text"
-                        placeholder="Filter transactions..."
                         value={memberTxSearch}
                         onChange={(e) => setMemberTxSearch(e.target.value)}
                         className="w-full pl-7 pr-3 py-1 border border-slate-200 rounded text-[11px] bg-slate-50 focus:outline-none focus:border-slate-900 focus:bg-white"
@@ -600,7 +598,6 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                 <input
                   type="text"
                   required
-                  placeholder="e.g. Mercy Njeri"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   className="w-full p-2 border border-slate-200 rounded text-xs focus:outline-none focus:border-emerald-600"
@@ -615,7 +612,6 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                   <input
                     type="text"
                     required
-                    placeholder="e.g. 33445566"
                     value={idNumber}
                     onChange={(e) => setIdNumber(e.target.value)}
                     className="w-full p-2 border border-slate-200 rounded text-xs font-mono focus:outline-none focus:border-emerald-600"
@@ -629,7 +625,6 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                   <input
                     type="text"
                     required
-                    placeholder="e.g. +254 712 888 222"
                     value={phoneNumber}
                     onChange={(e) => setPhoneNumber(e.target.value)}
                     className="w-full p-2 border border-slate-200 rounded text-xs focus:outline-none focus:border-emerald-600"
@@ -643,7 +638,6 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                 </label>
                 <input
                   type="text"
-                  placeholder="e.g. KDD 445Z"
                   value={assignedVehicle}
                   onChange={(e) => setAssignedVehicle(e.target.value.toUpperCase())}
                   className="w-full p-2 border border-slate-200 rounded text-xs font-mono uppercase focus:outline-none focus:border-emerald-600"

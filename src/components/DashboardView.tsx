@@ -806,7 +806,6 @@ export default function DashboardView({
                   <input
                     type="text"
                     required
-                    placeholder="e.g. QG91HA03BF"
                     value={refCode}
                     onChange={(e) => setRefCode(e.target.value.toUpperCase())}
                     className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-mono uppercase focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100"
@@ -837,7 +836,6 @@ export default function DashboardView({
                   <input
                     type="number"
                     required
-                    placeholder="e.g. 5000"
                     value={amount}
                     onChange={(e) => setAmount(e.target.value)}
                     className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-mono focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100"
@@ -897,7 +895,6 @@ export default function DashboardView({
                 </label>
                 <input
                   type="text"
-                  placeholder="e.g. Daily collection payment Route 237"
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                   className="w-full p-2.5 border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100"

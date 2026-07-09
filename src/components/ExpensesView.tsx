@@ -333,7 +333,6 @@ export default function ExpensesView({
               <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
               <input
                 type="text"
-                placeholder="Search expense, code, recipient..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 className="pl-9 pr-4 py-1.5 w-full sm:w-56 border border-slate-200 rounded text-xs focus:outline-none focus:border-emerald-600 bg-slate-50"
@@ -568,7 +567,6 @@ export default function ExpensesView({
                 <input
                   type="text"
                   required
-                  placeholder="e.g. June Office Rent, Kasarani Route safety banners"
                   value={title}
                   onChange={(e) => setTitle(e.target.value)}
                   className="w-full p-2.5 border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-rose-600"
@@ -583,7 +581,6 @@ export default function ExpensesView({
                   <input
                     type="number"
                     required
-                    placeholder="e.g. 15000"
                     value={amount}
                     onChange={(e) => setAmount(e.target.value)}
                     className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-mono focus:outline-none focus:border-rose-600"
@@ -596,7 +593,6 @@ export default function ExpensesView({
                   </label>
                   <input
                     type="text"
-                    placeholder="e.g. Safaricom PLC"
                     value={recipient}
                     onChange={(e) => setRecipient(e.target.value)}
                     className="w-full p-2.5 border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-rose-600"
@@ -609,7 +605,6 @@ export default function ExpensesView({
                   Additional Notes / Details
                 </label>
                 <textarea
-                  placeholder="Describe items, purchase approvals, or audit details for this expense log..."
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
                   rows={2}

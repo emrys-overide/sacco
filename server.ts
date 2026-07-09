@@ -97,7 +97,11 @@ const localStore = {
 };
 
 // State flag indicating if we are using Firestore or Local Fallback
-let useFirestore = true;
+let useFirestore = Boolean(
+  process.env.GOOGLE_APPLICATION_CREDENTIALS ||
+  process.env.GOOGLE_CLOUD_PROJECT ||
+  process.env.GCLOUD_PROJECT
+);
 
 // Helper to safely execute any Firestore database operation with automatic, zero-downtime local ledger fallback
 async function safeDbOperation<T>(
@@ -343,6 +347,11 @@ const requireRoles = (allowedRoles: string[]) => {
 
 // Initialize/Seed Firestore collections with Mock Data if empty
 async function seedDatabaseIfEmpty() {
+  if (!useFirestore) {
+    console.log("No Google Cloud credentials detected. Skipping Firestore seeding and using Local Ledger Fallback Mode.");
+    return;
+  }
+
   console.log("Checking Firestore collections for initial seeding...");
   try {
     // 1. Seed Users

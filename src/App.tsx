@@ -494,7 +494,6 @@ export default function App() {
             </div>
             <input
               type="text"
-              placeholder="Search members, vehicles, M-Pesa refs..."
               value={globalSearchQuery}
               onChange={(e) => setGlobalSearchQuery(e.target.value)}
               className="w-full pl-9 pr-9 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium focus:outline-none focus:bg-white focus:border-blue-600 focus:ring-1 focus:ring-blue-600 transition-all placeholder-slate-400 text-slate-800 shadow-inner"

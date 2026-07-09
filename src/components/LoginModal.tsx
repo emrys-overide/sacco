@@ -111,7 +111,6 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-emerald-600 shadow-xs"
-                placeholder="Enter password"
                 required
               />
             </div>

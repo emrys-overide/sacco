@@ -144,7 +144,6 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
           </span>
           <input
             type="text"
-            placeholder="Search plate, owner or driver..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             className="w-full pl-9 pr-4 py-2 border border-slate-200 rounded text-xs bg-slate-50 focus:outline-none focus:border-emerald-600 focus:bg-white"
@@ -243,7 +242,6 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
                   <input
                     type="text"
                     required
-                    placeholder="e.g. KCJ 402X"
                     value={plateNumber}
                     onChange={(e) => setPlateNumber(e.target.value.toUpperCase())}
                     className="w-full p-2 border border-slate-200 rounded text-xs font-mono uppercase focus:outline-none focus:border-emerald-600"
@@ -275,7 +273,6 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
                 <input
                   type="text"
                   required
-                  placeholder="e.g. Francis Mwangi"
                   value={driverName}
                   onChange={(e) => setDriverName(e.target.value)}
                   className="w-full p-2 border border-slate-200 rounded text-xs focus:outline-none focus:border-emerald-600"
@@ -290,7 +287,6 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
                   <input
                     type="text"
                     required
-                    placeholder="e.g. +254 711 222 333"
                     value={driverPhone}
                     onChange={(e) => setDriverPhone(e.target.value)}
                     className="w-full p-2 border border-slate-200 rounded text-xs focus:outline-none focus:border-emerald-600"

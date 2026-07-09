@@ -585,7 +585,6 @@ export default function DailyCollectionsView({
                         value={row.operation}
                         disabled={isReadOnly}
                         onChange={(e) => handleUpdateRowField(row.no, 'operation', e.target.value.toUpperCase())}
-                        placeholder="TRIPS/STATUS"
                         className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono bg-transparent text-slate-700 text-xs rounded focus:outline-none focus:bg-white"
                       />
                     </td>
@@ -597,7 +596,6 @@ export default function DailyCollectionsView({
                         value={row.entranceFee || ''}
                         disabled={isReadOnly}
                         onChange={(e) => handleUpdateRowField(row.no, 'entranceFee', Number(e.target.value))}
-                        placeholder="0"
                         className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-emerald-800 font-bold text-xs rounded focus:outline-none focus:bg-white"
                       />
                     </td>
@@ -609,7 +607,6 @@ export default function DailyCollectionsView({
                         value={row.loanRepay || ''}
                         disabled={isReadOnly}
                         onChange={(e) => handleUpdateRowField(row.no, 'loanRepay', Number(e.target.value))}
-                        placeholder="0"
                         className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-slate-800 text-xs rounded focus:outline-none focus:bg-white"
                       />
                     </td>
@@ -621,7 +618,6 @@ export default function DailyCollectionsView({
                         value={row.savings || ''}
                         disabled={isReadOnly}
                         onChange={(e) => handleUpdateRowField(row.no, 'savings', Number(e.target.value))}
-                        placeholder="0"
                         className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-blue-800 font-bold text-xs rounded focus:outline-none focus:bg-white"
                       />
                     </td>
@@ -633,7 +629,6 @@ export default function DailyCollectionsView({
                         value={row.sTicket || ''}
                         disabled={isReadOnly}
                         onChange={(e) => handleUpdateRowField(row.no, 'sTicket', Number(e.target.value))}
-                        placeholder="0"
                         className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-amber-800 font-bold text-xs rounded focus:outline-none focus:bg-white"
                       />
                     </td>
@@ -645,7 +640,6 @@ export default function DailyCollectionsView({
                         value={row.legalFee || ''}
                         disabled={isReadOnly}
                         onChange={(e) => handleUpdateRowField(row.no, 'legalFee', Number(e.target.value))}
-                        placeholder="0"
                         className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-rose-800 font-bold text-xs rounded focus:outline-none focus:bg-white"
                       />
                     </td>
@@ -753,7 +747,6 @@ export default function DailyCollectionsView({
                     value={exp.description}
                     disabled={isReadOnly}
                     onChange={(e) => handleUpdateExpenseField(exp.no, idx, 'description', e.target.value)}
-                    placeholder="Describe daily field voucher expense..."
                     className="flex-1 px-2.5 py-1.5 border border-slate-200 rounded text-xs bg-transparent focus:outline-none focus:border-slate-900 focus:bg-white"
                   />
 
@@ -764,7 +757,6 @@ export default function DailyCollectionsView({
                       value={exp.amount || ''}
                       disabled={isReadOnly}
                       onChange={(e) => handleUpdateExpenseField(exp.no, idx, 'amount', Number(e.target.value))}
-                      placeholder="0"
                       className="w-full px-2 py-1 border border-slate-200 rounded text-right font-bold text-rose-700 text-xs bg-transparent focus:outline-none focus:border-slate-900 focus:bg-white"
                     />
                   </div>

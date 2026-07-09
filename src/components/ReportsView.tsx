@@ -1988,7 +1988,6 @@ export default function ReportsView({
                       <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">KES Voucher Amount</label>
                       <input
                         type="number"
-                        placeholder="e.g. 15000"
                         value={journalAmount}
                         onChange={(e) => setJournalAmount(e.target.value)}
                         className="w-full p-2 border border-slate-200 rounded font-mono text-xs focus:ring-1 focus:ring-emerald-600 focus:outline-none"
@@ -2018,7 +2017,6 @@ export default function ReportsView({
                       </div>
                       <input
                         type="text"
-                        placeholder="M-Pesa / Cash Voucher No."
                         value={journalRefCode}
                         onChange={(e) => setJournalRefCode(e.target.value)}
                         className="w-full p-2 border border-slate-200 rounded font-mono text-xs focus:ring-1 focus:ring-emerald-600 focus:outline-none uppercase"
@@ -2060,7 +2058,6 @@ export default function ReportsView({
                   <div>
                     <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Voucher Description / Audit Narrative</label>
                     <textarea
-                      placeholder="Enter precise bookkeeping explanation of transaction..."
                       value={journalDescription}
                       onChange={(e) => setJournalDescription(e.target.value)}
                       rows={2}
@@ -2248,7 +2245,6 @@ export default function ReportsView({
                   <div className="relative">
                     <input
                       type="text"
-                      placeholder="Search Narrative/Ref..."
                       value={ledgerSearch}
                       onChange={(e) => setLedgerSearch(e.target.value)}
                       className="w-full pl-8 pr-3 py-1.5 border border-slate-200 rounded text-xs focus:ring-1 focus:ring-emerald-600 focus:outline-none"
