@@ -3,7 +3,40 @@ import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { Firestore } from '@google-cloud/firestore';
 import { getSaccoUserKey } from './src/lib/auth';
-import type { UserRole } from './src/types';
+import type { TillType, Transaction, TransactionCategory, TransactionType, UserRole } from './src/types';
+
+const TRANSACTION_TYPES: readonly TransactionType[] = ['Credit', 'Debit'];
+const TRANSACTION_CATEGORIES: readonly TransactionCategory[] = [
+  'Daily Contribution',
+  'Registration Fee',
+  'Management Fee',
+  'Office Expenses',
+  'Petty Cash',
+  'Penalty',
+  'Utilities',
+  'Equipment'
+];
+const TILL_TYPES: readonly TillType[] = ['VehicleTill', 'UtilityTill', 'None'];
+const SHARES_ALLOCATION_RATE = 0.3;
+const SAVINGS_ALLOCATION_RATE = 0.7;
+
+class HttpError extends Error {
+  status: number;
+  code: string;
+
+  constructor(status: number, message: string, code = 'REQUEST_FAILED') {
+    super(message);
+    this.name = 'HttpError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
+type LedgerInput = Partial<Transaction> & {
+  description?: string;
+  refCode?: string;
+  amount?: number | string;
+};
 
 // Standard mock data to seed if database collections are empty
 const mockUsers = [
@@ -30,7 +63,7 @@ const mockVehicles = [
   { id: 'v-5', plateNumber: 'KCA 001X', ownerId: 'm-5', ownerName: 'Arap Sang', driverName: 'Douglas Mwangi', driverPhone: '+254 700 111 222', route: 'Nairobi - Thika (Route 237)', status: 'Maintenance', capacity: 14 }
 ];
 
-const mockTransactions = [
+const mockTransactions: Transaction[] = [
   { id: 't-1', timestamp: '2026-06-29T10:30:00Z', memberId: 'm-1', memberName: 'Samuel Gichuru', vehiclePlate: 'KBB 112L', description: 'Daily fleet collection contribution', refCode: 'MPX87A29DF', type: 'Credit', category: 'Daily Contribution', amount: 3500, recorderName: 'Timothy Mwangi', tillNumber: 'VehicleTill' },
   { id: 't-2', timestamp: '2026-06-29T11:15:00Z', memberId: 'm-2', memberName: 'James Kamau', vehiclePlate: 'KCJ 402X', description: 'Monthly driver registration fee payment', refCode: 'MPX91K882S', type: 'Credit', category: 'Registration Fee', amount: 5000, recorderName: 'Jane Wambui', tillNumber: 'UtilityTill' },
   { id: 't-3', timestamp: '2026-06-29T14:20:00Z', description: 'Office internet and utility bill payment', refCode: 'VCH00219A', type: 'Debit', category: 'Utilities', amount: 4500, recorderName: 'Jane Wambui', tillNumber: 'None' },
@@ -78,10 +111,194 @@ async function safeDbOperation<T>(
   try {
     return await operation(db);
   } catch (error: any) {
+    if (error instanceof HttpError) {
+      throw error;
+    }
     console.warn(`[Sacco Ledger OS] Firestore connection/permission unavailable for [${collectionName}]. Operating in high-security Local Ledger Fallback Mode.`, error.message || error);
     useFirestore = false;
     return Promise.resolve(fallback());
   }
+}
+
+function normalizeRefCode(refCode: unknown): string {
+  return String(refCode || '').trim().toUpperCase();
+}
+
+function normalizeTransactionInput(input: LedgerInput): Transaction {
+  const description = String(input.description || '').trim();
+  const refCode = normalizeRefCode(input.refCode);
+  const amount = Number(input.amount);
+  const type = (input.type || 'Credit') as TransactionType;
+  const category = (input.category || 'Daily Contribution') as TransactionCategory;
+  const tillNumber = (input.tillNumber || 'UtilityTill') as TillType;
+
+  if (!description) {
+    throw new HttpError(400, 'Transaction description is required.', 'MISSING_DESCRIPTION');
+  }
+  if (!refCode) {
+    throw new HttpError(400, 'Transaction reference code is required.', 'MISSING_REF_CODE');
+  }
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new HttpError(400, 'Transaction amount must be greater than zero.', 'INVALID_AMOUNT');
+  }
+  if (!TRANSACTION_TYPES.includes(type)) {
+    throw new HttpError(400, 'Transaction type must be Credit or Debit.', 'INVALID_TRANSACTION_TYPE');
+  }
+  if (!TRANSACTION_CATEGORIES.includes(category)) {
+    throw new HttpError(400, `Unsupported transaction category: ${category}`, 'INVALID_TRANSACTION_CATEGORY');
+  }
+  if (!TILL_TYPES.includes(tillNumber)) {
+    throw new HttpError(400, `Unsupported till number: ${tillNumber}`, 'INVALID_TILL');
+  }
+
+  return {
+    id: input.id || 't-' + Date.now(),
+    timestamp: input.timestamp || new Date().toISOString(),
+    memberId: input.memberId || '',
+    memberName: input.memberName || '',
+    vehiclePlate: input.vehiclePlate || '',
+    description,
+    refCode,
+    type,
+    category,
+    amount,
+    recorderName: input.recorderName || 'Sacco Ledger OS',
+    tillNumber,
+    reversalOf: input.reversalOf,
+    reversedAt: input.reversedAt,
+    reversedBy: input.reversedBy
+  };
+}
+
+function getDailyContributionBalanceDelta(tx: Transaction): { shares: number; savings: number } {
+  if (!tx.memberId || tx.category !== 'Daily Contribution') {
+    return { shares: 0, savings: 0 };
+  }
+
+  const direction = tx.type === 'Credit' ? 1 : -1;
+  return {
+    shares: direction * Math.round(tx.amount * SHARES_ALLOCATION_RATE),
+    savings: direction * Math.round(tx.amount * SAVINGS_ALLOCATION_RATE)
+  };
+}
+
+function applyLocalMemberBalance(tx: Transaction) {
+  const delta = getDailyContributionBalanceDelta(tx);
+  if (!delta.shares && !delta.savings) return;
+
+  const member = localStore.members.find(m => m.id === tx.memberId);
+  if (!member) {
+    throw new HttpError(404, 'Linked Sacco member profile was not found.', 'MEMBER_NOT_FOUND');
+  }
+
+  member.sharesAmount = Math.max(0, (member.sharesAmount || 0) + delta.shares);
+  member.savingsAmount = Math.max(0, (member.savingsAmount || 0) + delta.savings);
+}
+
+async function applyFirestoreMemberBalance(firestoreDb: Firestore, tx: Transaction) {
+  const delta = getDailyContributionBalanceDelta(tx);
+  if (!delta.shares && !delta.savings) return;
+
+  const memberRef = firestoreDb.collection('members').doc(tx.memberId || '');
+  const memberSnap = await memberRef.get();
+  if (!memberSnap.exists) {
+    throw new HttpError(404, 'Linked Sacco member profile was not found.', 'MEMBER_NOT_FOUND');
+  }
+
+  const currentMemberData = memberSnap.data() || {};
+  await memberRef.set({
+    ...currentMemberData,
+    sharesAmount: Math.max(0, Number(currentMemberData.sharesAmount || 0) + delta.shares),
+    savingsAmount: Math.max(0, Number(currentMemberData.savingsAmount || 0) + delta.savings)
+  }, { merge: true });
+}
+
+async function createLedgerTransaction(input: LedgerInput): Promise<Transaction> {
+  const tx = normalizeTransactionInput(input);
+
+  await safeDbOperation(
+    async (firestoreDb) => {
+      const duplicateSnap = await firestoreDb
+        .collection('transactions')
+        .where('refCode', '==', tx.refCode)
+        .limit(1)
+        .get();
+
+      if (!duplicateSnap.empty) {
+        throw new HttpError(409, `Reference code ${tx.refCode} already exists in the ledger.`, 'DUPLICATE_LEDGER_REF');
+      }
+
+      await applyFirestoreMemberBalance(firestoreDb, tx);
+      await firestoreDb.collection('transactions').doc(tx.id).set(tx);
+    },
+    () => {
+      const duplicate = localStore.transactions.some(t => normalizeRefCode(t.refCode) === tx.refCode);
+      if (duplicate) {
+        throw new HttpError(409, `Reference code ${tx.refCode} already exists in the ledger.`, 'DUPLICATE_LEDGER_REF');
+      }
+
+      applyLocalMemberBalance(tx);
+      localStore.transactions.push(tx);
+    },
+    'transactions'
+  );
+
+  return tx;
+}
+
+async function reverseLedgerTransaction(transactionId: string, recorderName: string): Promise<Transaction> {
+  const original = await safeDbOperation<Transaction | null>(
+    async (firestoreDb) => {
+      const snap = await firestoreDb.collection('transactions').doc(transactionId).get();
+      return snap.exists ? snap.data() as Transaction : null;
+    },
+    () => localStore.transactions.find(tx => tx.id === transactionId) || null,
+    'transactions'
+  );
+
+  if (!original) {
+    throw new HttpError(404, 'Transaction to reverse was not found.', 'TRANSACTION_NOT_FOUND');
+  }
+
+  const existingReversal = await safeDbOperation<Transaction | null>(
+    async (firestoreDb) => {
+      const snap = await firestoreDb
+        .collection('transactions')
+        .where('reversalOf', '==', original.id)
+        .limit(1)
+        .get();
+      return snap.empty ? null : snap.docs[0].data() as Transaction;
+    },
+    () => localStore.transactions.find(tx => tx.reversalOf === original.id) || null,
+    'transactions'
+  );
+
+  if (existingReversal) {
+    throw new HttpError(409, `Transaction ${original.refCode} has already been reversed.`, 'ALREADY_REVERSED');
+  }
+
+  return createLedgerTransaction({
+    memberId: original.memberId,
+    memberName: original.memberName,
+    vehiclePlate: original.vehiclePlate,
+    description: `Reversal of ${original.refCode}: ${original.description}`,
+    refCode: `REV-${original.refCode}-${Date.now().toString().slice(-6)}`,
+    type: original.type === 'Credit' ? 'Debit' : 'Credit',
+    category: original.category,
+    amount: original.amount,
+    recorderName,
+    tillNumber: original.tillNumber,
+    reversalOf: original.id,
+    reversedAt: new Date().toISOString(),
+    reversedBy: recorderName
+  });
+}
+
+function sendApiError(res: express.Response, error: any) {
+  if (error instanceof HttpError) {
+    return res.status(error.status).json({ error: error.message, code: error.code });
+  }
+  return res.status(500).json({ error: error.message || 'Unexpected server error.' });
 }
 
 // Sacco Security OS Authentication Middleware
@@ -353,76 +570,21 @@ async function startServer() {
   // API 8: Book a transaction (Authorized roles: Chairman, Treasurer, Accountant)
   app.post('/api/transactions', requireRoles(['Chairman', 'Treasurer', 'Accountant']), async (req, res) => {
     try {
-      const txData = req.body;
-      if (!txData.description || !txData.refCode || !txData.amount) {
-        return res.status(400).json({ error: 'Description, Ref Code, and Amount are required.' });
-      }
-      
-      const transactionId = txData.id || 't-' + Date.now();
-      const newTx = {
-        id: transactionId,
-        timestamp: txData.timestamp || new Date().toISOString(),
-        memberId: txData.memberId || '',
-        memberName: txData.memberName || '',
-        vehiclePlate: txData.vehiclePlate || '',
-        description: txData.description,
-        refCode: txData.refCode.toUpperCase(),
-        type: txData.type || 'Credit',
-        category: txData.category || 'Daily Contribution',
-        amount: Number(txData.amount),
-        recorderName: txData.recorderName || 'Sacco Ledger OS',
-        tillNumber: txData.tillNumber || 'UtilityTill'
-      };
-
-      // Perform server-side balance update for members securely
-      if (txData.memberId) {
-        await safeDbOperation(
-          async (firestoreDb) => {
-            const memberRef = firestoreDb.collection('members').doc(txData.memberId);
-            const memberSnap = await memberRef.get();
-            if (memberSnap.exists) {
-              const currentMemberData = memberSnap.data() || {};
-              let newShares = currentMemberData.sharesAmount || 0;
-              let newSavings = currentMemberData.savingsAmount || 0;
-
-              if (txData.category === 'Daily Contribution') {
-                newShares += Math.round(Number(txData.amount) * 0.3);
-                newSavings += Math.round(Number(txData.amount) * 0.7);
-              }
-
-              await memberRef.set({
-                ...currentMemberData,
-                sharesAmount: newShares,
-                savingsAmount: newSavings
-              }, { merge: true });
-            }
-          },
-          () => {
-            const member = localStore.members.find(m => m.id === txData.memberId);
-            if (member) {
-              if (txData.category === 'Daily Contribution') {
-                member.sharesAmount += Math.round(Number(txData.amount) * 0.3);
-                member.savingsAmount += Math.round(Number(txData.amount) * 0.7);
-              }
-            }
-          },
-          'members'
-        );
-      }
-
-      await safeDbOperation(
-        async (firestoreDb) => {
-          await firestoreDb.collection('transactions').doc(transactionId).set(newTx);
-        },
-        () => {
-          localStore.transactions.push(newTx);
-        },
-        'transactions'
-      );
-
+      const newTx = await createLedgerTransaction(req.body);
       res.status(201).json(newTx);
     } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      sendApiError(res, error);
+    }
+  });
+
+  // API 8B: Reverse a transaction without deleting immutable ledger history
+  app.post('/api/transactions/:id/reverse', requireRoles(['Chairman', 'Treasurer', 'Accountant']), async (req, res) => {
+    try {
+      const user = (req as any).user;
+      const reversal = await reverseLedgerTransaction(req.params.id, user?.name || 'Sacco Ledger OS');
+      res.status(201).json(reversal);
+    } catch (error: any) {
+      sendApiError(res, error);
     }
   });
 
@@ -748,44 +910,7 @@ async function startServer() {
         tillNumber: tillNumber
       };
 
-      if (member) {
-        // Perform server-side balance update for member securely
-        let finalShares = member.sharesAmount || 0;
-        let finalSavings = member.savingsAmount || 0;
-        if (category === 'Daily Contribution') {
-          finalShares += Math.round(numAmount * 0.3);
-          finalSavings += Math.round(numAmount * 0.7);
-        }
-
-        await safeDbOperation(
-          async (firestoreDb) => {
-            await firestoreDb.collection('members').doc(member.id).set({
-              ...member,
-              sharesAmount: finalShares,
-              savingsAmount: finalSavings
-            }, { merge: true });
-          },
-          () => {
-            const m = localStore.members.find(x => x.id === member.id);
-            if (m) {
-              m.sharesAmount = finalShares;
-              m.savingsAmount = finalSavings;
-            }
-          },
-          'members'
-        );
-      }
-
-      // Save Transaction
-      await safeDbOperation(
-        async (firestoreDb) => {
-          await firestoreDb.collection('transactions').doc(txId).set(newTx);
-        },
-        () => {
-          localStore.transactions.push(newTx);
-        },
-        'transactions'
-      );
+      await createLedgerTransaction(newTx);
 
       return res.status(200).json({
         ResultCode: 0,
@@ -794,6 +919,12 @@ async function startServer() {
 
     } catch (error: any) {
       console.error('M-Pesa Confirmation Webhook Error:', error);
+      if (error instanceof HttpError && error.code === 'DUPLICATE_LEDGER_REF') {
+        return res.status(200).json({
+          ResultCode: 0,
+          ResultDesc: 'Duplicate confirmation ignored; transaction already exists'
+        });
+      }
       return res.status(500).json({ error: error.message });
     }
   });
@@ -850,52 +981,15 @@ async function startServer() {
         tillNumber: tillNumber
       };
 
-      if (member) {
-        // Perform server-side balance update for member securely
-        let finalShares = member.sharesAmount || 0;
-        let finalSavings = member.savingsAmount || 0;
-        if (category === 'Daily Contribution') {
-          finalShares += Math.round(numAmount * 0.3);
-          finalSavings += Math.round(numAmount * 0.7);
-        }
-
-        await safeDbOperation(
-          async (firestoreDb) => {
-            await firestoreDb.collection('members').doc(member.id).set({
-              ...member,
-              sharesAmount: finalShares,
-              savingsAmount: finalSavings
-            }, { merge: true });
-          },
-          () => {
-            const m = localStore.members.find(x => x.id === member.id);
-            if (m) {
-              m.sharesAmount = finalShares;
-              m.savingsAmount = finalSavings;
-            }
-          },
-          'members'
-        );
-      }
-
-      // Save transaction
-      await safeDbOperation(
-        async (firestoreDb) => {
-          await firestoreDb.collection('transactions').doc(txId).set(newTx);
-        },
-        () => {
-          localStore.transactions.push(newTx);
-        },
-        'transactions'
-      );
+      const savedTx = await createLedgerTransaction(newTx);
 
       res.status(200).json({
         status: 'success',
-        transaction: newTx
+        transaction: savedTx
       });
 
     } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      sendApiError(res, error);
     }
   });
 

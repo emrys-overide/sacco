@@ -1,6 +1,18 @@
 import type { User } from '../types';
 import { buildSaccoAuthHeaders } from './auth';
 
+export class ApiError extends Error {
+  status: number;
+  details?: unknown;
+
+  constructor(message: string, status: number, details?: unknown) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.details = details;
+  }
+}
+
 export async function fetchSaccoJson<T>(url: string, user: User, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
 
@@ -14,7 +26,19 @@ export async function fetchSaccoJson<T>(url: string, user: User, init: RequestIn
   });
 
   if (!response.ok) {
-    throw new Error(`Request failed: ${response.status} ${response.statusText}`);
+    let details: unknown;
+    let message = `Request failed: ${response.status} ${response.statusText}`;
+
+    try {
+      details = await response.json();
+      if (details && typeof details === 'object' && 'error' in details) {
+        message = String((details as { error?: unknown }).error);
+      }
+    } catch {
+      // Keep the generic response status message when the server returns no JSON body.
+    }
+
+    throw new ApiError(message, response.status, details);
   }
 
   return response.json() as Promise<T>;

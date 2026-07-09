@@ -3,7 +3,7 @@ import type { User, Member, Vehicle, Transaction, UserRole } from './types';
 import { mockUsers, mockMembers, mockVehicles, mockTransactions } from './data/mockData';
 import { Menu, ShieldAlert, Search, X } from 'lucide-react';
 import { canRole, STORAGE_KEYS } from './lib/auth';
-import { fetchSaccoJson, postSaccoJson } from './lib/api';
+import { ApiError, fetchSaccoJson, postSaccoJson } from './lib/api';
 
 // Subcomponents
 import LoginModal from './components/LoginModal';
@@ -188,6 +188,13 @@ export default function App() {
     })
     .catch(err => {
       console.error("Error creating Sacco member:", err);
+      if (err instanceof ApiError && err.status < 500) {
+        setSecurityAlert({
+          title: "Member Registration Blocked",
+          message: err.message
+        });
+        return;
+      }
       // Fallback local operation
       const fallbackMember: Member = {
         ...newMemberData,
@@ -216,6 +223,13 @@ export default function App() {
     })
     .catch(err => {
       console.error("Error registering vehicle:", err);
+      if (err instanceof ApiError && err.status < 500) {
+        setSecurityAlert({
+          title: "Vehicle Registration Blocked",
+          message: err.message
+        });
+        return;
+      }
       const fallbackVehicle: Vehicle = {
         ...newVehicleData,
         id: `v-${Date.now()}`
@@ -224,13 +238,13 @@ export default function App() {
     });
   };
 
-  const handleAddTransaction = (newTxData: Omit<Transaction, 'id' | 'timestamp' | 'recorderName'>) => {
+  const handleAddTransaction = async (newTxData: Omit<Transaction, 'id' | 'timestamp' | 'recorderName'>) => {
     if (!currentUser || !canRole(currentUser, TRANSACTION_WRITE_ROLES)) {
       setSecurityAlert({
         title: "Unauthorized Action Blocked",
         message: `Your active profile [${currentUser?.role}] does not possess transaction recording rights. General ledger write blocked.`
       });
-      return;
+      throw new Error('Your profile cannot post ledger transactions.');
     }
 
     const payload = {
@@ -239,19 +253,39 @@ export default function App() {
       timestamp: new Date().toISOString()
     };
 
-    postSaccoJson<Transaction, typeof payload>('/api/transactions', currentUser, payload)
-    .then(newTx => {
+    try {
+      const newTx = await postSaccoJson<Transaction, typeof payload>('/api/transactions', currentUser, payload);
       setTransactions(prev => [newTx, ...prev]);
-      fetchSaccoJson<Member[]>('/api/members', currentUser).then(data => setMembers(data));
-    })
-    .catch(err => {
+      const data = await fetchSaccoJson<Member[]>('/api/members', currentUser);
+      setMembers(data);
+    } catch (err) {
       console.error("Error posting ledger entry:", err);
+      if (err instanceof ApiError && err.status < 500) {
+        setSecurityAlert({
+          title: "Ledger Entry Blocked",
+          message: err.message
+        });
+        throw err;
+      }
       const fallbackTx: Transaction = {
         ...payload,
         id: `t-${Date.now()}`
       };
       setTransactions(prev => [fallbackTx, ...prev]);
+    }
+  };
+
+  const handleReverseTransaction = async (transactionId: string) => {
+    if (!currentUser || !canRole(currentUser, TRANSACTION_WRITE_ROLES)) {
+      throw new Error('Your profile cannot reverse ledger transactions.');
+    }
+
+    const reversal = await fetchSaccoJson<Transaction>(`/api/transactions/${transactionId}/reverse`, currentUser, {
+      method: 'POST'
     });
+    setTransactions(prev => [reversal, ...prev]);
+    const data = await fetchSaccoJson<Member[]>('/api/members', currentUser);
+    setMembers(data);
   };
 
   // Auth Screen Guard
@@ -349,6 +383,7 @@ export default function App() {
             vehicles={vehicles}
             members={members}
             onAddTransaction={handleAddTransaction}
+            onReverseTransaction={handleReverseTransaction}
             currentUser={currentUser}
           />
         );

@@ -30,7 +30,8 @@ import {
   Percent,
   PlusCircle,
   Coins,
-  Search
+  Search,
+  RotateCcw
 } from 'lucide-react';
 
 const JOURNAL_WRITE_ROLES: readonly UserRole[] = ['Treasurer', 'Chairman', 'Accountant'];
@@ -39,7 +40,8 @@ interface ReportsViewProps {
   transactions: Transaction[];
   vehicles: Vehicle[];
   members: Member[];
-  onAddTransaction?: (newTx: Omit<Transaction, 'id' | 'timestamp' | 'recorderName'>) => void;
+  onAddTransaction?: (newTx: Omit<Transaction, 'id' | 'timestamp' | 'recorderName'>) => void | Promise<void>;
+  onReverseTransaction?: (transactionId: string) => Promise<void>;
   currentUser?: User;
 }
 
@@ -48,6 +50,7 @@ export default function ReportsView({
   vehicles, 
   members, 
   onAddTransaction, 
+  onReverseTransaction,
   currentUser 
 }: ReportsViewProps) {
   // Navigation
@@ -68,6 +71,10 @@ export default function ReportsView({
   const [ledgerSearch, setLedgerSearch] = useState<string>('');
   const [ledgerCategoryFilter, setLedgerCategoryFilter] = useState<string>('All');
   const [ledgerTypeFilter, setLedgerTypeFilter] = useState<string>('All');
+  const [ledgerTillFilter, setLedgerTillFilter] = useState<string>('All');
+  const [ledgerDateFrom, setLedgerDateFrom] = useState<string>('');
+  const [ledgerDateTo, setLedgerDateTo] = useState<string>('');
+  const [reversingTransactionId, setReversingTransactionId] = useState<string>('');
   
   // Cashless Tills Hub states
   const [reportType, setReportType] = useState<'Daily' | 'Monthly' | 'Yearly'>('Daily');
@@ -194,6 +201,32 @@ export default function ReportsView({
         netSurplus: totalCredits - totalDebits || -52419.25,
         revenue: totalCredits || 6977416
       };
+
+  const filteredLedgerTransactions = transactions.filter(t => {
+    const normalizedSearch = ledgerSearch.toLowerCase();
+    const txDate = t.timestamp.substring(0, 10);
+    const matchSearch =
+      t.refCode.toLowerCase().includes(normalizedSearch) ||
+      t.description.toLowerCase().includes(normalizedSearch) ||
+      (t.memberName && t.memberName.toLowerCase().includes(normalizedSearch)) ||
+      (t.vehiclePlate && t.vehiclePlate.toLowerCase().includes(normalizedSearch));
+
+    const matchCategory = ledgerCategoryFilter === 'All' || t.category === ledgerCategoryFilter;
+    const matchType = ledgerTypeFilter === 'All' || t.type === ledgerTypeFilter;
+    const matchTill = ledgerTillFilter === 'All' || t.tillNumber === ledgerTillFilter;
+    const matchDateFrom = !ledgerDateFrom || txDate >= ledgerDateFrom;
+    const matchDateTo = !ledgerDateTo || txDate <= ledgerDateTo;
+
+    return matchSearch && matchCategory && matchType && matchTill && matchDateFrom && matchDateTo;
+  });
+
+  const filteredLedgerCredits = filteredLedgerTransactions
+    .filter(t => t.type === 'Credit')
+    .reduce((sum, t) => sum + t.amount, 0);
+  const filteredLedgerDebits = filteredLedgerTransactions
+    .filter(t => t.type === 'Debit')
+    .reduce((sum, t) => sum + t.amount, 0);
+  const filteredLedgerNet = filteredLedgerCredits - filteredLedgerDebits;
 
   // Cashless till download
   const triggerDownload = (format: 'TXT' | 'CSV') => {
@@ -1804,7 +1837,7 @@ export default function ReportsView({
                   </span>
                 </div>
 
-                <form onSubmit={(e) => {
+                <form onSubmit={async (e) => {
                   e.preventDefault();
                   if (!onAddTransaction) {
                     setJournalError("System database interface not available.");
@@ -1824,31 +1857,34 @@ export default function ReportsView({
                     return;
                   }
 
-                  // Perform actual addition to the parent Sacco ledger
-                  onAddTransaction({
-                    type: journalType,
-                    category: journalCategory,
-                    amount: amt,
-                    description: journalDescription.trim(),
-                    refCode: journalRefCode.toUpperCase().trim(),
-                    tillNumber: journalTill,
-                    memberId: journalMemberId || undefined,
-                    memberName: journalMemberId ? members.find(m => m.id === journalMemberId)?.name : undefined,
-                    vehiclePlate: journalVehiclePlate || undefined
-                  });
+                  try {
+                    await onAddTransaction({
+                      type: journalType,
+                      category: journalCategory,
+                      amount: amt,
+                      description: journalDescription.trim(),
+                      refCode: journalRefCode.toUpperCase().trim(),
+                      tillNumber: journalTill,
+                      memberId: journalMemberId || undefined,
+                      memberName: journalMemberId ? members.find(m => m.id === journalMemberId)?.name : undefined,
+                      vehiclePlate: journalVehiclePlate || undefined
+                    });
 
-                  setJournalSuccess(`Journal voucher successfully posted and written to Ledger! Ref: ${journalRefCode.toUpperCase()}`);
-                  setJournalError('');
-                  // Reset inputs
-                  setJournalAmount('');
-                  setJournalDescription('');
-                  setJournalRefCode('');
-                  setJournalMemberId('');
-                  setJournalVehiclePlate('');
-                  
-                  setTimeout(() => {
+                    setJournalSuccess(`Journal voucher successfully posted and written to Ledger! Ref: ${journalRefCode.toUpperCase()}`);
+                    setJournalError('');
+                    setJournalAmount('');
+                    setJournalDescription('');
+                    setJournalRefCode('');
+                    setJournalMemberId('');
+                    setJournalVehiclePlate('');
+                    
+                    setTimeout(() => {
+                      setJournalSuccess('');
+                    }, 5000);
+                  } catch (error: any) {
+                    setJournalError(error.message || 'Ledger posting failed.');
                     setJournalSuccess('');
-                  }, 5000);
+                  }
                 }} className="p-5 space-y-4 text-xs">
                   
                   {journalSuccess && (
@@ -2207,7 +2243,7 @@ export default function ReportsView({
                 </div>
 
                 {/* Filter bar */}
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-6 gap-3">
                   {/* Search */}
                   <div className="relative">
                     <input
@@ -2247,6 +2283,54 @@ export default function ReportsView({
                     <option value="Credit">Credit (Inflow)</option>
                     <option value="Debit">Debit (Outflow)</option>
                   </select>
+
+                  <select
+                    value={ledgerTillFilter}
+                    onChange={(e) => setLedgerTillFilter(e.target.value)}
+                    className="w-full p-1.5 border border-slate-200 rounded text-xs focus:ring-1 focus:ring-emerald-600 focus:outline-none bg-white"
+                  >
+                    <option value="All">All Tills</option>
+                    <option value="VehicleTill">Vehicle Till</option>
+                    <option value="UtilityTill">Utility Till</option>
+                    <option value="None">No Till</option>
+                  </select>
+
+                  <input
+                    type="date"
+                    value={ledgerDateFrom}
+                    onChange={(e) => setLedgerDateFrom(e.target.value)}
+                    className="w-full p-1.5 border border-slate-200 rounded text-xs focus:ring-1 focus:ring-emerald-600 focus:outline-none bg-white"
+                    title="Filter from date"
+                  />
+
+                  <input
+                    type="date"
+                    value={ledgerDateTo}
+                    onChange={(e) => setLedgerDateTo(e.target.value)}
+                    className="w-full p-1.5 border border-slate-200 rounded text-xs focus:ring-1 focus:ring-emerald-600 focus:outline-none bg-white"
+                    title="Filter to date"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                  <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
+                    <p className="text-[9px] font-black uppercase tracking-wider text-slate-400 font-mono">Filtered Entries</p>
+                    <p className="text-sm font-black text-slate-900 mt-1">{filteredLedgerTransactions.length}</p>
+                  </div>
+                  <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3">
+                    <p className="text-[9px] font-black uppercase tracking-wider text-emerald-700 font-mono">Credits</p>
+                    <p className="text-sm font-black text-emerald-800 mt-1">KES {filteredLedgerCredits.toLocaleString()}</p>
+                  </div>
+                  <div className="bg-rose-50 border border-rose-200 rounded-lg p-3">
+                    <p className="text-[9px] font-black uppercase tracking-wider text-rose-700 font-mono">Debits</p>
+                    <p className="text-sm font-black text-rose-800 mt-1">KES {filteredLedgerDebits.toLocaleString()}</p>
+                  </div>
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                    <p className="text-[9px] font-black uppercase tracking-wider text-blue-700 font-mono">Net</p>
+                    <p className={`text-sm font-black mt-1 ${filteredLedgerNet >= 0 ? 'text-blue-800' : 'text-rose-800'}`}>
+                      KES {filteredLedgerNet.toLocaleString()}
+                    </p>
+                  </div>
                 </div>
 
                 {/* Ledger Log List */}
@@ -2260,26 +2344,25 @@ export default function ReportsView({
                         <th className="p-2.5">Category</th>
                         <th className="p-2.5 text-right">Debit (KES)</th>
                         <th className="p-2.5 text-right">Credit (KES)</th>
+                        <th className="p-2.5 text-right">Action</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y font-mono text-[11px] text-slate-700">
-                      {transactions
-                        .filter(t => {
-                          const matchSearch = 
-                            t.refCode.toLowerCase().includes(ledgerSearch.toLowerCase()) ||
-                            t.description.toLowerCase().includes(ledgerSearch.toLowerCase()) ||
-                            (t.memberName && t.memberName.toLowerCase().includes(ledgerSearch.toLowerCase())) ||
-                            (t.vehiclePlate && t.vehiclePlate.toLowerCase().includes(ledgerSearch.toLowerCase()));
-                          
-                          const matchCategory = ledgerCategoryFilter === 'All' || t.category === ledgerCategoryFilter;
-                          const matchType = ledgerTypeFilter === 'All' || t.type === ledgerTypeFilter;
+                      {filteredLedgerTransactions
+                        .map(t => {
+                          const isReversal = Boolean(t.reversalOf);
+                          const hasReversal = transactions.some(tx => tx.reversalOf === t.id);
+                          const canReverse = Boolean(onReverseTransaction && !isReversal && !hasReversal && canRole(currentUser ?? null, JOURNAL_WRITE_ROLES));
 
-                          return matchSearch && matchCategory && matchType;
-                        })
-                        .map(t => (
-                          <tr key={t.id} className="hover:bg-slate-50 transition-all">
+                          return (
+                          <tr key={t.id} className={`hover:bg-slate-50 transition-all ${isReversal ? 'bg-amber-50/40' : ''}`}>
                             <td className="p-2.5 whitespace-nowrap text-slate-500">{t.timestamp.substring(0, 10)}</td>
-                            <td className="p-2.5 whitespace-nowrap font-bold text-slate-900">{t.refCode}</td>
+                            <td className="p-2.5 whitespace-nowrap font-bold text-slate-900">
+                              {t.refCode}
+                              {isReversal && (
+                                <span className="block text-[8px] text-amber-700 uppercase tracking-wider">Reversal</span>
+                              )}
+                            </td>
                             <td className="p-2.5 max-w-[200px] truncate" title={t.description}>
                               {t.description} {t.memberName && ` - [Member: ${t.memberName}]`} {t.vehiclePlate && ` - [Fleet: ${t.vehiclePlate}]`}
                             </td>
@@ -2294,8 +2377,41 @@ export default function ReportsView({
                             <td className="p-2.5 text-right font-bold text-emerald-700">
                               {t.type === 'Credit' ? t.amount.toLocaleString() + '.00' : '-'}
                             </td>
+                            <td className="p-2.5 text-right">
+                              {canReverse ? (
+                                <button
+                                  type="button"
+                                  disabled={reversingTransactionId === t.id}
+                                  onClick={async () => {
+                                    if (!onReverseTransaction) return;
+                                    const confirmed = window.confirm(`Reverse ledger entry ${t.refCode}? This will create an opposite audit entry.`);
+                                    if (!confirmed) return;
+                                    try {
+                                      setReversingTransactionId(t.id);
+                                      await onReverseTransaction(t.id);
+                                      setJournalSuccess(`Ledger entry ${t.refCode} reversed with an audit-safe counter-entry.`);
+                                      setJournalError('');
+                                    } catch (error: any) {
+                                      setJournalError(error.message || 'Transaction reversal failed.');
+                                      setJournalSuccess('');
+                                    } finally {
+                                      setReversingTransactionId('');
+                                    }
+                                  }}
+                                  className="inline-flex items-center justify-center p-1.5 rounded border border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100 disabled:opacity-50"
+                                  title="Create reversal entry"
+                                >
+                                  <RotateCcw className={`w-3.5 h-3.5 ${reversingTransactionId === t.id ? 'animate-spin' : ''}`} />
+                                </button>
+                              ) : hasReversal ? (
+                                <span className="text-[9px] text-amber-700 font-bold uppercase">Reversed</span>
+                              ) : (
+                                <span className="text-slate-300">-</span>
+                              )}
+                            </td>
                           </tr>
-                        ))
+                        );
+                        })
                       }
                     </tbody>
                   </table>

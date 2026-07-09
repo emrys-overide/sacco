@@ -37,6 +37,8 @@ export interface Vehicle {
 }
 
 export type TillType = 'VehicleTill' | 'UtilityTill' | 'None';
+export type TransactionType = 'Credit' | 'Debit';
+export type TransactionCategory = 'Daily Contribution' | 'Registration Fee' | 'Management Fee' | 'Office Expenses' | 'Petty Cash' | 'Penalty' | 'Utilities' | 'Equipment';
 
 export interface Transaction {
   id: string;
@@ -46,11 +48,14 @@ export interface Transaction {
   vehiclePlate?: string;
   description: string;
   refCode: string; // M-Pesa or Cash voucher code
-  type: 'Credit' | 'Debit';
-  category: 'Daily Contribution' | 'Registration Fee' | 'Management Fee' | 'Office Expenses' | 'Petty Cash' | 'Penalty' | 'Utilities' | 'Equipment';
+  type: TransactionType;
+  category: TransactionCategory;
   amount: number;
   recorderName: string;
   tillNumber: TillType;
+  reversalOf?: string;
+  reversedAt?: string;
+  reversedBy?: string;
 }
 
 export interface TargetCollection {
@@ -69,4 +74,3 @@ export interface MPesaConfig {
   mode: 'sandbox' | 'production';
   stkPushEnabled: boolean;
 }
-
