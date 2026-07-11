@@ -9,6 +9,253 @@
 
 body {
   font-family: var(--font-sans);
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: #071f2b;
+  color: #0f172a;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* App-wide visual system: the illustration stays atmospheric while opaque,
+   high-contrast content surfaces protect financial-data readability. */
+.app-shell {
+  isolation: isolate;
+  background-image:
+    linear-gradient(115deg, rgba(3, 20, 30, 0.93) 0%, rgba(8, 47, 54, 0.76) 35%, rgba(15, 23, 42, 0.46) 100%),
+    url('../assets/ui/sacco-nairobi-backdrop.png');
+  background-size: cover;
+  background-position: center;
+  background-attachment: fixed;
+}
+
+.auth-shell {
+  background-image:
+    linear-gradient(110deg, rgba(3, 22, 31, 0.90), rgba(6, 78, 59, 0.58), rgba(15, 23, 42, 0.42)),
+    url('../assets/ui/sacco-nairobi-backdrop.png');
+  background-size: cover;
+  background-position: center;
+}
+
+.auth-card {
+  background-color: rgba(255, 255, 255, 0.94) !important;
+  backdrop-filter: blur(18px) saturate(125%);
+}
+
+.app-shell::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 76% 10%, rgba(251, 191, 36, 0.14), transparent 25%),
+    linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+  background-size: auto, 36px 36px, 36px 36px;
+}
+
+.app-main-surface {
+  background: linear-gradient(145deg, rgba(241, 245, 249, 0.62), rgba(236, 253, 245, 0.52));
+  backdrop-filter: blur(10px) saturate(115%);
+  border-left: 1px solid rgba(255, 255, 255, 0.22);
+}
+
+.app-view {
+  position: relative;
+  background-image:
+    linear-gradient(135deg, rgba(248, 250, 252, 0.68), rgba(236, 253, 245, 0.52)),
+    url('../assets/ui/sacco-nairobi-backdrop.png');
+  background-size: cover;
+  background-position: center right;
+}
+
+.app-view > * {
+  position: relative;
+  z-index: 1;
+  background-color: transparent !important;
+}
+
+/* Unified-flow layout: one continuous workspace canvas with hierarchy created
+   by spacing and dividers instead of a pile of independent floating blocks. */
+.app-view > *::before {
+  content: '';
+  position: absolute;
+  inset: 14px;
+  z-index: -1;
+  pointer-events: none;
+  border: 1px solid rgba(255, 255, 255, 0.48);
+  border-radius: 22px;
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.50), rgba(248, 250, 252, 0.30));
+  box-shadow: 0 24px 70px -55px rgba(2, 44, 34, 0.9);
+  backdrop-filter: blur(8px);
+}
+
+.app-view .bg-white {
+  background-color: rgba(255, 255, 255, 0.70) !important;
+  border-color: rgba(148, 163, 184, 0.24) !important;
+  box-shadow: none !important;
+}
+
+.app-view .rounded-3xl {
+  border-radius: 0.9rem !important;
+}
+
+.app-view .shadow-xl,
+.app-view .shadow-2xl,
+.app-view .shadow-lg,
+.app-view .shadow-md,
+.app-view .shadow-sm,
+.app-view .shadow-xs {
+  box-shadow: none !important;
+}
+
+.app-view .hover\:-translate-y-1:hover {
+  transform: none !important;
+}
+
+.app-view table {
+  background-color: rgba(255, 255, 255, 0.82);
+}
+
+.app-view thead {
+  background-color: rgba(226, 232, 240, 0.58) !important;
+}
+
+.app-view tbody tr {
+  transition: background-color 140ms ease;
+}
+
+.app-view tbody tr:hover {
+  background-color: rgba(236, 253, 245, 0.66) !important;
+}
+
+.app-view header.bg-white {
+  background-color: rgba(255, 255, 255, 0.55) !important;
+  border-bottom-color: rgba(5, 150, 105, 0.18) !important;
+}
+
+.app-view .fixed .bg-white,
+.app-view .fixed.bg-white {
+  background-color: rgba(255, 255, 255, 0.98) !important;
+  border-color: rgba(148, 163, 184, 0.50) !important;
+  box-shadow: 0 28px 80px -35px rgba(2, 6, 23, 0.8) !important;
+}
+
+.app-view [class*='border-2'][class*='border-slate-900'] {
+  border-width: 1px !important;
+  border-color: rgba(15, 118, 110, 0.38) !important;
+}
+
+.app-topbar {
+  background-color: rgba(255, 255, 255, 0.86) !important;
+  border-color: rgba(148, 163, 184, 0.32) !important;
+  backdrop-filter: blur(16px) saturate(130%);
+  box-shadow: 0 8px 30px -26px rgba(2, 44, 34, 0.8);
+}
+
+.app-sidebar {
+  background: linear-gradient(180deg, rgba(3, 24, 32, 0.97), rgba(4, 47, 46, 0.94)) !important;
+  border-color: rgba(167, 243, 208, 0.12) !important;
+  color: #cbd5e1 !important;
+  backdrop-filter: blur(18px) saturate(125%);
+  box-shadow: 14px 0 35px -28px rgba(0, 0, 0, 0.9);
+}
+
+.app-sidebar .bg-white { background-color: transparent !important; }
+.app-sidebar .border-slate-100,
+.app-sidebar .border-slate-200 { border-color: rgba(255, 255, 255, 0.10) !important; }
+.app-sidebar .text-slate-900,
+.app-sidebar .text-slate-950 { color: #f8fafc !important; }
+.app-sidebar .text-slate-700,
+.app-sidebar .text-slate-600 { color: #cbd5e1 !important; }
+.app-sidebar .text-blue-600,
+.app-sidebar .text-blue-700 { color: #6ee7b7 !important; }
+.app-sidebar .bg-blue-600 { background-color: #059669 !important; }
+.app-sidebar .bg-blue-50 { background-color: rgba(16, 185, 129, 0.14) !important; }
+.app-sidebar nav button:hover { background-color: rgba(255, 255, 255, 0.08) !important; }
+.app-sidebar nav button.bg-blue-50 {
+  box-shadow: inset 3px 0 0 #34d399, 0 8px 20px -18px rgba(52, 211, 153, 0.9);
+}
+
+.app-main-surface > .bg-slate-50,
+.app-main-surface > .bg-slate-100 {
+  background-color: rgba(248, 250, 252, 0.78) !important;
+}
+
+.app-main-surface .bg-white {
+  border-color: rgba(148, 163, 184, 0.38);
+  box-shadow: 0 16px 38px -28px rgba(2, 44, 34, 0.72);
+}
+
+.app-main-surface .bg-slate-900 {
+  background-color: #082f3d !important;
+}
+
+.app-main-surface .bg-blue-600 {
+  background-color: #047857 !important;
+}
+
+.app-main-surface .hover\:bg-blue-700:hover {
+  background-color: #065f46 !important;
+}
+
+.app-main-surface input:not([type='checkbox']):not([type='radio']),
+.app-main-surface select,
+.app-main-surface textarea {
+  border-color: rgba(148, 163, 184, 0.55);
+  transition: border-color 160ms ease, box-shadow 160ms ease, background-color 160ms ease;
+}
+
+.app-main-surface input:focus,
+.app-main-surface select:focus,
+.app-main-surface textarea:focus {
+  border-color: #059669 !important;
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.14) !important;
+}
+
+.app-main-surface button {
+  transition: transform 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
+}
+
+.app-main-surface button:not(:disabled):active {
+  transform: translateY(1px) scale(0.99);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #0f766e rgba(226, 232, 240, 0.75);
+}
+
+*::-webkit-scrollbar { width: 9px; height: 9px; }
+*::-webkit-scrollbar-track { background: rgba(226, 232, 240, 0.75); }
+*::-webkit-scrollbar-thumb { background: linear-gradient(#047857, #0f766e); border: 2px solid rgba(226, 232, 240, 0.9); border-radius: 999px; }
+
+::selection {
+  background: rgba(16, 185, 129, 0.25);
+  color: #052e2b;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+@media print {
+  body, .app-shell, .app-main-surface {
+    background: white !important;
+    backdrop-filter: none !important;
+  }
+  .app-view > *::before {
+    display: none !important;
+  }
 }
 
 .font-display {
@@ -18,4 +265,3 @@ body {
 .font-mono {
   font-family: var(--font-mono);
 }
-

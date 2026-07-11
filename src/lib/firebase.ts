@@ -1,4 +1,8 @@
 import { initializeApp } from 'firebase/app';
+import {
+  getAuth,
+  type Auth
+} from 'firebase/auth';
 import { 
   getFirestore, 
   collection, 
@@ -20,6 +24,7 @@ const firebaseConfig = {
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || ''
 };
 
+const isFirebaseAuthEnabled = import.meta.env.VITE_FIREBASE_AUTH_ENABLED !== 'false';
 const hasFirebaseClientConfig = Boolean(
   firebaseConfig.projectId &&
   firebaseConfig.appId &&
@@ -28,6 +33,7 @@ const hasFirebaseClientConfig = Boolean(
 );
 
 const app = hasFirebaseClientConfig ? initializeApp(firebaseConfig) : null;
+export const firebaseAuth: Auth | null = app && isFirebaseAuthEnabled ? getAuth(app) : null;
 export const db: Firestore | null = app
   ? getFirestore(app, firebaseConfig.firestoreDatabaseId || undefined)
   : null;

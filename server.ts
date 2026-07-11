@@ -4,6 +4,9 @@ import path from 'path';
 import crypto from 'node:crypto';
 import { createServer as createViteServer } from 'vite';
 import { Firestore } from '@google-cloud/firestore';
+import { Pool } from 'pg';
+import { applicationDefault, cert, getApps, initializeApp as initializeFirebaseAdminApp } from 'firebase-admin/app';
+import { getAuth, type DecodedIdToken } from 'firebase-admin/auth';
 import { getSaccoUserKey } from './src/lib/auth';
 import type {
   Member,
@@ -65,46 +68,223 @@ type IncomingPaymentInput = {
   recorderName: string;
 };
 
-// Standard mock data to seed if database collections are empty
-const mockUsers = [
-  { id: 'u-1', name: 'Timothy Mwangi', email: 'treasurer@sacco.co.ke', role: 'Treasurer', phone: '+254 712 345 678' },
-  { id: 'u-2', name: 'Jane Wambui', email: 'secretary@sacco.co.ke', role: 'Secretary', phone: '+254 722 987 654' },
-  { id: 'u-3', name: 'Hon. Peter Kamau', email: 'chairman@sacco.co.ke', role: 'Chairman', phone: '+254 733 111 222' },
-  { id: 'u-4', name: 'David Ochieng', email: 'auditor@sacco.co.ke', role: 'Auditor', phone: '+254 701 555 666' },
-  { id: 'u-5', name: 'Beatrice Ndwiga', email: 'accountant@sacco.co.ke', role: 'Accountant', phone: '+254 715 222 333' }
-];
+type AuthorizedUser = {
+  id: string;
+  name: string;
+  email: string;
+  role: UserRole;
+  phone: string;
+  firebaseUid?: string;
+  isActive?: boolean;
+  devPassword?: string;
+};
 
-const mockMembers = [
-  { id: 'm-1', name: 'Samuel Gichuru', idNumber: '28401928', phoneNumber: '+254 710 440 330', status: 'Active', dateRegistered: '2023-04-12', vehicleAssigned: 'KBB 112L', sharesAmount: 150000, savingsAmount: 45000 },
-  { id: 'm-2', name: 'James Kamau', idNumber: '31204958', phoneNumber: '+254 720 123 456', status: 'Active', dateRegistered: '2024-01-10', vehicleAssigned: 'KCJ 402X', sharesAmount: 85000, savingsAmount: 22000 },
-  { id: 'm-3', name: 'Patrick Njoroge', idNumber: '29876543', phoneNumber: '+254 735 999 888', status: 'Active', dateRegistered: '2024-03-22', vehicleAssigned: 'KCD 883A', sharesAmount: 250000, savingsAmount: 110000 },
-  { id: 'm-4', name: 'Mercy Njeri', idNumber: '33445566', phoneNumber: '+254 712 888 222', status: 'Active', dateRegistered: '2024-06-01', vehicleAssigned: 'KDD 445Z', sharesAmount: 120000, savingsAmount: 38000 },
-  { id: 'm-5', name: 'Arap Sang', idNumber: '24567890', phoneNumber: '+254 728 333 444', status: 'Pending', dateRegistered: '2026-06-25', sharesAmount: 0, savingsAmount: 0 }
-];
-
-const mockVehicles = [
-  { id: 'v-1', plateNumber: 'KBB 112L', ownerId: 'm-1', ownerName: 'Samuel Gichuru', driverName: 'John Ndungu', driverPhone: '+254 722 000 111', route: 'Nairobi - Thika (Route 237)', status: 'Active', capacity: 14 },
-  { id: 'v-2', plateNumber: 'KCJ 402X', ownerId: 'm-2', ownerName: 'James Kamau', driverName: 'Peter Kamau Jnr', driverPhone: '+254 711 222 333', route: 'Nairobi - Thika (Route 237)', status: 'Active', capacity: 14 },
-  { id: 'v-3', plateNumber: 'KCD 883A', ownerId: 'm-3', ownerName: 'Patrick Njoroge', driverName: 'Wilson Kimani', driverPhone: '+254 733 444 555', route: 'Nairobi - Kikuyu (Route 105)', status: 'Active', capacity: 33 },
-  { id: 'v-4', plateNumber: 'KDD 445Z', ownerId: 'm-4', ownerName: 'Mercy Njeri', driverName: 'Silas Kiprop', driverPhone: '+254 715 888 777', route: 'Nairobi - Rongai (Route 125)', status: 'Active', capacity: 14 },
-  { id: 'v-5', plateNumber: 'KCA 001X', ownerId: 'm-5', ownerName: 'Arap Sang', driverName: 'Douglas Mwangi', driverPhone: '+254 700 111 222', route: 'Nairobi - Thika (Route 237)', status: 'Maintenance', capacity: 14 }
-];
-
-const mockTransactions: Transaction[] = [
-  { id: 't-1', timestamp: '2026-06-29T10:30:00Z', memberId: 'm-1', memberName: 'Samuel Gichuru', vehiclePlate: 'KBB 112L', description: 'Daily fleet collection contribution', refCode: 'MPX87A29DF', type: 'Credit', category: 'Daily Contribution', amount: 3500, recorderName: 'Timothy Mwangi', tillNumber: 'VehicleTill' },
-  { id: 't-2', timestamp: '2026-06-29T11:15:00Z', memberId: 'm-2', memberName: 'James Kamau', vehiclePlate: 'KCJ 402X', description: 'Monthly driver registration fee payment', refCode: 'MPX91K882S', type: 'Credit', category: 'Registration Fee', amount: 5000, recorderName: 'Jane Wambui', tillNumber: 'UtilityTill' },
-  { id: 't-3', timestamp: '2026-06-29T14:20:00Z', description: 'Office internet and utility bill payment', refCode: 'VCH00219A', type: 'Debit', category: 'Utilities', amount: 4500, recorderName: 'Jane Wambui', tillNumber: 'None' },
-  { id: 't-4', timestamp: '2026-06-29T15:45:00Z', memberId: 'm-3', memberName: 'Patrick Njoroge', vehiclePlate: 'KCD 883A', description: 'Route operation management levy', refCode: 'MPX72J009K', type: 'Credit', category: 'Management Fee', amount: 8000, recorderName: 'Timothy Mwangi', tillNumber: 'UtilityTill' },
-  { id: 't-5', timestamp: '2026-06-29T16:10:00Z', description: 'Printer toners and stationary procurement', refCode: 'VCH00220B', type: 'Debit', category: 'Office Expenses', amount: 2500, recorderName: 'Beatrice Ndwiga', tillNumber: 'None' }
-];
-
-type AuthorizedUser = typeof mockUsers[number];
+const initialUsers: AuthorizedUser[] = [];
+const initialMembers: Member[] = [];
+const initialVehicles: any[] = [];
+const initialTransactions: Transaction[] = [];
 type DarajaMode = 'sandbox' | 'production';
 
 const JWT_ISSUER = 'matatu-sacco-management-system';
 const JWT_AUDIENCE = 'sacco-api';
 const DEFAULT_JWT_EXPIRES_SECONDS = 60 * 60 * 8;
 const DEV_JWT_SECRET = 'dev-only-change-me-sacco-jwt-secret';
+const postgresPool = process.env.DATABASE_URL
+  ? new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : undefined
+    })
+  : null;
+
+function getFirebaseAdminAuth() {
+  const projectId = process.env.FIREBASE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT;
+  if (!getApps().length) {
+    if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+      initializeFirebaseAdminApp({
+        credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON)),
+        projectId
+      });
+    } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+      initializeFirebaseAdminApp({
+        credential: applicationDefault(),
+        projectId
+      });
+    } else if (projectId) {
+      // Verifying Firebase ID tokens only requires the project ID. The Admin
+      // SDK fetches Google's public signing certificates without a private key.
+      initializeFirebaseAdminApp({ projectId });
+    } else {
+      return null;
+    }
+  }
+
+  return getAuth();
+}
+
+function mapDbUser(row: any): AuthorizedUser {
+  return {
+    id: String(row.id),
+    name: row.full_name,
+    email: row.email,
+    role: row.role as UserRole,
+    phone: row.phone || '',
+    firebaseUid: row.firebase_uid || undefined,
+    isActive: row.is_active !== false
+  };
+}
+
+async function findSaccoUserByFirebaseToken(decodedToken: DecodedIdToken): Promise<AuthorizedUser> {
+  const email = String(decodedToken.email || '').toLowerCase();
+  if (postgresPool) {
+    const result = await postgresPool.query(
+      `SELECT id, firebase_uid, full_name, email, phone, role, is_active
+       FROM users
+       WHERE (firebase_uid = $1 OR lower(email) = $2)
+       LIMIT 1`,
+      [decodedToken.uid, email]
+    );
+
+    if (!result.rowCount) {
+      throw new HttpError(403, 'Firebase identity is valid, but no active SACCO profile exists for this user.', 'SACCO_PROFILE_NOT_FOUND');
+    }
+
+    const user = mapDbUser(result.rows[0]);
+    if (!user.isActive) {
+      throw new HttpError(403, 'This SACCO profile has been deactivated.', 'SACCO_PROFILE_DISABLED');
+    }
+
+    if (!user.firebaseUid && user.id) {
+      await postgresPool.query(
+        'UPDATE users SET firebase_uid = $1, last_login_at = now() WHERE id = $2',
+        [decodedToken.uid, user.id]
+      );
+      user.firebaseUid = decodedToken.uid;
+    } else {
+      await postgresPool.query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
+    }
+
+    return user;
+  }
+
+  const user = localStore.users.find(item => item.email.toLowerCase() === email);
+  if (!user) {
+    throw new HttpError(403, 'Firebase identity is valid, but no local SACCO profile exists for this email.', 'SACCO_PROFILE_NOT_FOUND');
+  }
+
+  return {
+    ...user,
+    firebaseUid: decodedToken.uid,
+    isActive: true
+  };
+}
+
+async function recordAuditLog(req: express.Request, action: string, entityTable: string, entityId?: string, oldData?: unknown, newData?: unknown) {
+  const user = (req as any).user as AuthorizedUser | undefined;
+  const authContext = (req as any).authContext || {};
+  if (!postgresPool) {
+    return;
+  }
+
+  try {
+    await postgresPool.query(
+      `INSERT INTO audit_logs (
+        actor_user_id, action, entity_table, entity_id, old_data, new_data,
+        auth_provider, firebase_uid, ip_address, user_agent
+      )
+      VALUES (
+        $1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10
+      )`,
+      [
+        user?.id?.match(/^[0-9a-f-]{36}$/i) ? user.id : null,
+        action,
+        entityTable,
+        entityId?.match(/^[0-9a-f-]{36}$/i) ? entityId : null,
+        oldData ? JSON.stringify(oldData) : null,
+        newData ? JSON.stringify(newData) : null,
+        authContext.provider || null,
+        authContext.firebaseUid || user?.firebaseUid || null,
+        req.ip,
+        req.headers['user-agent'] || null
+      ]
+    );
+  } catch (error: any) {
+    console.warn('[Sacco Audit] Failed to write audit log:', error.message || error);
+  }
+}
+
+async function countSaccoUsers(): Promise<number> {
+  if (postgresPool) {
+    const result = await postgresPool.query('SELECT COUNT(*)::int AS count FROM users');
+    return Number(result.rows[0]?.count || 0);
+  }
+
+  if (useFirestore) {
+    return safeDbOperation(
+      async (firestoreDb) => {
+        const snap = await firestoreDb.collection('users').limit(1).get();
+        return snap.empty ? 0 : 1;
+      },
+      () => localStore.users.length,
+      'users'
+    );
+  }
+
+  return localStore.users.length;
+}
+
+async function createFirstAdminProfile(input: {
+  firebaseUid?: string;
+  email: string;
+  fullName: string;
+  phone?: string;
+  devPassword?: string;
+}): Promise<AuthorizedUser> {
+  const email = input.email.trim().toLowerCase();
+  const fullName = input.fullName.trim();
+  if (!email || !fullName) {
+    throw new HttpError(400, 'Full name and email are required to create the first SACCO admin.', 'BOOTSTRAP_FIELDS_REQUIRED');
+  }
+
+  if (postgresPool) {
+    const result = await postgresPool.query(
+      `INSERT INTO users (firebase_uid, full_name, email, phone, role, is_active)
+       VALUES ($1, $2, $3, $4, 'Chairman', TRUE)
+       ON CONFLICT (email) DO UPDATE SET
+         firebase_uid = COALESCE(users.firebase_uid, EXCLUDED.firebase_uid),
+         full_name = EXCLUDED.full_name,
+         phone = EXCLUDED.phone,
+         role = 'Chairman',
+         is_active = TRUE,
+         updated_at = now()
+       RETURNING id, firebase_uid, full_name, email, phone, role, is_active`,
+      [input.firebaseUid || null, fullName, email, input.phone || null]
+    );
+    return mapDbUser(result.rows[0]);
+  }
+
+  const newUser: AuthorizedUser = {
+    id: `u-${Date.now()}`,
+    name: fullName,
+    email,
+    phone: input.phone || '',
+    role: 'Chairman',
+    firebaseUid: input.firebaseUid,
+    isActive: true,
+    devPassword: input.devPassword
+  };
+
+  await safeDbOperation(
+    async (firestoreDb) => {
+      await firestoreDb.collection('users').doc(newUser.id).set(newUser);
+    },
+    () => {
+      localStore.users.push(newUser);
+    },
+    'users'
+  );
+
+  return newUser;
+}
 
 function base64Url(input: string | Buffer): string {
   return Buffer.from(input)
@@ -189,7 +369,11 @@ function verifyJwt(token: string): AuthorizedUser {
     throw new HttpError(401, 'Authentication token is expired or not valid for this API.', 'JWT_EXPIRED');
   }
 
-  const user = mockUsers.find(item => item.id === payload.sub && item.email === payload.email);
+  // Local fallback profiles are recreated when the development server restarts.
+  // Their temporary internal ID can change, but the signed email and role remain
+  // the stable identity. This keeps an otherwise valid browser session usable.
+  const tokenEmail = String(payload.email || '').trim().toLowerCase();
+  const user = localStore.users.find(item => item.email.toLowerCase() === tokenEmail);
   if (!user || user.role !== payload.role) {
     throw new HttpError(401, 'Authentication token user is no longer authorized.', 'JWT_USER_REVOKED');
   }
@@ -275,10 +459,10 @@ const db = new Firestore(firestoreOptions);
 
 // Sacco Memory-Backed Ledger Storage (Fallback engine for development and sandbox stability)
 const localStore = {
-  users: [...mockUsers],
-  members: [...mockMembers],
-  vehicles: [...mockVehicles],
-  transactions: [...mockTransactions],
+  users: [...initialUsers],
+  members: [...initialMembers],
+  vehicles: [...initialVehicles],
+  transactions: [...initialTransactions],
   payments: [] as PaymentRecord[],
   mpesaConfig: { ...defaultMPesaConfig }
 };
@@ -355,27 +539,44 @@ function normalizeTransactionInput(input: LedgerInput): Transaction {
     amount,
     recorderName: input.recorderName || 'Sacco Ledger OS',
     tillNumber,
+    vehicleClass: input.vehicleClass,
+    operationAmount: Number(input.operationAmount || 0),
+    entranceFee: Number(input.entranceFee || 0),
+    loanRepay: Number(input.loanRepay || 0),
+    savingsContribution: Number(input.savingsContribution || 0),
+    sTicket: Number(input.sTicket || 0),
+    legalFee: Number(input.legalFee || 0),
+    expenseDeduction: Number(input.expenseDeduction || 0),
+    grossAmount: Number(input.grossAmount || amount),
     reversalOf: input.reversalOf,
     reversedAt: input.reversedAt,
     reversedBy: input.reversedBy
   };
 }
 
-function getDailyContributionBalanceDelta(tx: Transaction): { shares: number; savings: number } {
+function getDailyContributionBalanceDelta(tx: Transaction): { shares: number; savings: number; loan: number } {
   if (!tx.memberId || tx.category !== 'Daily Contribution') {
-    return { shares: 0, savings: 0 };
+    return { shares: 0, savings: 0, loan: 0 };
   }
 
   const direction = tx.type === 'Credit' ? 1 : -1;
+  if (tx.savingsContribution !== undefined) {
+    return {
+      shares: 0,
+      savings: direction * Number(tx.savingsContribution || 0),
+      loan: -direction * Number(tx.loanRepay || 0)
+    };
+  }
   return {
     shares: direction * Math.round(tx.amount * SHARES_ALLOCATION_RATE),
-    savings: direction * Math.round(tx.amount * SAVINGS_ALLOCATION_RATE)
+    savings: direction * Math.round(tx.amount * SAVINGS_ALLOCATION_RATE),
+    loan: -direction * Number(tx.loanRepay || 0)
   };
 }
 
 function applyLocalMemberBalance(tx: Transaction) {
   const delta = getDailyContributionBalanceDelta(tx);
-  if (!delta.shares && !delta.savings) return;
+  if (!delta.shares && !delta.savings && !delta.loan) return;
 
   const member = localStore.members.find(m => m.id === tx.memberId);
   if (!member) {
@@ -384,11 +585,13 @@ function applyLocalMemberBalance(tx: Transaction) {
 
   member.sharesAmount = Math.max(0, (member.sharesAmount || 0) + delta.shares);
   member.savingsAmount = Math.max(0, (member.savingsAmount || 0) + delta.savings);
+  const loanCeiling = Number(member.initialLoanAmount ?? member.loanBalance ?? 0);
+  member.loanBalance = Math.min(loanCeiling, Math.max(0, Number(member.loanBalance || 0) + delta.loan));
 }
 
 async function applyFirestoreMemberBalance(firestoreDb: Firestore, tx: Transaction) {
   const delta = getDailyContributionBalanceDelta(tx);
-  if (!delta.shares && !delta.savings) return;
+  if (!delta.shares && !delta.savings && !delta.loan) return;
 
   const memberRef = firestoreDb.collection('members').doc(tx.memberId || '');
   const memberSnap = await memberRef.get();
@@ -400,7 +603,11 @@ async function applyFirestoreMemberBalance(firestoreDb: Firestore, tx: Transacti
   await memberRef.set({
     ...currentMemberData,
     sharesAmount: Math.max(0, Number(currentMemberData.sharesAmount || 0) + delta.shares),
-    savingsAmount: Math.max(0, Number(currentMemberData.savingsAmount || 0) + delta.savings)
+    savingsAmount: Math.max(0, Number(currentMemberData.savingsAmount || 0) + delta.savings),
+    loanBalance: Math.min(
+      Number(currentMemberData.initialLoanAmount ?? currentMemberData.loanBalance ?? 0),
+      Math.max(0, Number(currentMemberData.loanBalance || 0) + delta.loan)
+    )
   }, { merge: true });
 }
 
@@ -435,6 +642,46 @@ async function createLedgerTransaction(input: LedgerInput): Promise<Transaction>
   );
 
   return tx;
+}
+
+async function updateLedgerTransaction(transactionId: string, input: LedgerInput): Promise<Transaction> {
+  const original = await safeDbOperation<Transaction | null>(
+    async firestoreDb => {
+      const snap = await firestoreDb.collection('transactions').doc(transactionId).get();
+      return snap.exists ? snap.data() as Transaction : null;
+    },
+    () => localStore.transactions.find(tx => tx.id === transactionId) || null,
+    'transactions'
+  );
+  if (!original) throw new HttpError(404, 'Transaction to edit was not found.', 'TRANSACTION_NOT_FOUND');
+  if (original.reversedAt || original.reversalOf) {
+    throw new HttpError(409, 'Reversed ledger entries cannot be edited.', 'TRANSACTION_NOT_EDITABLE');
+  }
+
+  const updated = normalizeTransactionInput({
+    ...original,
+    ...input,
+    id: original.id,
+    timestamp: original.timestamp,
+    refCode: original.refCode
+  });
+  const reverseOriginal = { ...original, type: original.type === 'Credit' ? 'Debit' : 'Credit' } as Transaction;
+
+  await safeDbOperation(
+    async firestoreDb => {
+      await applyFirestoreMemberBalance(firestoreDb, reverseOriginal);
+      await applyFirestoreMemberBalance(firestoreDb, updated);
+      await firestoreDb.collection('transactions').doc(transactionId).set(updated);
+    },
+    () => {
+      applyLocalMemberBalance(reverseOriginal);
+      applyLocalMemberBalance(updated);
+      const index = localStore.transactions.findIndex(tx => tx.id === transactionId);
+      localStore.transactions[index] = updated;
+    },
+    'transactions'
+  );
+  return updated;
 }
 
 async function reverseLedgerTransaction(transactionId: string, recorderName: string): Promise<Transaction> {
@@ -742,7 +989,7 @@ function authenticateLegacyHeaders(req: express.Request): AuthorizedUser {
     throw new HttpError(401, 'Sacco Security OS: Missing authentication credentials.', 'AUTH_MISSING');
   }
 
-  const user = mockUsers.find(u => u.email.toLowerCase() === email.toLowerCase());
+  const user = localStore.users.find(u => u.email.toLowerCase() === email.toLowerCase());
   if (!user) {
     throw new HttpError(401, 'Sacco Security OS: User not found in authorized register.', 'AUTH_USER_NOT_FOUND');
   }
@@ -758,22 +1005,64 @@ function authenticateLegacyHeaders(req: express.Request): AuthorizedUser {
   return user;
 }
 
+async function authenticateFirebaseBearer(req: express.Request): Promise<AuthorizedUser> {
+  const authHeader = req.headers.authorization || '';
+  if (!authHeader.startsWith('Bearer ')) {
+    throw new HttpError(401, 'Firebase ID token is required.', 'FIREBASE_TOKEN_MISSING');
+  }
+
+  const adminAuth = getFirebaseAdminAuth();
+  if (!adminAuth) {
+    throw new HttpError(503, 'Firebase Admin credentials are not configured on the server.', 'FIREBASE_ADMIN_NOT_CONFIGURED');
+  }
+
+  const decodedToken = await adminAuth.verifyIdToken(authHeader.slice('Bearer '.length).trim());
+  const user = await findSaccoUserByFirebaseToken(decodedToken);
+  (req as any).authContext = {
+    provider: 'firebase',
+    firebaseUid: decodedToken.uid,
+    email: decodedToken.email
+  };
+  return user;
+}
+
 // Sacco Security OS Authentication Middleware
-const authenticateSaccoUser = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+const authenticateSaccoUser = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
   try {
     const authHeader = req.headers.authorization || '';
     if (authHeader.startsWith('Bearer ')) {
-      (req as any).user = verifyJwt(authHeader.slice('Bearer '.length).trim());
-      return next();
+      try {
+        (req as any).user = await authenticateFirebaseBearer(req);
+        await recordAuditLog(req, 'API_AUTHORIZED', req.path);
+        return next();
+      } catch (firebaseError: any) {
+        const allowDevJwt = process.env.ALLOW_DEV_JWT_AUTH === 'true' || process.env.NODE_ENV !== 'production';
+        if (!allowDevJwt) {
+          throw firebaseError;
+        }
+
+        (req as any).user = verifyJwt(authHeader.slice('Bearer '.length).trim());
+        (req as any).authContext = {
+          provider: 'dev-jwt',
+          email: (req as any).user.email
+        };
+        await recordAuditLog(req, 'API_AUTHORIZED_DEV_JWT', req.path);
+        return next();
+      }
     }
 
-    const allowLegacyHeaders = process.env.ALLOW_LEGACY_AUTH_HEADERS === 'true' || process.env.NODE_ENV !== 'production';
+    const allowLegacyHeaders = process.env.ALLOW_LEGACY_AUTH_HEADERS === 'true';
     if (allowLegacyHeaders) {
       (req as any).user = authenticateLegacyHeaders(req);
+      (req as any).authContext = {
+        provider: 'legacy-headers',
+        email: (req as any).user.email
+      };
+      await recordAuditLog(req, 'API_AUTHORIZED_LEGACY', req.path);
       return next();
     }
 
-    return res.status(401).json({ error: 'Bearer JWT authentication is required.' });
+    return res.status(401).json({ error: 'Firebase Bearer token authentication is required.' });
   } catch (error: any) {
     if (error instanceof HttpError) {
       return res.status(error.status).json({ error: error.message, code: error.code });
@@ -783,9 +1072,13 @@ const authenticateSaccoUser = (req: express.Request, res: express.Response, next
 };
 
 const requireRoles = (allowedRoles: string[]) => {
-  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
     const user = (req as any).user;
     if (!user || !allowedRoles.includes(user.role)) {
+      await recordAuditLog(req, 'API_AUTHORIZATION_DENIED', req.path, undefined, undefined, {
+        requiredRoles: allowedRoles,
+        actualRole: user?.role || 'Unknown'
+      });
       return res.status(403).json({ 
         error: `Sacco Access Control Breach Blocked: Role [${user?.role || 'Unknown'}] is restricted from this operational directory.` 
       });
@@ -801,45 +1094,10 @@ async function seedDatabaseIfEmpty() {
     return;
   }
 
-  console.log("Checking Firestore collections for initial seeding...");
+  console.log("Checking Firestore connection...");
   try {
-    // 1. Seed Users
-    const usersSnap = await db.collection('users').limit(1).get();
-    if (usersSnap.empty) {
-      console.log("Seeding users collection...");
-      for (const user of mockUsers) {
-        await db.collection('users').doc(user.id).set(user);
-      }
-    }
-
-    // 2. Seed Members
-    const membersSnap = await db.collection('members').limit(1).get();
-    if (membersSnap.empty) {
-      console.log("Seeding members collection...");
-      for (const member of mockMembers) {
-        await db.collection('members').doc(member.id).set(member);
-      }
-    }
-
-    // 3. Seed Vehicles
-    const vehiclesSnap = await db.collection('vehicles').limit(1).get();
-    if (vehiclesSnap.empty) {
-      console.log("Seeding vehicles collection...");
-      for (const vehicle of mockVehicles) {
-        await db.collection('vehicles').doc(vehicle.id).set(vehicle);
-      }
-    }
-
-    // 4. Seed Transactions
-    const transactionsSnap = await db.collection('transactions').limit(1).get();
-    if (transactionsSnap.empty) {
-      console.log("Seeding transactions collection...");
-      for (const tx of mockTransactions) {
-        await db.collection('transactions').doc(tx.id).set(tx);
-      }
-    }
-
-    console.log("Firestore seeding checks complete.");
+    await db.collection('system').doc('status').get();
+    console.log("Firestore connection check complete. No sample data was seeded.");
   } catch (error: any) {
     console.warn("[Sacco Ledger OS] Firestore connection/permission unavailable on startup. Automatically operating in high-security Local Ledger Fallback Mode.", error.message || error);
     useFirestore = false;
@@ -857,14 +1115,91 @@ async function startServer() {
 
   // API 1: Healthcheck
   app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', database: useFirestore ? 'connected' : 'local_fallback', timestamp: new Date().toISOString() });
+    res.json({
+      status: 'ok',
+      database: postgresPool ? 'postgres_configured' : (useFirestore ? 'firestore_connected' : 'local_fallback'),
+      auth: getFirebaseAdminAuth() ? 'firebase_admin_configured' : 'firebase_admin_missing',
+      timestamp: new Date().toISOString()
+    });
+  });
+
+  app.post('/api/auth/session', async (req, res) => {
+    try {
+      const user = await authenticateFirebaseBearer(req);
+      (req as any).user = user;
+      await recordAuditLog(req, 'USER_LOGIN', 'users', user.id, undefined, { email: user.email, role: user.role });
+      res.json({
+        user,
+        tokenType: 'FirebaseIdToken',
+        authProvider: 'firebase'
+      });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.post('/api/auth/bootstrap', async (req, res) => {
+    try {
+      const existingUsers = await countSaccoUsers();
+      if (existingUsers > 0) {
+        return res.status(409).json({ error: 'SACCO onboarding is already complete. Ask an existing admin to create your profile.' });
+      }
+
+      const authHeader = req.headers.authorization || '';
+      const adminAuth = getFirebaseAdminAuth();
+      let firebaseUid: string | undefined;
+      let email = String(req.body?.email || '').trim().toLowerCase();
+      let fullName = String(req.body?.fullName || '').trim();
+
+      if (authHeader.startsWith('Bearer ') && adminAuth) {
+        const decoded = await adminAuth.verifyIdToken(authHeader.slice('Bearer '.length).trim());
+        firebaseUid = decoded.uid;
+        email = String(decoded.email || email).trim().toLowerCase();
+        fullName = fullName || String(decoded.name || '').trim();
+      } else {
+        const allowDevBootstrap = process.env.ALLOW_DEV_AUTH_FALLBACK === 'true' || process.env.NODE_ENV !== 'production';
+        if (!allowDevBootstrap) {
+          return res.status(401).json({ error: 'Firebase ID token is required to bootstrap the first admin.' });
+        }
+      }
+
+      const user = await createFirstAdminProfile({
+        firebaseUid,
+        email,
+        fullName,
+        phone: String(req.body?.phone || '').trim(),
+        devPassword: firebaseUid ? undefined : String(req.body?.password || '')
+      });
+      (req as any).user = user;
+      (req as any).authContext = {
+        provider: firebaseUid ? 'firebase-bootstrap' : 'dev-bootstrap',
+        firebaseUid,
+        email
+      };
+      await recordAuditLog(req, 'FIRST_ADMIN_BOOTSTRAPPED', 'users', user.id, undefined, { email: user.email, role: user.role });
+
+      const devToken = firebaseUid ? undefined : signJwt(user);
+      return res.status(201).json({
+        user,
+        token: devToken?.token,
+        tokenType: firebaseUid ? 'FirebaseIdToken' : 'DevJwt',
+        authProvider: firebaseUid ? 'firebase' : 'dev'
+      });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
   });
 
   app.post('/api/auth/login', (req, res) => {
     try {
+      const allowDevLogin = process.env.ALLOW_DEV_AUTH_FALLBACK === 'true' || process.env.NODE_ENV !== 'production';
+      if (!allowDevLogin) {
+        return res.status(404).json({ error: 'Password login is disabled. Use Firebase Auth.' });
+      }
+
       const { email, password } = req.body || {};
-      const user = mockUsers.find(item => item.email.toLowerCase() === String(email || '').toLowerCase());
-      if (!user || password !== getSaccoUserKey(user.role as UserRole)) {
+      const user = localStore.users.find(item => item.email.toLowerCase() === String(email || '').toLowerCase());
+      if (!user || (password !== user.devPassword && password !== getSaccoUserKey(user.role as UserRole))) {
         return res.status(401).json({ error: 'Invalid Sacco profile or password.' });
       }
 
@@ -939,7 +1274,9 @@ async function startServer() {
         dateRegistered: memberData.dateRegistered || new Date().toISOString().substring(0, 10),
         vehicleAssigned: memberData.vehicleAssigned || '',
         sharesAmount: Number(memberData.sharesAmount) || 0,
-        savingsAmount: Number(memberData.savingsAmount) || 0
+        savingsAmount: Number(memberData.savingsAmount) || 0,
+        initialLoanAmount: Math.max(0, Number(memberData.initialLoanAmount ?? memberData.loanBalance) || 0),
+        loanBalance: Math.max(0, Number(memberData.loanBalance) || 0)
       };
 
       await safeDbOperation(
@@ -995,14 +1332,19 @@ async function startServer() {
         ownerName: vehicleData.ownerName,
         driverName: vehicleData.driverName || 'Douglas Mwangi',
         driverPhone: vehicleData.driverPhone || '+254 700 111 222',
-        route: vehicleData.route || 'Nairobi - Thika (Route 237)',
+        route: '17 Stage & Cabbanas',
         status: vehicleData.status || 'Active',
-        capacity: Number(vehicleData.capacity) || 14
+        capacity: [7, 14, 33, 50].includes(Number(vehicleData.capacity)) ? Number(vehicleData.capacity) : 14
       };
 
       await safeDbOperation(
         async (firestoreDb) => {
           await firestoreDb.collection('vehicles').doc(vehicleId).set(newVehicle);
+          if (newVehicle.ownerId !== 'm-unknown') {
+            await firestoreDb.collection('members').doc(newVehicle.ownerId).set({
+              vehicleAssigned: newVehicle.plateNumber
+            }, { merge: true });
+          }
         },
         () => {
           const idx = localStore.vehicles.findIndex(v => v.id === vehicleId);
@@ -1011,6 +1353,8 @@ async function startServer() {
           } else {
             localStore.vehicles.push(newVehicle);
           }
+          const owner = localStore.members.find(member => member.id === newVehicle.ownerId);
+          if (owner) owner.vehicleAssigned = newVehicle.plateNumber;
         },
         'vehicles'
       );
@@ -1045,6 +1389,15 @@ async function startServer() {
     try {
       const newTx = await createLedgerTransaction(req.body);
       res.status(201).json(newTx);
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.put('/api/transactions/:id', requireRoles(['Chairman', 'Treasurer', 'Accountant']), async (req, res) => {
+    try {
+      const updated = await updateLedgerTransaction(req.params.id, req.body);
+      res.json(updated);
     } catch (error: any) {
       sendApiError(res, error);
     }

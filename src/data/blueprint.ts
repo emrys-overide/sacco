@@ -227,7 +227,7 @@ services:
 *   **Phase 1 (Current Core):** Role-based Authentication, Members Registry, Vehicle Fleets, M-Pesa transactions recording, Daily aggregates, PDF summaries.
 *   **Phase 2 (Savings & Shares):** Integration of shares ledger, interest calculators, and custom withdraw vouchers.
 *   **Phase 3 (Mobile Loan Matrix):** Loan application pipelines, automated credit scoring based on historic daily contributions, guarantor lockups, and auto-disbursal API.
-*   **Phase 4 (AI Integration & OCR):** Deep optical character recognition (OCR) of paper cash receipts, automated dashboard forecasting, and Gemini voice assistant for non-technical members.
+*   **Phase 4 (Reporting Automation):** Month-end close workflow, automated dashboard forecasting, Excel/PDF exports, and management review approvals.
 
 ### 6.2 Git Branching Strategy
 We enforce strict trunk-based development with short-lived feature branches:

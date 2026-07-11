@@ -20,8 +20,8 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
   const [ownerId, setOwnerId] = useState('');
   const [driverName, setDriverName] = useState('');
   const [driverPhone, setDriverPhone] = useState('');
-  const [route, setRoute] = useState('Nairobi - Thika (Route 237)');
-  const [capacity, setCapacity] = useState<14 | 33 | 50>(14);
+  const [route, setRoute] = useState('17 Stage & Cabbanas');
+  const [capacity, setCapacity] = useState<7 | 14 | 33 | 50>(14);
   const [error, setError] = useState('');
 
   // Role validation
@@ -37,6 +37,15 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
     const matchesRoute = routeFilter === 'All' || vehicle.route === routeFilter;
     return matchesSearch && matchesRoute;
   });
+
+  const handleOwnerChange = (nextOwnerId: string) => {
+    setOwnerId(nextOwnerId);
+    const owner = members.find(member => member.id === nextOwnerId);
+    if (owner?.vehicleAssigned?.trim()) {
+      setPlateNumber(owner.vehicleAssigned.trim().toUpperCase());
+    }
+    setError('');
+  };
 
   const handleCreate = (e: React.FormEvent) => {
     e.preventDefault();
@@ -74,7 +83,7 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
     setOwnerId('');
     setDriverName('');
     setDriverPhone('');
-    setRoute('Nairobi - Thika (Route 237)');
+    setRoute('17 Stage & Cabbanas');
     setCapacity(14);
     setError('');
     setShowAddModal(false);
@@ -246,6 +255,7 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
                     onChange={(e) => setPlateNumber(e.target.value.toUpperCase())}
                     className="w-full p-2 border border-slate-200 rounded text-xs font-mono uppercase focus:outline-none focus:border-emerald-600"
                   />
+                  <p className="mt-1 text-[9px] text-slate-400">Prefilled from the selected member when available; you can still type another plate.</p>
                 </div>
 
                 <div>
@@ -255,7 +265,7 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
                   <select
                     required
                     value={ownerId}
-                    onChange={(e) => setOwnerId(e.target.value)}
+                    onChange={(e) => handleOwnerChange(e.target.value)}
                     className="w-full p-2 border border-slate-200 rounded text-xs focus:outline-none focus:border-emerald-600 bg-white"
                   >
                     <option value="">Select Sacco Member...</option>
@@ -299,9 +309,10 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
                   </label>
                   <select
                     value={capacity}
-                    onChange={(e) => setCapacity(Number(e.target.value) as 14 | 33 | 50)}
+                    onChange={(e) => setCapacity(Number(e.target.value) as 7 | 14 | 33 | 50)}
                     className="w-full p-2 border border-slate-200 rounded text-xs focus:outline-none focus:border-emerald-600 bg-white"
                   >
+                    <option value="7">7-Seater Sienta</option>
                     <option value="14">14-Seater Nissan</option>
                     <option value="33">33-Seater Minibus</option>
                     <option value="50">50-Seater Coach</option>
@@ -318,9 +329,7 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
                   onChange={(e) => setRoute(e.target.value)}
                   className="w-full p-2 border border-slate-200 rounded text-xs focus:outline-none focus:border-emerald-600 bg-white"
                 >
-                  <option value="Nairobi - Thika (Route 237)">Nairobi - Thika (Route 237)</option>
-                  <option value="Nairobi - Githurai (Route 45)">Nairobi - Githurai (Route 45)</option>
-                  <option value="Nairobi - Ruiru (Route 145)">Nairobi - Ruiru (Route 145)</option>
+                  <option value="17 Stage & Cabbanas">17 Stage &amp; Cabbanas</option>
                 </select>
               </div>
 

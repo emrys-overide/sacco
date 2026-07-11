@@ -31,7 +31,8 @@ import {
   PlusCircle,
   Coins,
   Search,
-  RotateCcw
+  RotateCcw,
+  Pencil
 } from 'lucide-react';
 
 const JOURNAL_WRITE_ROLES: readonly UserRole[] = ['Treasurer', 'Chairman', 'Accountant'];
@@ -40,8 +41,9 @@ interface ReportsViewProps {
   transactions: Transaction[];
   vehicles: Vehicle[];
   members: Member[];
-  onAddTransaction?: (newTx: Omit<Transaction, 'id' | 'timestamp' | 'recorderName'>) => void | Promise<void>;
+  onAddTransaction?: (newTx: Omit<Transaction, 'id' | 'timestamp' | 'recorderName'>) => void | Promise<Transaction>;
   onReverseTransaction?: (transactionId: string) => Promise<void>;
+  onUpdateTransaction?: (transactionId: string, changes: Partial<Transaction>) => Promise<Transaction>;
   currentUser?: User;
 }
 
@@ -51,6 +53,7 @@ export default function ReportsView({
   members, 
   onAddTransaction, 
   onReverseTransaction,
+  onUpdateTransaction,
   currentUser 
 }: ReportsViewProps) {
   // Navigation
@@ -75,6 +78,13 @@ export default function ReportsView({
   const [ledgerDateFrom, setLedgerDateFrom] = useState<string>('');
   const [ledgerDateTo, setLedgerDateTo] = useState<string>('');
   const [reversingTransactionId, setReversingTransactionId] = useState<string>('');
+  const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
+  const [editAmount, setEditAmount] = useState('');
+  const [editDescription, setEditDescription] = useState('');
+  const [editVehiclePlate, setEditVehiclePlate] = useState('');
+  const [editType, setEditType] = useState<'Credit' | 'Debit'>('Credit');
+  const [editCategory, setEditCategory] = useState<Transaction['category']>('Daily Contribution');
+  const [editTill, setEditTill] = useState<Transaction['tillNumber']>('VehicleTill');
   
   // Cashless Tills Hub states
   const [reportType, setReportType] = useState<'Daily' | 'Monthly' | 'Yearly'>('Daily');
@@ -82,7 +92,7 @@ export default function ReportsView({
   const [activeTillTab, setActiveTillTab] = useState<'conjunction' | 'vehicle' | 'utility'>('conjunction');
 
   // Compliance Report states
-  const [reportDataSource, setReportDataSource] = useState<'sowetamu' | 'live'>('sowetamu');
+  const [reportDataSource, setReportDataSource] = useState<'sowetamu' | 'live'>('live');
   const [complianceActivePage, setComplianceActivePage] = useState<string>('cover');
   const [showEditCommittee, setShowEditCommittee] = useState(false);
 
@@ -129,24 +139,22 @@ export default function ReportsView({
   const liveTotalMembers = members.length;
 
   // Live Sacco Financial Sheet Data Mapping
-  const liveShareCapital = members.reduce((acc, m) => acc + m.sharesAmount, 0) || (liveTotalMembers * 15000); // fallback default to make it realistic
-  const liveMembersDeposits = members.reduce((acc, m) => acc + m.savingsAmount, 0) || (liveTotalMembers * 6900); // actual savings
+  const liveShareCapital = members.reduce((acc, m) => acc + Number(m.sharesAmount || 0), 0);
+  const liveMembersDeposits = members.reduce((acc, m) => acc + Number(m.savingsAmount || 0), 0);
   const liveCashEquiv = netBalance;
-  const liveLoansToMembers = Math.round(liveShareCapital * 0.55); // realistic loan assets ratio
-  const livePPEComputers = 78000;
-  const livePPEFurniture = 130000;
-  const livePPETotal = livePPEComputers + livePPEFurniture;
-  const livePPEDepreciation = 35750;
-  const livePPECarrying = livePPETotal - livePPEDepreciation;
-  const liveReceivables = 138850;
+  const liveLoansToMembers = 0; // No loan-advance register exists yet.
+  const livePPECarrying = transactions
+    .filter(t => t.category === 'Equipment')
+    .reduce((sum, t) => sum + (t.type === 'Debit' ? t.amount : -t.amount), 0);
+  const liveReceivables = 0; // No receivables register exists yet.
 
   // Live total Assets formula to balance
   const liveTotalAssets = liveCashEquiv + liveReceivables + liveLoansToMembers + livePPECarrying;
-  const liveTradePayables = 45000; // audit / supervision and accountancy fees
+  const liveTradePayables = 0; // No payables register exists yet.
   const liveTotalLiabilities = liveMembersDeposits + liveTradePayables;
   
   // Balanced Reserve deficit/surplus
-  const liveReserves = liveTotalAssets - liveShareCapital - liveTotalLiabilities;
+  const liveReserves = 0;
 
   // Sowetamu Audit Reference Data (Static Copy for perfect match of provided PDF)
   const sowetamuData = {
@@ -177,11 +185,11 @@ export default function ReportsView({
   const reportSaccoName = reportDataSource === 'sowetamu' ? sowetamuData.saccoName : saccoCustomName;
   const reportRegNo = reportDataSource === 'sowetamu' ? sowetamuData.regNo : saccoRegNo;
   const reportYear = reportDataSource === 'sowetamu' ? sowetamuData.year : '2026';
-  const reportAuditFee = reportDataSource === 'sowetamu' ? sowetamuData.auditFee : 25500;
+  const reportAuditFee = reportDataSource === 'sowetamu' ? sowetamuData.auditFee : 0;
   
   const reportMembers = reportDataSource === 'sowetamu' 
     ? sowetamuData.members 
-    : { active: liveActiveCount || 17, dormant: liveDormantCount || 11, total: liveTotalMembers || 28 };
+    : { active: liveActiveCount, dormant: liveDormantCount, total: liveTotalMembers };
 
   const reportFinancials = reportDataSource === 'sowetamu' 
     ? sowetamuData.financials 
@@ -189,7 +197,7 @@ export default function ReportsView({
         shareCapital: liveShareCapital,
         membersDeposits: liveMembersDeposits,
         statutoryReserve: liveReserves * 0.2 > 0 ? liveReserves * 0.2 : 0,
-        retainedEarnings: liveReserves * 0.8 || -52419.25,
+        retainedEarnings: 0,
         totalAssets: liveTotalAssets,
         loansToMembers: liveLoansToMembers,
         cashAndEquiv: liveCashEquiv,
@@ -198,8 +206,8 @@ export default function ReportsView({
         tradePayables: liveTradePayables,
         totalLiabilities: liveTotalLiabilities,
         shareholdersFunds: liveShareCapital + liveReserves,
-        netSurplus: totalCredits - totalDebits || -52419.25,
-        revenue: totalCredits || 6977416
+        netSurplus: totalCredits - totalDebits,
+        revenue: totalCredits
       };
 
   const filteredLedgerTransactions = transactions.filter(t => {
@@ -2090,7 +2098,7 @@ export default function ReportsView({
                     <h3 className="text-xs font-black uppercase tracking-wider font-mono">Dynamic Sacco Trial Balance</h3>
                   </div>
                   <span className="text-[9px] font-mono bg-emerald-500 text-slate-950 px-2 py-0.5 rounded font-black">
-                    Balanced Ledger
+                    Live Entries Only
                   </span>
                 </div>
 
@@ -2211,10 +2219,10 @@ export default function ReportsView({
                     </table>
                   </div>
 
-                  <div className="mt-3 flex items-center space-x-2 bg-emerald-50 border border-emerald-300 text-emerald-950 p-3 rounded text-[11px] leading-relaxed">
+                  <div className="mt-3 flex items-center space-x-2 bg-blue-50 border border-blue-300 text-blue-950 p-3 rounded text-[11px] leading-relaxed">
                     <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
                     <span>
-                      <strong>Accountant Verdict:</strong> Trial Balance has resolved perfectly. Assets = Liabilities + Equity. All journal modifications are processed inside memory registers.
+                      <strong>Live-data note:</strong> Only recorded ledger, member savings, share capital and equipment entries are shown. Unsupported accounts remain zero until their registers are implemented.
                     </span>
                   </div>
                 </div>
@@ -2349,6 +2357,7 @@ export default function ReportsView({
                           const isReversal = Boolean(t.reversalOf);
                           const hasReversal = transactions.some(tx => tx.reversalOf === t.id);
                           const canReverse = Boolean(onReverseTransaction && !isReversal && !hasReversal && canRole(currentUser ?? null, JOURNAL_WRITE_ROLES));
+                          const canEdit = Boolean(onUpdateTransaction && !isReversal && !hasReversal && canRole(currentUser ?? null, JOURNAL_WRITE_ROLES));
 
                           return (
                           <tr key={t.id} className={`hover:bg-slate-50 transition-all ${isReversal ? 'bg-amber-50/40' : ''}`}>
@@ -2374,6 +2383,25 @@ export default function ReportsView({
                               {t.type === 'Credit' ? t.amount.toLocaleString() + '.00' : '-'}
                             </td>
                             <td className="p-2.5 text-right">
+                              <div className="inline-flex items-center gap-1">
+                              {canEdit && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEditingTransaction(t);
+                                    setEditAmount(String(t.amount));
+                                    setEditDescription(t.description);
+                                    setEditVehiclePlate(t.vehiclePlate || '');
+                                    setEditType(t.type);
+                                    setEditCategory(t.category);
+                                    setEditTill(t.tillNumber);
+                                  }}
+                                  className="inline-flex items-center justify-center p-1.5 rounded border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
+                                  title="Edit erroneous ledger entry"
+                                >
+                                  <Pencil className="w-3.5 h-3.5" />
+                                </button>
+                              )}
                               {canReverse ? (
                                 <button
                                   type="button"
@@ -2401,9 +2429,10 @@ export default function ReportsView({
                                 </button>
                               ) : hasReversal ? (
                                 <span className="text-[9px] text-amber-700 font-bold uppercase">Reversed</span>
-                              ) : (
+                              ) : !canEdit ? (
                                 <span className="text-slate-300">-</span>
-                              )}
+                              ) : null}
+                              </div>
                             </td>
                           </tr>
                         );
@@ -2419,6 +2448,79 @@ export default function ReportsView({
 
           </div>
 
+        </div>
+      )}
+
+      {editingTransaction && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
+          <form
+            onSubmit={async (event) => {
+              event.preventDefault();
+              if (!onUpdateTransaction) return;
+              const amount = Number(editAmount);
+              if (!Number.isFinite(amount) || amount <= 0) {
+                setJournalError('Corrected amount must be greater than zero.');
+                return;
+              }
+              try {
+                const otherBreakdown = Number(editingTransaction.entranceFee || 0) + Number(editingTransaction.loanRepay || 0) +
+                  Number(editingTransaction.savingsContribution || 0) + Number(editingTransaction.sTicket || 0) +
+                  Number(editingTransaction.legalFee || 0) - Number(editingTransaction.expenseDeduction || 0);
+                const correctedOperation = editingTransaction.operationAmount === undefined
+                  ? undefined
+                  : Math.max(0, amount - otherBreakdown);
+                await onUpdateTransaction(editingTransaction.id, {
+                  amount,
+                  description: editDescription.trim(),
+                  vehiclePlate: editVehiclePlate.trim().toUpperCase(),
+                  type: editType,
+                  category: editCategory,
+                  tillNumber: editTill,
+                  ...(correctedOperation !== undefined ? {
+                    operationAmount: correctedOperation,
+                    grossAmount: amount + Number(editingTransaction.expenseDeduction || 0)
+                  } : {})
+                });
+                setJournalSuccess(`Ledger entry ${editingTransaction.refCode} corrected successfully.`);
+                setJournalError('');
+                setEditingTransaction(null);
+              } catch (error: any) {
+                setJournalError(error.message || 'Ledger correction failed.');
+              }
+            }}
+            className="w-full max-w-lg space-y-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl"
+          >
+            <div className="border-b border-slate-200 pb-3">
+              <h3 className="text-sm font-black uppercase tracking-wider text-slate-900">Correct Ledger Entry</h3>
+              <p className="mt-1 text-[10px] text-slate-500">Reference {editingTransaction.refCode} is retained for audit traceability.</p>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="text-[10px] font-bold uppercase text-slate-500">Amount (KES)
+                <input type="number" min="0.01" step="0.01" value={editAmount} onChange={e => setEditAmount(e.target.value)} className="mt-1 w-full rounded-lg border p-2 text-xs" required />
+              </label>
+              <label className="text-[10px] font-bold uppercase text-slate-500">V.REG
+                <input value={editVehiclePlate} onChange={e => setEditVehiclePlate(e.target.value.toUpperCase())} className="mt-1 w-full rounded-lg border p-2 font-mono text-xs uppercase" />
+              </label>
+              <label className="text-[10px] font-bold uppercase text-slate-500">Entry Type
+                <select value={editType} onChange={e => setEditType(e.target.value as 'Credit' | 'Debit')} className="mt-1 w-full rounded-lg border bg-white p-2 text-xs"><option value="Credit">Credit</option><option value="Debit">Debit</option></select>
+              </label>
+              <label className="text-[10px] font-bold uppercase text-slate-500">Till
+                <select value={editTill} onChange={e => setEditTill(e.target.value as Transaction['tillNumber'])} className="mt-1 w-full rounded-lg border bg-white p-2 text-xs"><option value="VehicleTill">Vehicle Till</option><option value="UtilityTill">Utility Till</option><option value="None">None</option></select>
+              </label>
+            </div>
+            <label className="block text-[10px] font-bold uppercase text-slate-500">Category
+              <select value={editCategory} onChange={e => setEditCategory(e.target.value as Transaction['category'])} className="mt-1 w-full rounded-lg border bg-white p-2 text-xs">
+                {['Daily Contribution','Registration Fee','Management Fee','Office Expenses','Petty Cash','Penalty','Utilities','Equipment'].map(category => <option key={category} value={category}>{category}</option>)}
+              </select>
+            </label>
+            <label className="block text-[10px] font-bold uppercase text-slate-500">Description
+              <textarea value={editDescription} onChange={e => setEditDescription(e.target.value)} rows={3} className="mt-1 w-full rounded-lg border p-2 text-xs" required />
+            </label>
+            <div className="flex justify-end gap-2 border-t pt-4">
+              <button type="button" onClick={() => setEditingTransaction(null)} className="rounded-lg border px-4 py-2 text-xs font-bold uppercase text-slate-600">Cancel</button>
+              <button type="submit" className="rounded-lg bg-blue-700 px-4 py-2 text-xs font-bold uppercase text-white hover:bg-blue-800">Save Correction</button>
+            </div>
+          </form>
         </div>
       )}
 

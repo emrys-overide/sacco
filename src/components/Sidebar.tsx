@@ -1,7 +1,6 @@
 import React from 'react';
 import { motion } from 'motion/react';
-import { User, UserRole } from '../types';
-import { mockUsers } from '../data/mockData';
+import { User } from '../types';
 import { 
   LayoutDashboard, 
   Users, 
@@ -10,7 +9,6 @@ import {
   FileCode, 
   LogOut, 
   ChevronUp, 
-  UserCheck, 
   ClipboardList, 
   X, 
   Receipt,
@@ -24,13 +22,11 @@ interface SidebarProps {
   currentTab: string;
   onSelectTab: (tab: string) => void;
   currentUser: User;
-  onSwitchUser: (user: User) => void;
   onLogout: () => void;
   blueprintApproved: boolean;
   onClose?: () => void;
   isDatabaseEmpty: boolean;
   onClearAllData: () => void;
-  onLoadDemoData: () => void;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
 }
@@ -39,13 +35,11 @@ export default function Sidebar({
   currentTab,
   onSelectTab,
   currentUser,
-  onSwitchUser,
   onLogout,
   blueprintApproved,
   onClose,
   isDatabaseEmpty,
   onClearAllData,
-  onLoadDemoData,
   isCollapsed,
   onToggleCollapse
 }: SidebarProps) {
@@ -68,7 +62,7 @@ export default function Sidebar({
       onMouseEnter={() => { if (isCollapsed) setIsHovered(true); }}
       onMouseLeave={() => setIsHovered(false)}
       onTouchStart={() => { if (isCollapsed) setIsHovered(true); }}
-      className={`h-full bg-white text-slate-700 flex flex-col border-r border-slate-200 font-sans shrink-0 transition-all duration-300 ease-in-out ${
+      className={`app-sidebar h-full bg-white text-slate-700 flex flex-col border-r border-slate-200 font-sans shrink-0 transition-all duration-300 ease-in-out ${
         displayCollapsed ? 'w-72 md:w-20' : 'w-72'
       }`}
     >
@@ -191,7 +185,7 @@ export default function Sidebar({
           })}
         </nav>
 
-        {/* Sandbox Database Controls */}
+        {/* Clean Database Controls */}
         {!displayCollapsed ? (
           <div className="mx-4 p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
             <div className="flex items-center justify-between">
@@ -203,26 +197,19 @@ export default function Sidebar({
                   ? 'bg-red-50 text-red-700 border border-red-200' 
                   : 'bg-green-50 text-green-700 border border-green-200'
               }`}>
-                {isDatabaseEmpty ? 'EMPTY' : 'DEMO LOADED'}
+                {isDatabaseEmpty ? 'EMPTY' : 'ACTIVE'}
               </span>
             </div>
             <p className="text-[10px] text-slate-400 leading-normal">
-              Test registration & sheets from scratch, or load pre-populated models.
+              New installs start empty. Add members, vehicles, and ledger entries through the app workflow.
             </p>
-            <div className="grid grid-cols-2 gap-1.5 pt-1">
+            <div className="pt-1">
               <button
                 onClick={onClearAllData}
-                className="py-1 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 rounded text-[9px] font-bold uppercase tracking-wider transition-all cursor-pointer"
-                title="Wipe database to test raw flows"
+                className="w-full py-1 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 rounded text-[9px] font-bold uppercase tracking-wider transition-all cursor-pointer"
+                title="Clear local browser state"
               >
-                Wipe All
-              </button>
-              <button
-                onClick={onLoadDemoData}
-                className="py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded text-[9px] font-bold uppercase tracking-wider transition-all cursor-pointer"
-                title="Load default demo datasets"
-              >
-                Load Demo
+                Clear Local State
               </button>
             </div>
           </div>
@@ -234,7 +221,7 @@ export default function Sidebar({
                   ? 'bg-red-50 border-red-200 text-red-500' 
                   : 'bg-green-50 border-green-200 text-green-500'
               }`}
-              title={isDatabaseEmpty ? 'Database Status: Empty Sacco Registry' : 'Database Status: Demo Data Loaded'}
+              title={isDatabaseEmpty ? 'Database Status: Empty Sacco Registry' : 'Database Status: Active Sacco Registry'}
             >
               <Database className="w-4 h-4" />
             </span>
@@ -242,39 +229,10 @@ export default function Sidebar({
               <button
                 onClick={onClearAllData}
                 className="p-1 bg-red-50 hover:bg-red-100 text-red-600 border border-red-100 rounded text-xs transition-all cursor-pointer hover:scale-105 active:scale-95"
-                title="Fresh App (Wipe Database)"
+                title="Clear Local State"
               >
-                🧹
+                CLR
               </button>
-              <button
-                onClick={onLoadDemoData}
-                className="p-1 bg-blue-50 hover:bg-blue-100 text-blue-600 border border-blue-100 rounded text-xs transition-all cursor-pointer hover:scale-105 active:scale-95"
-                title="Load Demo Datasets"
-              >
-                📥
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Simulation Persona Indicator */}
-        {!displayCollapsed ? (
-          <div className="mx-4 p-3 bg-slate-50 border border-slate-100 rounded-xl">
-            <div className="flex space-x-2 items-start">
-              <UserCheck className="w-3.5 h-3.5 text-blue-600 shrink-0 mt-0.5" />
-              <div className="text-[10px] text-slate-500 leading-normal">
-                <span className="font-bold text-slate-900 block uppercase tracking-wider mb-0.5">Simulate Roles</span>
-                Switch profiles below to view the dashboard under different authorized roles.
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="mx-4 justify-center hidden md:flex">
-            <div 
-              className="p-1.5 bg-slate-50 border border-slate-100 rounded-lg text-slate-400"
-              title="Simulation Mode: Switch active identity at bottom of panel to test various authorization profiles (Chairman, Secretary, Treasurer, Auditor)"
-            >
-              <UserCheck className="w-4 h-4 text-blue-600" />
             </div>
           </div>
         )}
@@ -284,71 +242,6 @@ export default function Sidebar({
       <div className={`p-4 border-t border-slate-100 bg-white flex flex-col transition-all duration-300 ${
         displayCollapsed ? 'md:space-y-4 md:items-center md:justify-center' : 'space-y-3'
       }`}>
-        {!displayCollapsed ? (
-          <div>
-            <label className="block text-[8px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 font-mono">
-              Active Identity
-            </label>
-            <select
-              value={currentUser.email}
-              onChange={(e) => {
-                const selected = mockUsers.find(u => u.email === e.target.value);
-                if (selected) onSwitchUser(selected);
-              }}
-              className="w-full px-2 py-1.5 bg-slate-50 border border-slate-200 rounded text-xs text-slate-700 focus:outline-none cursor-pointer"
-            >
-              {mockUsers.map(user => (
-                <option key={user.id} value={user.email} className="bg-white">
-                  {user.name} ({user.role})
-                </option>
-              ))}
-            </select>
-          </div>
-        ) : (
-          <div className="relative group hidden md:block">
-            {/* Quick switcher select overlay */}
-            <select
-              value={currentUser.email}
-              onChange={(e) => {
-                const selected = mockUsers.find(u => u.email === e.target.value);
-                if (selected) onSwitchUser(selected);
-              }}
-              className="absolute inset-0 w-8 h-8 opacity-0 cursor-pointer z-10"
-              title="Quick Switch Active Profile"
-            >
-              {mockUsers.map(user => (
-                <option key={user.id} value={user.email}>
-                  {user.role}: {user.name}
-                </option>
-              ))}
-            </select>
-            <div className="w-8 h-8 rounded-lg bg-slate-50 hover:bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-500 cursor-pointer transition-colors" title="Switch Profile">
-              <UserCheck className="w-4 h-4 text-blue-600" />
-            </div>
-          </div>
-        )}
-
-        {/* Mobile active identity label always shows fully */}
-        <div className="md:hidden block">
-          <label className="block text-[8px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 font-mono">
-            Active Identity
-          </label>
-          <select
-            value={currentUser.email}
-            onChange={(e) => {
-              const selected = mockUsers.find(u => u.email === e.target.value);
-              if (selected) onSwitchUser(selected);
-            }}
-            className="w-full px-2 py-1.5 bg-slate-50 border border-slate-200 rounded text-xs text-slate-700 focus:outline-none cursor-pointer"
-          >
-            {mockUsers.map(user => (
-              <option key={user.id} value={user.email} className="bg-white">
-                {user.name} ({user.role})
-              </option>
-            ))}
-          </select>
-        </div>
-
         <div className={`flex items-center justify-between pt-2 border-t border-slate-100 w-full ${
           displayCollapsed ? 'md:flex-col md:space-y-3' : 'space-x-3'
         }`}>

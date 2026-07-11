@@ -49,6 +49,7 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
   const [idNumber, setIdNumber] = useState('');
   const [phoneNumber, setPhoneNumber] = useState('');
   const [assignedVehicle, setAssignedVehicle] = useState('');
+  const [openingLoanBalance, setOpeningLoanBalance] = useState('');
   const [error, setError] = useState('');
 
   // Role validation
@@ -94,19 +95,22 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
       idNumber,
       phoneNumber,
       status: 'Active', // Automatically registered as Active for administrative ease in prototype
-      vehicleAssigned: assignedVehicle.trim() || undefined
+      vehicleAssigned: assignedVehicle.trim() || undefined,
+      initialLoanAmount: Number(openingLoanBalance) || 0,
+      loanBalance: Number(openingLoanBalance) || 0
     });
     // Reset Form
     setName('');
     setIdNumber('');
     setPhoneNumber('');
     setAssignedVehicle('');
+    setOpeningLoanBalance('');
     setError('');
     setShowAddModal(false);
   };
 
   const copyMemberDossierToClipboard = (member: Member) => {
-    const details = `MEMBER PROFILE - SOWETAMU SACCO\n-----------------------\nName: ${member.name}\nNational ID: ${member.idNumber}\nPhone No: ${member.phoneNumber}\nAssigned Plate: ${member.vehicleAssigned || 'None'}\nSavings: KES ${member.savingsAmount.toLocaleString()}\nShares: KES ${member.sharesAmount.toLocaleString()}\nRegistered: ${member.dateRegistered || 'N/A'}\nStatus: ${member.status}`;
+  const details = `MEMBER PROFILE - SOWETAMU SACCO\n-----------------------\nName: ${member.name}\nNational ID: ${member.idNumber}\nPhone No: ${member.phoneNumber}\nAssigned Plate: ${member.vehicleAssigned || 'None'}\nSavings: KES ${member.savingsAmount.toLocaleString()}\nShares: KES ${member.sharesAmount.toLocaleString()}\nOutstanding Loan: KES ${(member.loanBalance || 0).toLocaleString()}\nRegistered: ${member.dateRegistered || 'N/A'}\nStatus: ${member.status}`;
     navigator.clipboard.writeText(details).then(() => {
       setCopiedSuccess(true);
       setTimeout(() => setCopiedSuccess(false), 2000);
@@ -133,6 +137,7 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
     content += `------------------------------------------------------\n`;
     content += `Current Sacco Savings  : KES ${member.savingsAmount.toLocaleString()}.00\n`;
     content += `Current Shares Capital : KES ${member.sharesAmount.toLocaleString()}.00\n`;
+    content += `Outstanding Loan       : KES ${(member.loanBalance || 0).toLocaleString()}.00\n`;
     content += `Total Logged Deposits  : KES ${totalDeposited.toLocaleString()}.00\n`;
     content += `Total Penalties/Debits : KES ${totalLevies.toLocaleString()}.00\n\n`;
 
@@ -301,6 +306,9 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                         <p className="text-[9px] text-slate-400 font-mono uppercase mt-0.5">
                           Shares: KES {member.sharesAmount.toLocaleString()}
                         </p>
+                        <p className="text-[9px] text-amber-700 font-mono uppercase mt-0.5">
+                          Loan: KES {(member.loanBalance || 0).toLocaleString()}
+                        </p>
                       </div>
                     </button>
                   );
@@ -396,7 +404,7 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
               <div className="flex-1 overflow-y-auto p-6 space-y-6">
                 
                 {/* Financial Bento Cards */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                   {/* Card 1: Savings Account */}
                   <div className="border border-slate-200 rounded p-4 bg-slate-50/50">
                     <div className="flex items-center justify-between text-slate-400">
@@ -428,6 +436,18 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                   </div>
 
                   {/* Card 3: Assigned Matatu Info */}
+                  <div className="border border-slate-200 rounded p-4 bg-amber-50/50">
+                    <div className="flex items-center justify-between text-slate-400">
+                      <span className="text-[9px] font-bold uppercase tracking-wider font-mono">Outstanding Loan</span>
+                      <DollarSign className="w-4 h-4 text-amber-600" />
+                    </div>
+                    <p className="text-xl font-black text-amber-900 font-mono mt-2">
+                      KES {(activeSelectedMember.loanBalance || 0).toLocaleString()}
+                    </p>
+                    <p className="text-[9px] text-slate-400 mt-1.5 font-medium">Daily Loan Repay amounts reduce this balance</p>
+                  </div>
+
+                  {/* Card 4: Assigned Matatu Info */}
                   <div className="border border-slate-200 rounded p-4 bg-slate-50/50">
                     <div className="flex items-center justify-between text-slate-400">
                       <span className="text-[9px] font-bold uppercase tracking-wider font-mono">Assigned Matatu Plate</span>
@@ -642,6 +662,21 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                   onChange={(e) => setAssignedVehicle(e.target.value.toUpperCase())}
                   className="w-full p-2 border border-slate-200 rounded text-xs font-mono uppercase focus:outline-none focus:border-emerald-600"
                 />
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
+                  Opening Loan Balance (KES)
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  value={openingLoanBalance}
+                  onChange={(e) => setOpeningLoanBalance(e.target.value)}
+                  placeholder="0"
+                  className="w-full p-2 border border-slate-200 rounded text-xs font-mono focus:outline-none focus:border-emerald-600"
+                />
+                <p className="mt-1 text-[9px] text-slate-400">Loan Repay amounts in Daily Collections will reduce this balance.</p>
               </div>
 
               {error && <p className="text-xs text-rose-600 font-bold">{error}</p>}

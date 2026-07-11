@@ -22,6 +22,8 @@ export interface Member {
   vehicleAssigned?: string; // Vehicle registration number
   sharesAmount: number;     // Future capability prepared
   savingsAmount: number;    // Future capability prepared
+  loanBalance?: number;     // Outstanding member loan, reduced by daily loan repayments
+  initialLoanAmount?: number;
 }
 
 export interface Vehicle {
@@ -33,10 +35,11 @@ export interface Vehicle {
   driverPhone: string;
   route: string;       // e.g. "Nairobi - Thika (Route 237)"
   status: 'Active' | 'Maintenance' | 'Suspended';
-  capacity: 14 | 33 | 50;
+  capacity: 7 | 14 | 33 | 50;
 }
 
 export type TillType = 'VehicleTill' | 'UtilityTill' | 'None';
+export type VehicleClass = 'Nissan' | 'Sienta' | 'Member Contribution';
 export type TransactionType = 'Credit' | 'Debit';
 export type TransactionCategory = 'Daily Contribution' | 'Registration Fee' | 'Management Fee' | 'Office Expenses' | 'Petty Cash' | 'Penalty' | 'Utilities' | 'Equipment';
 
@@ -53,6 +56,15 @@ export interface Transaction {
   amount: number;
   recorderName: string;
   tillNumber: TillType;
+  vehicleClass?: VehicleClass;
+  operationAmount?: number;
+  entranceFee?: number;
+  loanRepay?: number;
+  savingsContribution?: number;
+  sTicket?: number;
+  legalFee?: number;
+  expenseDeduction?: number;
+  grossAmount?: number;
   reversalOf?: string;
   reversedAt?: string;
   reversedBy?: string;

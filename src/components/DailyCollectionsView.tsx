@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import type { Vehicle, Member, Transaction } from '../types';
+import type { Vehicle, Member, Transaction, VehicleClass } from '../types';
 import { STORAGE_KEYS } from '../lib/auth';
 import { 
   Printer, 
@@ -24,15 +24,18 @@ interface DailyCollectionsViewProps {
   vehicles: Vehicle[];
   members: Member[];
   transactions: Transaction[];
-  onAddTransaction: (newTx: Omit<Transaction, 'id' | 'timestamp' | 'recorderName'>) => void;
+  onAddTransaction: (newTx: Omit<Transaction, 'id' | 'timestamp' | 'recorderName'>) => Promise<Transaction>;
+  onUpdateTransaction: (transactionId: string, changes: Partial<Transaction>) => Promise<Transaction>;
   currentUserRole: string;
   currentUserName: string;
 }
 
 interface CollectionRow {
+  transactionId?: string;
   no: number;
   vehiclePlate: string;
-  operation: string;
+  vehicleClass: VehicleClass;
+  operation: number;
   entranceFee: number;
   loanRepay: number;
   savings: number;
@@ -44,6 +47,7 @@ interface ExpenseRow {
   no: number;
   description: string;
   amount: number;
+  transactionId?: string;
 }
 
 interface DailySheetSave {
@@ -61,34 +65,19 @@ export default function DailyCollectionsView({
   members,
   transactions,
   onAddTransaction,
+  onUpdateTransaction,
   currentUserRole,
   currentUserName
 }: DailyCollectionsViewProps) {
   
   // Basic Sheet State
-  const [selectedDate, setSelectedDate] = useState<string>('2026-06-29');
-  const [selectedRoute, setSelectedRoute] = useState<string>('STAGE 17&CABANAS');
+  const [selectedDate, setSelectedDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [selectedRoute, setSelectedRoute] = useState<string>('');
   
   // State for rows in the table
-  const [rows, setRows] = useState<CollectionRow[]>([
-    { no: 1, vehiclePlate: 'KBB 112L', operation: '9 TRIPS', entranceFee: 0, loanRepay: 2000, savings: 1500, sTicket: 300, legalFee: 0 },
-    { no: 2, vehiclePlate: 'KCJ 402X', operation: '7 TRIPS', entranceFee: 0, loanRepay: 1500, savings: 1200, sTicket: 300, legalFee: 100 },
-    { no: 3, vehiclePlate: 'KDD 445Z', operation: '8 TRIPS', entranceFee: 1000, loanRepay: 0, savings: 1500, sTicket: 300, legalFee: 0 },
-    { no: 4, vehiclePlate: 'KCD 883A', operation: 'MAINTENANCE', entranceFee: 0, loanRepay: 1000, savings: 500, sTicket: 0, legalFee: 50 },
-    { no: 5, vehiclePlate: 'KAA 998Y', operation: '6 TRIPS', entranceFee: 2000, loanRepay: 3000, savings: 2000, sTicket: 300, legalFee: 100 },
-  ]);
+  const [rows, setRows] = useState<CollectionRow[]>([]);
 
-  // Bottom left Expenses list (8 lines replicating the handwritten template, honoring 3, 3 typo!)
-  const [expenses, setExpenses] = useState<ExpenseRow[]>([
-    { no: 1, description: 'Route Marshalls Allowance (Stage 17)', amount: 1500 },
-    { no: 2, description: 'Cabanas Terminal Cleaning Levy', amount: 450 },
-    { no: 3, description: 'Tea & Samosas for Inspectors', amount: 600 },
-    { no: 3, description: 'Stationery Logbook Printing', amount: 350 }, // Typo replicated faithfully
-    { no: 4, description: 'First-Aid Kit Refills (Fleet KBB)', amount: 800 },
-    { no: 5, description: 'Sacco Inspector Petrol Voucher', amount: 1200 },
-    { no: 6, description: '', amount: 0 },
-    { no: 7, description: '', amount: 0 },
-  ]);
+  const [expenses, setExpenses] = useState<ExpenseRow[]>([]);
 
   // Saved sheets index for loading different days
   const [savedSheets, setSavedSheets] = useState<DailySheetSave[]>([]);
@@ -96,35 +85,79 @@ export default function DailyCollectionsView({
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [isPosted, setIsPosted] = useState<boolean>(false);
   
-  // Auditor or Posted Sheets are locked in read-only mode to satisfy security protocols
-  const isReadOnly = isPosted || currentUserRole === 'Auditor';
+  // Posting records entries in the ledger; only auditors are read-only.
+  const isReadOnly = currentUserRole === 'Auditor';
 
   // Load from local storage on mount
   useEffect(() => {
     const cached = localStorage.getItem(STORAGE_KEYS.savedSheets);
-    if (cached) {
-      const parsed = JSON.parse(cached) as DailySheetSave[];
-      setSavedSheets(parsed);
-      
-      // Look if there is a sheet for currently selected date and route
-      const matched = parsed.find(s => s.date === selectedDate && s.route === selectedRoute);
-      if (matched) {
-        setRows(matched.rows);
-        setExpenses(matched.expenses);
-        setIsPosted(matched.posted);
-      }
-    }
-  }, [selectedDate, selectedRoute]);
+    const parsed = cached ? JSON.parse(cached) as DailySheetSave[] : [];
+    setSavedSheets(parsed);
+    const matched = parsed.find(s => s.date === selectedDate && s.route === selectedRoute);
+    const localRows = matched ? matched.rows.map(row => ({
+          ...row,
+          vehicleClass: row.vehicleClass || 'Nissan',
+          operation: Number(row.operation) || 0
+        })) : [];
+    const syncedRows: CollectionRow[] = transactions
+      .filter(tx => tx.category === 'Daily Contribution' && tx.timestamp.slice(0, 10) === selectedDate && (
+        tx.operationAmount !== undefined || tx.entranceFee !== undefined || tx.loanRepay !== undefined ||
+        tx.savingsContribution !== undefined || tx.sTicket !== undefined || tx.legalFee !== undefined
+      ))
+      .map((tx, index) => ({
+        transactionId: tx.id,
+        no: index + 1,
+        vehiclePlate: tx.vehiclePlate || '',
+        vehicleClass: tx.vehicleClass || 'Nissan',
+        operation: Number(tx.operationAmount || 0),
+        entranceFee: Number(tx.entranceFee || 0),
+        loanRepay: Number(tx.loanRepay || 0),
+        savings: Number(tx.savingsContribution || 0),
+        sTicket: Number(tx.sTicket || 0),
+        legalFee: Number(tx.legalFee || 0)
+      }));
+    const syncedIds = new Set(syncedRows.map(row => row.transactionId));
+    setRows([...localRows.filter(row => !row.transactionId || !syncedIds.has(row.transactionId)), ...syncedRows]
+      .map((row, index) => ({ ...row, no: index + 1 })));
+    setExpenses(matched?.expenses || []);
+    setIsPosted(matched?.posted || false);
+  }, [selectedDate, selectedRoute, transactions]);
 
   // Save changes helper
-  const handleSaveLocal = (postedStatus: boolean = isPosted) => {
+  const handleSaveLocal = async (
+    postedStatus: boolean = isPosted,
+    rowsToSave: CollectionRow[] = rows,
+    expensesToSave: ExpenseRow[] = expenses
+  ) => {
+    try {
+      await Promise.all(rowsToSave.filter(row => row.transactionId).map(row => {
+        const grossAmount = getRowTotal(row);
+        const original = transactions.find(tx => tx.id === row.transactionId);
+        const deduction = Number(original?.expenseDeduction || 0);
+        return onUpdateTransaction(row.transactionId!, {
+          vehiclePlate: row.vehiclePlate,
+          vehicleClass: row.vehicleClass,
+          operationAmount: row.operation,
+          entranceFee: row.entranceFee,
+          loanRepay: row.loanRepay,
+          savingsContribution: row.savings,
+          sTicket: row.sTicket,
+          legalFee: row.legalFee,
+          grossAmount,
+          amount: Math.max(0, grossAmount - deduction)
+        });
+      }));
+    } catch (error: any) {
+      setErrorMessage(error?.message || 'Could not save ledger corrections.');
+      return;
+    }
     const sheetId = `${selectedDate}_${selectedRoute.replace(/\s+/g, '_')}`;
     const newSave: DailySheetSave = {
       id: sheetId,
       date: selectedDate,
       route: selectedRoute,
-      rows,
-      expenses,
+      rows: rowsToSave,
+      expenses: expensesToSave,
       posted: postedStatus,
       postedAt: postedStatus ? new Date().toLocaleString() : undefined
     };
@@ -136,11 +169,12 @@ export default function DailyCollectionsView({
     localStorage.setItem(STORAGE_KEYS.savedSheets, JSON.stringify(updated));
     setIsPosted(postedStatus);
     
-    setSuccessMessage(`Daily log sheet for ${selectedRoute} on ${selectedDate} saved locally!`);
+    setSuccessMessage(`Daily log sheet for ${selectedRoute || 'all routes'} on ${selectedDate} saved and ledger corrections synchronized!`);
     setTimeout(() => setSuccessMessage(''), 5000);
   };
 
   // Math aggregates
+  const totalOperation = rows.reduce((sum, r) => sum + Number(r.operation || 0), 0);
   const totalEntrance = rows.reduce((sum, r) => sum + r.entranceFee, 0);
   const totalLoanRepay = rows.reduce((sum, r) => sum + r.loanRepay, 0);
   const totalSavings = rows.reduce((sum, r) => sum + r.savings, 0);
@@ -148,7 +182,7 @@ export default function DailyCollectionsView({
   const totalLegalFee = rows.reduce((sum, r) => sum + r.legalFee, 0);
 
   const totalRevenue = rows.reduce((sum, r) => {
-    const rowTotal = r.entranceFee + r.loanRepay + r.savings + r.sTicket + r.legalFee;
+    const rowTotal = Number(r.operation || 0) + r.entranceFee + r.loanRepay + r.savings + r.sTicket + r.legalFee;
     return sum + rowTotal;
   }, 0);
 
@@ -156,25 +190,17 @@ export default function DailyCollectionsView({
   const netIncome = totalRevenue - totalExpenses;
 
   // Sientas / Nissans segment calculations (matching bottom indicators of the template)
-  const nissanRows = rows.filter(r => {
-    const plate = r.vehiclePlate.toUpperCase();
-    const isSienta = plate.includes('KDD') || plate.includes('KAA'); // hypothetical categorization rules
-    return !isSienta;
-  });
-  
-  const sientaRows = rows.filter(r => {
-    const plate = r.vehiclePlate.toUpperCase();
-    const isSienta = plate.includes('KDD') || plate.includes('KAA');
-    return isSienta;
-  });
+  const nissanRows = rows.filter(r => r.vehicleClass === 'Nissan');
+  const sientaRows = rows.filter(r => r.vehicleClass === 'Sienta');
 
-  const nissanTotal = nissanRows.reduce((sum, r) => sum + r.entranceFee + r.loanRepay + r.savings + r.sTicket + r.legalFee, 0);
-  const sientaTotal = sientaRows.reduce((sum, r) => sum + r.entranceFee + r.loanRepay + r.savings + r.sTicket + r.legalFee, 0);
+  const getRowTotal = (r: CollectionRow) => Number(r.operation || 0) + r.entranceFee + r.loanRepay + r.savings + r.sTicket + r.legalFee;
+  const nissanTotal = nissanRows.reduce((sum, r) => sum + getRowTotal(r), 0);
+  const sientaTotal = sientaRows.reduce((sum, r) => sum + getRowTotal(r), 0);
 
   // Row operations
   const handleUpdateRowField = (no: number, field: keyof CollectionRow, value: string | number) => {
     if (isReadOnly) {
-      setErrorMessage(currentUserRole === 'Auditor' ? "Security Warning: Sacco Auditors have read-only access and cannot modify sheet entries." : "Cannot edit rows once posted to the ledger! Revoke or select another date first.");
+      setErrorMessage('Sacco Auditors have read-only access and cannot modify sheet entries.');
       setTimeout(() => setErrorMessage(''), 5000);
       return;
     }
@@ -184,6 +210,14 @@ export default function DailyCollectionsView({
       }
       return r;
     }));
+  };
+
+  const handleVehicleClassChange = (no: number, vehicleClass: VehicleClass) => {
+    if (isReadOnly) return;
+    setRows(prev => prev.map(row => row.no === no ? {
+      ...row,
+      vehicleClass
+    } : row));
   };
 
   const handleUpdateExpenseField = (no: number, index: number, field: keyof ExpenseRow, value: string | number) => {
@@ -206,7 +240,8 @@ export default function DailyCollectionsView({
     setRows(prev => [...prev, {
       no: nextNo,
       vehiclePlate: vehicles[prev.length % vehicles.length]?.plateNumber || '',
-      operation: 'ACTIVE',
+      vehicleClass: 'Nissan',
+      operation: 0,
       entranceFee: 0,
       loanRepay: 0,
       savings: 0,
@@ -232,150 +267,83 @@ export default function DailyCollectionsView({
     setExpenses(prev => prev.filter((_, idx) => idx !== index));
   };
 
-  // Re-load initial default data
+  // Reset to a blank daily sheet
   const handleResetDefaults = () => {
     if (isReadOnly) return;
-    setRows([
-      { no: 1, vehiclePlate: 'KBB 112L', operation: '9 TRIPS', entranceFee: 0, loanRepay: 2000, savings: 1500, sTicket: 300, legalFee: 0 },
-      { no: 2, vehiclePlate: 'KCJ 402X', operation: '7 TRIPS', entranceFee: 0, loanRepay: 1500, savings: 1200, sTicket: 300, legalFee: 100 },
-      { no: 3, vehiclePlate: 'KDD 445Z', operation: '8 TRIPS', entranceFee: 1000, loanRepay: 0, savings: 1500, sTicket: 300, legalFee: 0 },
-      { no: 4, vehiclePlate: 'KCD 883A', operation: 'MAINTENANCE', entranceFee: 0, loanRepay: 1000, savings: 500, sTicket: 0, legalFee: 50 },
-      { no: 5, vehiclePlate: 'KAA 998Y', operation: '6 TRIPS', entranceFee: 2000, loanRepay: 3000, savings: 2000, sTicket: 300, legalFee: 100 },
-    ]);
-    setExpenses([
-      { no: 1, description: 'Route Marshalls Allowance (Stage 17)', amount: 1500 },
-      { no: 2, description: 'Cabanas Terminal Cleaning Levy', amount: 450 },
-      { no: 3, description: 'Tea & Samosas for Inspectors', amount: 600 },
-      { no: 3, description: 'Stationery Logbook Printing', amount: 350 },
-      { no: 4, description: 'First-Aid Kit Refills (Fleet KBB)', amount: 800 },
-      { no: 5, description: 'Sacco Inspector Petrol Voucher', amount: 1200 },
-      { no: 6, description: '', amount: 0 },
-      { no: 7, description: '', amount: 0 },
-    ]);
+    setRows([]);
+    setExpenses([]);
     setIsPosted(false);
   };
 
-  // Post to general ledger (immutably)
-  const handlePostToLedger = () => {
+  // One save action: corrections update linked entries and new manual rows are recorded automatically.
+  const handleSaveChanges = async () => {
     if (currentUserRole === 'Auditor') {
       setErrorMessage("Security Exception: Sacco Auditors have read-only access and cannot post log sheets to ledger.");
       setTimeout(() => setErrorMessage(''), 5000);
       return;
     }
 
-    if (isPosted) {
-      setErrorMessage("This log sheet is already synchronized with the centralized ledger.");
-      setTimeout(() => setErrorMessage(''), 5000);
-      return;
-    }
-
-    if (rows.length === 0) {
-      setErrorMessage("No collections are present to post. Add some data first.");
-      setTimeout(() => setErrorMessage(''), 5000);
-      return;
-    }
-
-    // Generate credit transaction logs for each categories with total sums
-    // This aggregates them into singular credit events linked to the VehicleTill or UtilityTill, preventing ledger flooding.
-    
-    let postedCount = 0;
     const timestampShort = selectedDate;
-
-    // 1. Post Entrance Fees
-    if (totalEntrance > 0) {
-      onAddTransaction({
-        description: `Entrance Fee Daily Aggregation (${selectedRoute} - Log ${timestampShort})`,
-        refCode: `SWT-ENT-${timestampShort.replace(/-/g, '')}`,
-        type: 'Credit',
-        category: 'Registration Fee',
-        amount: totalEntrance,
-        tillNumber: 'VehicleTill'
-      });
-      postedCount++;
+    const unpostedRows = rows.filter(row => !row.transactionId);
+    const unpostedExpenses = expenses.filter(exp => !exp.transactionId && exp.amount > 0 && exp.description.trim());
+    if (!unpostedRows.length && !unpostedExpenses.length) {
+      await handleSaveLocal(isPosted);
+      setSuccessMessage('Changes saved. All visible entries are already linked to the Sacco ledger.');
+      setTimeout(() => setSuccessMessage(''), 5000);
+      return;
     }
 
-    // 2. Post Loan Repayments
-    if (totalLoanRepay > 0) {
-      onAddTransaction({
-        description: `Loan Repayments Collection (${selectedRoute} - Log ${timestampShort})`,
-        refCode: `SWT-LN-${timestampShort.replace(/-/g, '')}`,
-        type: 'Credit',
-        category: 'Daily Contribution', // Fits contribution context
-        amount: totalLoanRepay,
-        tillNumber: 'VehicleTill'
-      });
-      postedCount++;
-    }
+    try {
+      const createdRowIds = new Map<number, string>();
+      for (const row of unpostedRows) {
+        const grossAmount = getRowTotal(row);
+        if (grossAmount <= 0) continue;
+        const vehicle = vehicles.find(item => item.plateNumber === row.vehiclePlate);
+        const member = members.find(item => item.id === vehicle?.ownerId);
+        const transaction = await onAddTransaction({
+          memberId: member?.id,
+          memberName: member?.name,
+          vehiclePlate: row.vehiclePlate,
+          vehicleClass: row.vehicleClass,
+          operationAmount: row.operation,
+          entranceFee: row.entranceFee,
+          loanRepay: row.loanRepay,
+          savingsContribution: row.savings,
+          sTicket: row.sTicket,
+          legalFee: row.legalFee,
+          grossAmount,
+          description: `${row.vehicleClass} daily collection (${selectedRoute || 'field sheet'} - row ${row.no})`,
+          refCode: `SWT-DLY-${row.vehiclePlate.replace(/\s+/g, '')}-${timestampShort.replace(/-/g, '')}-${row.no}`,
+          type: 'Credit',
+          category: 'Daily Contribution',
+          amount: grossAmount,
+          tillNumber: 'VehicleTill'
+        });
+        createdRowIds.set(row.no, transaction.id);
+      }
 
-    // 3. Post Savings
-    if (totalSavings > 0) {
-      // Find matching active members for individual vehicle assignments to distribute savings accurately
-      rows.forEach(row => {
-        if (row.savings > 0) {
-          const matchingVehicle = vehicles.find(v => v.plateNumber === row.vehiclePlate);
-          const ownerMember = members.find(m => m.id === matchingVehicle?.ownerId);
-          
-          onAddTransaction({
-            memberId: ownerMember?.id,
-            memberName: ownerMember?.name,
-            vehiclePlate: row.vehiclePlate,
-            description: `Savings Contribution from Logsheet row ${row.no} (${row.vehiclePlate})`,
-            refCode: `SWT-SAV-${row.vehiclePlate.replace(/\s+/g, '')}-${timestampShort.replace(/-/g, '')}`,
-            type: 'Credit',
-            category: 'Daily Contribution',
-            amount: row.savings,
-            tillNumber: 'VehicleTill'
-          });
-          postedCount++;
-        }
-      });
-    }
-
-    // 4. Post S/Ticket Collections
-    if (totalSTicket > 0) {
-      onAddTransaction({
-        description: `Short-Ticket / Sacco Security Ticket Sales (${selectedRoute} - Log ${timestampShort})`,
-        refCode: `SWT-STK-${timestampShort.replace(/-/g, '')}`,
-        type: 'Credit',
-        category: 'Management Fee',
-        amount: totalSTicket,
-        tillNumber: 'VehicleTill'
-      });
-      postedCount++;
-    }
-
-    // 5. Post Legal Fees
-    if (totalLegalFee > 0) {
-      onAddTransaction({
-        description: `Legal Fees daily stage surcharge collections (${selectedRoute} - Log ${timestampShort})`,
-        refCode: `SWT-LGL-${timestampShort.replace(/-/g, '')}`,
-        type: 'Credit',
-        category: 'Penalty',
-        amount: totalLegalFee,
-        tillNumber: 'VehicleTill'
-      });
-      postedCount++;
-    }
-
-    // 6. Post individual Expenses as Debits
-    expenses.forEach(exp => {
-      if (exp.amount > 0 && exp.description.trim()) {
-        onAddTransaction({
-          description: `${exp.description} (${selectedRoute} stage field expense)`,
-          refCode: `SWT-EXP-${exp.no}-${timestampShort.replace(/-/g, '')}`,
+      const createdExpenseIds = new Map<number, string>();
+      for (const expense of unpostedExpenses) {
+        const transaction = await onAddTransaction({
+          description: `${expense.description} (${selectedRoute || 'field sheet'} expense)`,
+          refCode: `SWT-EXP-${timestampShort.replace(/-/g, '')}-${expense.no}`,
           type: 'Debit',
           category: 'Petty Cash',
-          amount: exp.amount,
+          amount: expense.amount,
           tillNumber: 'UtilityTill'
         });
-        postedCount++;
+        createdExpenseIds.set(expense.no, transaction.id);
       }
-    });
 
-    // Save with posted flag = true
-    handleSaveLocal(true);
-
-    setSuccessMessage(`Ledger Synced! Successfully recorded ${postedCount} transactional logs into Sacco Ledger Tills!`);
+      const updatedRows = rows.map(row => createdRowIds.has(row.no) ? { ...row, transactionId: createdRowIds.get(row.no) } : row);
+      const updatedExpenses = expenses.map(expense => createdExpenseIds.has(expense.no) ? { ...expense, transactionId: createdExpenseIds.get(expense.no) } : expense);
+      setRows(updatedRows);
+      setExpenses(updatedExpenses);
+      await handleSaveLocal(true, updatedRows, updatedExpenses);
+      setSuccessMessage(`Saved ${createdRowIds.size + createdExpenseIds.size} new entry${createdRowIds.size + createdExpenseIds.size === 1 ? '' : 'ies'} and linked them to the Sacco ledger.`);
+    } catch (error: any) {
+      setErrorMessage(error?.message || 'Could not post the new entries to the ledger.');
+    }
     setTimeout(() => setSuccessMessage(''), 5000);
   };
 
@@ -416,7 +384,7 @@ export default function DailyCollectionsView({
           </button>
           
           <span className="text-[10px] text-slate-400 font-mono hidden md:block">
-            Status: {isPosted ? '🔴 Immutable Post Linked' : currentUserRole === 'Auditor' ? '🟡 Auditor View-Only' : '🟢 Draft Mode'}
+            Status: {currentUserRole === 'Auditor' ? '🟡 Auditor View-Only' : isPosted ? '🟢 Ledger Linked — Corrections Enabled' : '🟢 Draft Mode'}
           </span>
         </div>
       </div>
@@ -455,16 +423,12 @@ export default function DailyCollectionsView({
             <label className="block text-[10px] font-black uppercase text-slate-500 tracking-wider mb-1 font-mono">
               STAGE ROUTE LOCATION
             </label>
-            <select
+            <input
+              type="text"
               value={selectedRoute}
               onChange={(e) => setSelectedRoute(e.target.value)}
               className="px-3 py-1.5 border border-slate-300 rounded text-xs font-bold bg-slate-50 focus:outline-none focus:border-slate-900"
-            >
-              <option value="STAGE 17&CABANAS">STAGE 17 &amp; CABANAS</option>
-              <option value="Nairobi - Thika (Route 237)">NAIROBI - THIKA (ROUTE 237)</option>
-              <option value="Nairobi - Ruiru (Route 145)">NAIROBI - RUIRU (ROUTE 145)</option>
-              <option value="Nairobi - Githurai (Route 45)">NAIROBI - GITHURAI (ROUTE 45)</option>
-            </select>
+            />
           </div>
         </div>
 
@@ -475,17 +439,18 @@ export default function DailyCollectionsView({
             className={`px-3 py-1.5 border border-slate-300 hover:border-slate-400 text-slate-600 rounded text-xs font-bold uppercase tracking-wider flex items-center space-x-1 transition-all ${
               isReadOnly ? 'opacity-50 cursor-not-allowed' : ''
             }`}
-            title="Reload default photo snapshot records"
+            title="Clear this daily sheet"
           >
             <RotateCcw className="w-3.5 h-3.5" />
-            <span>Reset Template</span>
+            <span>Clear Sheet</span>
           </button>
 
           <button
-            onClick={() => handleSaveLocal()}
-            className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded text-xs font-bold uppercase tracking-wider flex items-center space-x-1.5 transition-all shadow-xs"
+            onClick={handleSaveChanges}
+            disabled={isReadOnly}
+            className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white rounded text-xs font-bold uppercase tracking-wider flex items-center space-x-1.5 transition-all shadow-xs"
           >
-            <span>Save Draft</span>
+            <span>Save Changes</span>
           </button>
         </div>
       </div>
@@ -539,6 +504,7 @@ export default function DailyCollectionsView({
               <tr>
                 <th className="px-3 py-2.5 border-r border-slate-300 w-12 text-center">NO</th>
                 <th className="px-3 py-2.5 border-r border-slate-300 w-36">V.REG (PLATE)</th>
+                <th className="px-3 py-2.5 border-r border-slate-300 w-24">CLASS</th>
                 <th className="px-3 py-2.5 border-r border-slate-300 w-28">OPERATION</th>
                 <th className="px-3 py-2.5 border-r border-slate-300 text-right">ENTRANCE FEE</th>
                 <th className="px-3 py-2.5 border-r border-slate-300 text-right">LOAN REPAY</th>
@@ -551,7 +517,7 @@ export default function DailyCollectionsView({
             </thead>
             <tbody className="divide-y border-b border-slate-900 divide-slate-300 text-xs">
               {rows.map((row, idx) => {
-                const rowTotal = row.entranceFee + row.loanRepay + row.savings + row.sTicket + row.legalFee;
+                const rowTotal = getRowTotal(row);
                 return (
                   <tr key={row.no} className="hover:bg-slate-50/50">
                     <td className="px-3 py-2 border-r border-slate-300 font-mono text-center text-slate-500 font-bold">
@@ -563,17 +529,37 @@ export default function DailyCollectionsView({
                       {isReadOnly ? (
                         <span className="font-mono font-bold text-slate-800">{row.vehiclePlate}</span>
                       ) : (
-                        <select
+                        <>
+                        <input
+                          type="text"
+                          list={`daily-vehicle-plates-${row.no}`}
                           value={row.vehiclePlate}
-                          onChange={(e) => handleUpdateRowField(row.no, 'vehiclePlate', e.target.value)}
+                          onChange={(e) => handleUpdateRowField(row.no, 'vehiclePlate', e.target.value.toUpperCase())}
+                          placeholder="e.g. KDA 123A"
                           className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono font-bold bg-transparent text-slate-800 text-xs rounded focus:outline-none"
-                        >
+                        />
+                        <datalist id={`daily-vehicle-plates-${row.no}`}>
                           {vehicles.map(v => (
                             <option key={v.id} value={v.plateNumber}>{v.plateNumber} ({v.driverName})</option>
                           ))}
-                          <option value="KAA 998Y">KAA 998Y (Sienta)</option>
-                          <option value="KBB 212Z">KBB 212Z (Niss)</option>
-                          <option value="KCC 555B">KCC 555B (Niss)</option>
+                        </datalist>
+                        </>
+                      )}
+                    </td>
+
+                    {/* VEHICLE CLASS */}
+                    <td className="px-3 py-2 border-r border-slate-300">
+                      {isReadOnly ? (
+                        <span className="font-mono font-bold text-slate-700">{row.vehicleClass}</span>
+                      ) : (
+                        <select
+                          value={row.vehicleClass}
+                          onChange={(e) => handleVehicleClassChange(row.no, e.target.value as VehicleClass)}
+                          className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono font-bold bg-transparent text-xs rounded focus:outline-none"
+                        >
+                          <option value="Nissan">Nissan</option>
+                          <option value="Sienta">Sienta</option>
+                          <option value="Member Contribution">Member Contribution</option>
                         </select>
                       )}
                     </td>
@@ -581,11 +567,12 @@ export default function DailyCollectionsView({
                     {/* OPERATION FIELD */}
                     <td className="px-3 py-2 border-r border-slate-300">
                       <input
-                        type="text"
-                        value={row.operation}
+                        type="number"
+                        min="0"
+                        value={row.operation || ''}
                         disabled={isReadOnly}
-                        onChange={(e) => handleUpdateRowField(row.no, 'operation', e.target.value.toUpperCase())}
-                        className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono bg-transparent text-slate-700 text-xs rounded focus:outline-none focus:bg-white"
+                        onChange={(e) => handleUpdateRowField(row.no, 'operation', Number(e.target.value))}
+                        className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-emerald-800 font-bold text-xs rounded focus:outline-none focus:bg-white"
                       />
                     </td>
 
@@ -669,7 +656,7 @@ export default function DailyCollectionsView({
               {/* EMPTY STATE INDICATOR FOR TABLE */}
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={10} className="py-8 text-center text-slate-400 font-medium font-mono text-xs">
+                  <td colSpan={11} className="py-8 text-center text-slate-400 font-medium font-mono text-xs">
                     No logs filled. Click "Add Registration Row" below to populate this field list.
                   </td>
                 </tr>
@@ -681,6 +668,9 @@ export default function DailyCollectionsView({
               <tr>
                 <td colSpan={3} className="px-3 py-3 border-r border-slate-700 text-center text-slate-200">
                   TOTAL REVENUE COLUMNS
+                </td>
+                <td className="px-3 py-3 border-r border-slate-700 text-right text-emerald-400">
+                  {totalOperation > 0 ? `KSH ${totalOperation.toLocaleString()}` : '—'}
                 </td>
                 <td className="px-3 py-3 border-r border-slate-700 text-right text-emerald-400">
                   {totalEntrance > 0 ? `KSH ${totalEntrance.toLocaleString()}` : '—'}
@@ -833,32 +823,30 @@ export default function DailyCollectionsView({
                 </div>
               </div>
 
-              {/* POSTING DECISION PANEL */}
+              {/* SAVE STATUS PANEL */}
               <div className="pt-2 border-t border-slate-800 flex flex-col space-y-2 no-print">
-                {isPosted ? (
+                {isPosted && (
                   <div className="p-3 bg-emerald-950/80 border border-emerald-500 rounded flex flex-col space-y-1 text-center">
                     <span className="text-[9px] font-black uppercase text-emerald-400 tracking-widest flex items-center justify-center">
                       <Check className="w-3.5 h-3.5 text-emerald-400 mr-1 shrink-0 animate-bounce" />
-                      RECONCILIATION CO-POSTED
+                      LEDGER LINKED — CORRECTIONS ENABLED
                     </span>
                     <p className="text-[10px] text-slate-400 leading-normal">
-                      The total revenues and expenses of this sheet are permanently posted onto the Sacco dual-tills. (T1: VehicleTill &amp; T2: UtilityTill)
+                      Existing entries are linked to the ledger. Save Changes updates corrections and records any new manual rows automatically.
                     </p>
                   </div>
-                ) : (
-                  <>
-                    <button
-                      onClick={handlePostToLedger}
-                      className="w-full py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs uppercase tracking-wider rounded border border-emerald-600 shadow-[2px_2px_0px_rgba(255,255,255,0.1)] hover:shadow-none transition-all flex items-center justify-center space-x-1.5"
-                    >
-                      <Send className="w-4 h-4 text-slate-950" />
-                      <span>Post to Sacco Ledgers</span>
-                    </button>
-                    <p className="text-[9px] text-slate-400 leading-tight text-center">
-                      Posting splits savings to members, loans to assets, fees to the vehicle till, and deductions to the utilities drawer.
-                    </p>
-                  </>
                 )}
+                <button
+                  onClick={handleSaveChanges}
+                  disabled={currentUserRole === 'Auditor'}
+                  className="w-full py-2.5 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-black text-xs uppercase tracking-wider rounded border border-emerald-600 shadow-[2px_2px_0px_rgba(255,255,255,0.1)] hover:shadow-none transition-all flex items-center justify-center space-x-1.5"
+                >
+                  <Send className="w-4 h-4 text-slate-950" />
+                  <span>Save Daily Changes</span>
+                </button>
+                <p className="text-[9px] text-slate-400 leading-tight text-center">
+                  Dashboard transactions are already saved. This action saves corrections and any new manual rows in one step.
+                </p>
               </div>
             </div>
 
@@ -889,7 +877,7 @@ export default function DailyCollectionsView({
             <div className="w-64 space-y-4">
               <p className="text-slate-500 uppercase font-bold text-[10px] text-left">Verified By (Treasury Office):</p>
               <div className="border-b border-slate-900 w-full h-8 flex items-end pb-1 font-bold text-slate-400">
-                {isPosted ? 'Timothy Mwangi (Sacco Treasurer)' : 'Awaiting Ledger Post...'}
+                {isPosted ? currentUserName : 'Awaiting first save...'}
               </div>
               <p className="text-[10px] text-slate-400 uppercase tracking-wider text-left">Authorized Signature Stamp</p>
             </div>

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
-import { Transaction, Vehicle, Member, UserRole } from '../types';
+import { Transaction, Vehicle, Member, UserRole, VehicleClass } from '../types';
 import { PlusCircle, Search, FileDown, ShieldCheck, DollarSign, Activity, AlertCircle, ArrowUpRight, CheckCircle2, Sparkles, Minimize2, Maximize2, LayoutDashboard } from 'lucide-react';
 
 interface SparklineProps {
@@ -36,34 +36,37 @@ interface SaccoAnalyticsChartProps {
   transactions: Transaction[];
 }
 
+function getRecentDailySeries(
+  transactions: Transaction[],
+  include: (transaction: Transaction) => boolean,
+  days: number
+) {
+  const latestTimestamp = transactions.reduce<string | null>((latest, transaction) => {
+    return !latest || transaction.timestamp > latest ? transaction.timestamp : latest;
+  }, null);
+  const baseDate = latestTimestamp ? new Date(latestTimestamp) : new Date();
+  const series = [] as { dateString: string; label: string; amount: number }[];
+
+  for (let index = days - 1; index >= 0; index--) {
+    const date = new Date(baseDate);
+    date.setDate(date.getDate() - index);
+    const dateString = date.toISOString().slice(0, 10);
+    series.push({
+      dateString,
+      label: date.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric' }),
+      amount: transactions
+        .filter(transaction => include(transaction) && transaction.timestamp.slice(0, 10) === dateString)
+        .reduce((sum, transaction) => sum + transaction.amount, 0)
+    });
+  }
+
+  return series;
+}
+
 function SaccoAnalyticsChart({ transactions }: SaccoAnalyticsChartProps) {
-  const getLast7DaysData = () => {
-    const days = [];
-    const baseDate = new Date('2026-06-29');
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date(baseDate);
-      d.setDate(baseDate.getDate() - i);
-      const dateString = d.toISOString().slice(0, 10);
-      const formattedDate = d.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric' });
-      
-      const amount = transactions
-        .filter(t => t.type === 'Credit' && t.timestamp.startsWith(dateString))
-        .reduce((sum, t) => sum + t.amount, 0);
-
-      days.push({ dateString, label: formattedDate, amount });
-    }
-    return days;
-  };
-
-  const daysData = getLast7DaysData();
-  
-  const chartData = daysData.map((day, idx) => {
-    // Inject nice variation if mock data hasn't accumulated for all days
-    const visualAmount = day.amount > 0 ? day.amount : (18000 + (idx * 6500) % 24000);
-    return { ...day, amount: visualAmount };
-  });
-
-  const maxVal = Math.max(...chartData.map(d => d.amount), 30000) * 1.15;
+  const chartData = getRecentDailySeries(transactions, transaction => transaction.type === 'Credit', 7);
+  const hasActivity = chartData.some(day => day.amount > 0);
+  const maxVal = Math.max(...chartData.map(day => day.amount), 1) * 1.15;
   const minVal = 0;
   const range = maxVal - minVal;
 
@@ -93,16 +96,12 @@ function SaccoAnalyticsChart({ transactions }: SaccoAnalyticsChartProps) {
       <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
         <div>
           <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider font-display">Sacco Cash Collection Flow</h3>
-          <p className="text-[11px] text-slate-400 mt-0.5">Dual-till combined live transaction volume stream (last 7 days)</p>
+          <p className="text-[11px] text-slate-400 mt-0.5">Recorded credit collections for the most recent 7-day period</p>
         </div>
         <div className="flex items-center space-x-4 text-[10px] font-mono">
           <span className="flex items-center text-blue-600 font-bold">
             <span className="w-2 h-2 rounded-full bg-blue-500 mr-1.5 animate-pulse"></span>
-            Fleet Deposits
-          </span>
-          <span className="flex items-center text-slate-400">
-            <span className="w-2 h-2 rounded-full bg-slate-200 mr-1.5"></span>
-            Baseline target (15K KES)
+            Recorded collections
           </span>
         </div>
       </div>
@@ -144,17 +143,6 @@ function SaccoAnalyticsChart({ transactions }: SaccoAnalyticsChartProps) {
               </g>
             );
           })}
-
-          {/* Baseline target line */}
-          <line
-            x1={paddingLeft}
-            y1={paddingTop + chartHeight - ((15000 - minVal) / range) * chartHeight}
-            x2={width - paddingRight}
-            y2={paddingTop + chartHeight - ((15000 - minVal) / range) * chartHeight}
-            stroke="#cbd5e1"
-            strokeWidth="1.5"
-            strokeDasharray="2 2"
-          />
 
           {/* Area under curve with gradient fill */}
           {areaPath && <path d={areaPath} fill="url(#chartGlow)" />}
@@ -209,6 +197,11 @@ function SaccoAnalyticsChart({ transactions }: SaccoAnalyticsChartProps) {
             </text>
           ))}
         </svg>
+        {!hasActivity && (
+          <div className="absolute inset-0 flex items-center justify-center text-center pointer-events-none">
+            <span className="rounded-full bg-white/80 px-4 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">No recorded collections yet</span>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -239,13 +232,25 @@ export default function DashboardView({
 
   // Form State
   const [memberId, setMemberId] = useState('');
+  const [personName, setPersonName] = useState('');
   const [vehiclePlate, setVehiclePlate] = useState('');
   const [category, setCategory] = useState<'Daily Contribution' | 'Registration Fee' | 'Management Fee' | 'Office Expenses' | 'Petty Cash' | 'Penalty' | 'Utilities' | 'Equipment'>('Daily Contribution');
   const [type, setType] = useState<'Credit' | 'Debit'>('Credit');
   const [amount, setAmount] = useState('');
-  const [refCode, setRefCode] = useState('');
   const [description, setDescription] = useState('');
   const [tillNumber, setTillNumber] = useState<'VehicleTill' | 'UtilityTill' | 'None'>('VehicleTill');
+  const [vehicleClass, setVehicleClass] = useState<VehicleClass>('Nissan');
+  const [operationAmount, setOperationAmount] = useState('');
+  const [entranceFee, setEntranceFee] = useState('');
+  const [loanRepay, setLoanRepay] = useState('');
+  const [savingsContribution, setSavingsContribution] = useState('');
+  const [sTicket, setSTicket] = useState('');
+  const [legalFee, setLegalFee] = useState('');
+  const [expenseDeduction, setExpenseDeduction] = useState('');
+
+  const dailyGrossAmount = [operationAmount, entranceFee, loanRepay, savingsContribution, sTicket, legalFee]
+    .reduce((sum, value) => sum + (Number(value) || 0), 0);
+  const dailyNetAmount = Math.max(0, dailyGrossAmount - (Number(expenseDeduction) || 0));
 
   // Calculations
   const todayCredits = transactions
@@ -258,6 +263,24 @@ export default function DashboardView({
   const totalMpesaDeposits = transactions
     .filter(t => t.type === 'Credit' && t.refCode.toUpperCase().startsWith('Q'))
     .reduce((acc, t) => acc + t.amount, 0);
+
+  const fleetSparkData = getRecentDailySeries(transactions, transaction => transaction.type === 'Credit' && transaction.tillNumber === 'VehicleTill', 6)
+    .map(day => day.amount);
+  const utilitySparkData = getRecentDailySeries(transactions, transaction => transaction.type === 'Debit' && transaction.tillNumber === 'UtilityTill', 6)
+    .map(day => day.amount);
+  const recentWeekDates = new Set(getRecentDailySeries(transactions, () => true, 7).map(day => day.dateString));
+  const weeklyCreditTotal = getRecentDailySeries(transactions, transaction => transaction.type === 'Credit', 7).reduce((sum, day) => sum + day.amount, 0);
+  const weeklySavings = transactions
+    .filter(transaction => transaction.type === 'Credit' && transaction.savingsContribution !== undefined)
+    .filter(transaction => recentWeekDates.has(transaction.timestamp.slice(0, 10)))
+    .reduce((sum, transaction) => sum + Number(transaction.savingsContribution || 0), 0);
+  const weeklyLoanRepayments = transactions
+    .filter(transaction => transaction.type === 'Credit' && transaction.loanRepay !== undefined)
+    .filter(transaction => recentWeekDates.has(transaction.timestamp.slice(0, 10)))
+    .reduce((sum, transaction) => sum + Number(transaction.loanRepay || 0), 0);
+  const savingsShare = weeklyCreditTotal > 0 ? Math.min(100, (weeklySavings / weeklyCreditTotal) * 100) : 0;
+  const loanRepaymentShare = weeklyCreditTotal > 0 ? Math.min(100, (weeklyLoanRepayments / weeklyCreditTotal) * 100) : 0;
+  const ledgerEntryCount = transactions.length;
 
   // Auto set Type & Till depending on category
   const handleCategoryChange = (cat: typeof category) => {
@@ -275,46 +298,71 @@ export default function DashboardView({
     e.preventDefault();
     setError('');
 
-    if (!amount || Number(amount) <= 0) {
+    const transactionAmount = category === 'Daily Contribution' ? dailyNetAmount : Number(amount);
+    if (transactionAmount <= 0) {
       setError('Amount must be a positive number greater than zero.');
       return;
     }
 
-    if (!refCode.trim()) {
-      setError('Transaction Reference Code is required (e.g. M-Pesa ID or Cash Voucher).');
+    if (category === 'Daily Contribution' && vehicleClass === 'Member Contribution' && !personName.trim()) {
+      setError('Enter the contributor’s name for a Member Contribution.');
       return;
     }
 
-    // Uniqueness validation
-    const exists = transactions.some(t => t.refCode.toUpperCase() === refCode.toUpperCase().trim());
-    if (exists) {
-      setError(`The reference code ${refCode.toUpperCase()} already exists in the immutable audit ledger.`);
+    const normalizedVehiclePlate = vehiclePlate.trim().toUpperCase();
+    const matchedVehicle = vehicles.find(v => v.plateNumber.trim().toUpperCase() === normalizedVehiclePlate);
+    const memberAssignedToPlate = members.find(member =>
+      member.vehicleAssigned?.trim().toUpperCase() === normalizedVehiclePlate
+    );
+    const matchedMember = members.find(m => m.id === (memberId || matchedVehicle?.ownerId || memberAssignedToPlate?.id));
+    if (category === 'Daily Contribution' && Number(loanRepay) > 0 && !matchedMember) {
+      setError('Select the member or enter a registered V.REG before recording a loan repayment.');
       return;
     }
-
-    const matchedMember = members.find(m => m.id === memberId);
+    const automaticRefCode = `SWT-MAN-${Date.now()}`;
     
     onAddTransaction({
-      memberId: memberId || undefined,
-      memberName: matchedMember ? matchedMember.name : undefined,
-      vehiclePlate: vehiclePlate || undefined,
+      memberId: memberId || matchedMember?.id,
+      memberName: personName.trim() || matchedMember?.name || undefined,
+      vehiclePlate: normalizedVehiclePlate || undefined,
       category,
       type,
-      amount: Number(amount),
-      refCode: refCode.toUpperCase().trim(),
-      description: description.trim() || `${category} recorded for ${matchedMember ? matchedMember.name : 'Sacco Office'}`,
-      tillNumber: tillNumber
+      amount: transactionAmount,
+      refCode: automaticRefCode,
+      description: description.trim() || (category === 'Daily Contribution'
+        ? `${vehicleClass} daily collection: gross KES ${dailyGrossAmount}, deductions KES ${Number(expenseDeduction) || 0}`
+        : `${category} recorded for ${matchedMember ? matchedMember.name : 'Sacco Office'}`),
+      tillNumber: tillNumber,
+      ...(category === 'Daily Contribution' ? {
+        vehicleClass,
+        operationAmount: Number(operationAmount) || 0,
+        entranceFee: Number(entranceFee) || 0,
+        loanRepay: Number(loanRepay) || 0,
+        savingsContribution: Number(savingsContribution) || 0,
+        sTicket: Number(sTicket) || 0,
+        legalFee: Number(legalFee) || 0,
+        expenseDeduction: Number(expenseDeduction) || 0,
+        grossAmount: dailyGrossAmount
+      } : {})
     });
 
     // Reset Form
     setMemberId('');
+    setPersonName('');
     setVehiclePlate('');
     setCategory('Daily Contribution');
     setType('Credit');
     setTillNumber('VehicleTill');
     setAmount('');
-    setRefCode('');
     setDescription('');
+    setVehicleClass('Nissan');
+    setOperationAmount('');
+    setEntranceFee('');
+    setLoanRepay('');
+    setSavingsContribution('');
+    setSTicket('');
+    setLegalFee('');
+    setExpenseDeduction('');
     setShowAddModal(false);
   };
 
@@ -445,7 +493,7 @@ export default function DashboardView({
                   Start Testing the Complete Flow
                 </h3>
                 <p className="text-xs text-blue-100/70 leading-relaxed">
-                  Welcome to Sowetamu Sacco! All pre-populated registries, fleets, and ledgers have been cleared. This system is ready for you to test standard transport workflows from scratch. Follow this interactive roadmap:
+                  Welcome to Sowetamu Sacco. This installation starts with empty registries, fleets, and ledgers. Follow this setup roadmap to build your live SACCO records from scratch:
                 </p>
               </div>
 
@@ -569,7 +617,7 @@ export default function DashboardView({
             <p className="text-[10px] text-slate-400 font-medium">
               Collects daily fleet quota
             </p>
-            <Sparkline data={[14000, 22000, 19000, 31000, 25000, 36000]} color="#10b981" />
+            <Sparkline data={fleetSparkData} color="#10b981" />
           </div>
         </motion.div>
 
@@ -595,7 +643,7 @@ export default function DashboardView({
             <div className="text-[10px] text-rose-600 font-bold flex items-center bg-rose-50/70 px-2 py-0.5 rounded border border-rose-100">
               Operations debits
             </div>
-            <Sparkline data={[6000, 4500, 12000, 8000, 10500]} color="#ef4444" />
+            <Sparkline data={utilitySparkData} color="#ef4444" />
           </div>
         </motion.div>
 
@@ -637,17 +685,17 @@ export default function DashboardView({
           <div className="bg-gradient-to-br from-slate-900 to-blue-900 text-white p-6 rounded-3xl shadow-[0_10px_30px_rgba(37,99,235,0.08)] relative overflow-hidden group border border-blue-950/20">
             <div className="absolute -top-12 -right-12 w-36 h-36 bg-blue-500/10 rounded-full blur-xl group-hover:bg-blue-500/20 transition-all duration-500"></div>
             <h3 className="text-[10px] font-bold text-blue-400 uppercase tracking-widest mb-4 font-mono">
-              System Audit Health
+              Ledger Activity
             </h3>
             <div className="flex items-end justify-between relative z-10">
               <div>
-                <p className="text-3xl font-black tracking-tight font-display">98.4%</p>
+                <p className="text-3xl font-black tracking-tight font-display">{ledgerEntryCount}</p>
                 <p className="text-[10px] text-blue-200/80 mt-1 leading-normal max-w-[200px]">
-                  All recorded cash flows matched directly to Safaricom bank hooks.
+                  {ledgerEntryCount === 1 ? 'recorded ledger entry' : 'recorded ledger entries'} available for review and correction.
                 </p>
               </div>
               <div className="w-12 h-12 bg-white/10 rounded-full flex items-center justify-center border border-white/20 shrink-0">
-                <span className="text-[10px] font-bold text-blue-300">SECURE</span>
+                <span className="text-[10px] font-bold text-blue-300">LIVE</span>
               </div>
             </div>
           </div>
@@ -656,25 +704,25 @@ export default function DashboardView({
           <div className="bg-white border border-slate-200 p-6 rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.015)] flex flex-col justify-between flex-1">
             <div>
               <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-4 font-mono">
-                Sacco Target Status
+                Weekly Collection Summary
               </h3>
               <div className="space-y-4">
                 <div>
                   <div className="flex justify-between text-[10px] font-bold mb-1.5 text-slate-600">
-                    <span>WEEKLY SAVINGS GOAL</span>
-                    <span className="font-mono text-blue-600 font-black">75% (KES 75K/100K)</span>
+                    <span>WEEKLY SAVINGS RECORDED</span>
+                    <span className="font-mono text-blue-600 font-black">KES {weeklySavings.toLocaleString()}</span>
                   </div>
                   <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
-                    <div className="h-full w-3/4 bg-blue-600 rounded-full transition-all duration-500"></div>
+                    <div className="h-full bg-blue-600 rounded-full transition-all duration-500" style={{ width: `${savingsShare}%` }}></div>
                   </div>
                 </div>
                 <div>
                   <div className="flex justify-between text-[10px] font-bold mb-1.5 text-slate-600">
-                    <span>LOAN REPAYMENT QUOTA</span>
-                    <span className="font-mono text-amber-500 font-black">42% (KES 42K/100K)</span>
+                    <span>WEEKLY LOAN REPAYMENTS</span>
+                    <span className="font-mono text-amber-500 font-black">KES {weeklyLoanRepayments.toLocaleString()}</span>
                   </div>
                   <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
-                    <div className="h-full w-[42%] bg-amber-500 rounded-full transition-all duration-500"></div>
+                    <div className="h-full bg-amber-500 rounded-full transition-all duration-500" style={{ width: `${loanRepaymentShare}%` }}></div>
                   </div>
                 </div>
               </div>
@@ -685,7 +733,7 @@ export default function DashboardView({
                 onClick={() => onNavigateToTab('Reports')}
                 className="w-full py-2.5 bg-slate-50 border border-slate-200 text-slate-600 text-[10px] font-bold rounded-xl uppercase tracking-wider hover:bg-slate-100 transition-colors duration-200"
               >
-                Download Daily Cash Summary
+                View Live Ledger Summary
               </button>
             </div>
           </div>
@@ -778,7 +826,7 @@ export default function DashboardView({
             </h3>
 
             <form onSubmit={handleCreateTx} className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
+              <div>
                 <div>
                   <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
                     Book Category *
@@ -799,19 +847,61 @@ export default function DashboardView({
                   </select>
                 </div>
 
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
-                    Ref Code (M-Pesa/Voucher) *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={refCode}
-                    onChange={(e) => setRefCode(e.target.value.toUpperCase())}
-                    className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-mono uppercase focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100"
-                  />
-                </div>
               </div>
+
+              {category === 'Daily Contribution' && (
+                <div className="space-y-3 rounded-2xl border-2 border-slate-900 bg-slate-50 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-900">Daily collection sheet</p>
+                      <p className="text-[10px] text-slate-500">Based on the handwritten operation register</p>
+                    </div>
+                    <select
+                      value={vehicleClass}
+                      onChange={(e) => {
+                        const nextClass = e.target.value as VehicleClass;
+                        setVehicleClass(nextClass);
+                        if (nextClass === 'Member Contribution') setVehiclePlate('');
+                      }}
+                      className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold"
+                    >
+                      <option value="Nissan">Nissan</option>
+                      <option value="Sienta">Sienta</option>
+                      <option value="Member Contribution">Member Contribution</option>
+                    </select>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {[
+                      ['Operation', operationAmount, setOperationAmount],
+                      ['Entrance fee', entranceFee, setEntranceFee],
+                      ['Loan repay', loanRepay, setLoanRepay],
+                      ['Savings', savingsContribution, setSavingsContribution],
+                      ['S/Ticket', sTicket, setSTicket],
+                      ['Legal fee', legalFee, setLegalFee]
+                    ].map(([label, value, setter]) => (
+                      <label key={label as string} className="text-[9px] font-bold uppercase tracking-wide text-slate-500">
+                        {label as string}
+                        <input
+                          type="number"
+                          min="0"
+                          value={value as string}
+                          onChange={(e) => (setter as React.Dispatch<React.SetStateAction<string>>)(e.target.value)}
+                          className="mt-1 w-full rounded-lg border border-slate-200 bg-white p-2 text-right font-mono text-xs text-slate-900"
+                        />
+                      </label>
+                    ))}
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2 border-t border-slate-300 pt-3 font-mono text-xs">
+                    <div><span className="block text-[9px] text-slate-500">GROSS</span><strong>KES {dailyGrossAmount.toLocaleString()}</strong></div>
+                    <label className="text-[9px] font-bold text-rose-600">DEDUCTION
+                      <input type="number" min="0" value={expenseDeduction} onChange={(e) => setExpenseDeduction(e.target.value)} className="mt-1 w-full rounded border border-rose-200 bg-white p-1.5 text-right text-xs" />
+                    </label>
+                    <div className="text-right"><span className="block text-[9px] text-emerald-700">NET BANKABLE</span><strong className="text-emerald-700">KES {dailyNetAmount.toLocaleString()}</strong></div>
+                  </div>
+                </div>
+              )}
 
               <div>
                 <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
@@ -836,9 +926,10 @@ export default function DashboardView({
                   <input
                     type="number"
                     required
-                    value={amount}
+                    value={category === 'Daily Contribution' ? dailyNetAmount : amount}
                     onChange={(e) => setAmount(e.target.value)}
-                    className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-mono focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100"
+                    disabled={category === 'Daily Contribution'}
+                    className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-mono focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 disabled:bg-emerald-50 disabled:text-emerald-800 disabled:font-bold"
                   />
                 </div>
 
@@ -874,18 +965,34 @@ export default function DashboardView({
 
                 <div>
                   <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
-                    Paying Matatu Plate (Optional)
+                    Person's Name
                   </label>
-                  <select
-                    value={vehiclePlate}
-                    onChange={(e) => setVehiclePlate(e.target.value)}
+                  <input
+                    type="text"
+                    value={personName}
+                    onChange={(e) => setPersonName(e.target.value)}
+                    placeholder="Enter payer or driver's name"
                     className="w-full p-2.5 border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 bg-white"
-                  >
-                    <option value="">N/A (Sacco Account)</option>
+                  />
+                </div>
+
+                <div className="col-span-2">
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
+                    V.REG — Vehicle Registration
+                  </label>
+                  <input
+                    type="text"
+                    list="registered-vehicle-plates"
+                    value={vehiclePlate}
+                    onChange={(e) => setVehiclePlate(e.target.value.toUpperCase())}
+                    placeholder="e.g. KDA 123A"
+                    className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-mono uppercase focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 bg-white"
+                  />
+                  <datalist id="registered-vehicle-plates">
                     {vehicles.map(v => (
                       <option key={v.id} value={v.plateNumber}>{v.plateNumber}</option>
                     ))}
-                  </select>
+                  </datalist>
                 </div>
               </div>
 

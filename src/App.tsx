@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
+import { signOut } from 'firebase/auth';
 import type { User, Member, Vehicle, Transaction, UserRole } from './types';
-import { mockUsers, mockMembers, mockVehicles, mockTransactions } from './data/mockData';
 import { Menu, ShieldAlert, Search, X } from 'lucide-react';
-import { canRole, getSaccoUserKey, STORAGE_KEYS } from './lib/auth';
+import { canRole, STORAGE_KEYS } from './lib/auth';
 import { ApiError, fetchSaccoJson, postSaccoJson } from './lib/api';
+import { firebaseAuth } from './lib/firebase';
 
 // Subcomponents
 import LoginModal from './components/LoginModal';
@@ -21,8 +22,23 @@ import PaybillView from './components/PaybillView';
 const MEMBER_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary', 'Treasurer'];
 const VEHICLE_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary'];
 const TRANSACTION_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Treasurer', 'Accountant'];
+const CLEAN_START_VERSION = 'clean-start-v1';
+
+function prepareCleanStartStorage() {
+  if (localStorage.getItem(STORAGE_KEYS.installVersion) === CLEAN_START_VERSION) return;
+  [
+    STORAGE_KEYS.currentUser,
+    STORAGE_KEYS.authToken,
+    STORAGE_KEYS.legacyMembers,
+    STORAGE_KEYS.legacyVehicles,
+    STORAGE_KEYS.legacyTransactions,
+    STORAGE_KEYS.savedSheets
+  ].forEach(key => localStorage.removeItem(key));
+  localStorage.setItem(STORAGE_KEYS.installVersion, CLEAN_START_VERSION);
+}
 
 export default function App() {
+  prepareCleanStartStorage();
   // Authentication State
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
     const stored = localStorage.getItem(STORAGE_KEYS.currentUser);
@@ -111,38 +127,13 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    if (firebaseAuth) {
+      signOut(firebaseAuth).catch(error => console.warn('Firebase sign-out failed:', error));
+    }
     setCurrentUser(null);
     setAuthToken('');
     localStorage.removeItem(STORAGE_KEYS.currentUser);
     localStorage.removeItem(STORAGE_KEYS.authToken);
-  };
-
-  const handleSwitchUser = async (user: User) => {
-    try {
-      const response = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          email: user.email,
-          password: getSaccoUserKey(user.role)
-        })
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error || 'Could not switch Sacco profile.');
-      }
-      setCurrentUser(data.user);
-      setAuthToken(data.token);
-      localStorage.setItem(STORAGE_KEYS.currentUser, JSON.stringify(data.user));
-      localStorage.setItem(STORAGE_KEYS.authToken, data.token);
-    } catch (error: any) {
-      setSecurityAlert({
-        title: "Profile Switch Blocked",
-        message: error.message || 'The server could not issue a JWT for the selected profile.'
-      });
-    }
   };
 
   const handleApproveBlueprint = () => {
@@ -182,26 +173,6 @@ export default function App() {
     });
   };
 
-  const handleLoadDemoData = () => {
-    localStorage.setItem(STORAGE_KEYS.legacyMembers, JSON.stringify(mockMembers));
-    localStorage.setItem(STORAGE_KEYS.legacyVehicles, JSON.stringify(mockVehicles));
-    localStorage.setItem(STORAGE_KEYS.legacyTransactions, JSON.stringify(mockTransactions));
-    localStorage.setItem(STORAGE_KEYS.blueprintApproved, 'true');
-    localStorage.setItem(STORAGE_KEYS.blueprintSigner, 'Hon. Peter Kamau');
-    
-    setMembers(mockMembers);
-    setVehicles(mockVehicles);
-    setTransactions(mockTransactions);
-    setBlueprintApproved(true);
-    setSignerName('Hon. Peter Kamau');
-    setCurrentTab('Dashboard');
-    
-    setSecurityAlert({
-      title: "Demo Dataset Loaded",
-      message: "Successfully loaded mock Sacco registry, active fleet list, and historic ledger sheets."
-    });
-  };
-
   // State Mutators connected directly to the Backend Express API and Firestore Database
   const handleAddMember = (newMemberData: Omit<Member, 'id' | 'dateRegistered' | 'sharesAmount' | 'savingsAmount'>) => {
     if (!currentUser || !canRole(currentUser, MEMBER_WRITE_ROLES)) {
@@ -231,7 +202,9 @@ export default function App() {
         id: `m-${Date.now()}`,
         dateRegistered: new Date().toISOString().slice(0, 10),
         sharesAmount: 0,
-        savingsAmount: 0
+        savingsAmount: 0,
+        initialLoanAmount: Number(newMemberData.initialLoanAmount ?? newMemberData.loanBalance) || 0,
+        loanBalance: Number(newMemberData.loanBalance) || 0
       };
       setMembers(prev => [fallbackMember, ...prev]);
     });
@@ -288,6 +261,7 @@ export default function App() {
       setTransactions(prev => [newTx, ...prev]);
       const data = await fetchSaccoJson<Member[]>('/api/members', currentUser, {}, authToken);
       setMembers(data);
+      return newTx;
     } catch (err) {
       console.error("Error posting ledger entry:", err);
       if (err instanceof ApiError && err.status < 500) {
@@ -302,7 +276,23 @@ export default function App() {
         id: `t-${Date.now()}`
       };
       setTransactions(prev => [fallbackTx, ...prev]);
+      return fallbackTx;
     }
+  };
+
+  const handleUpdateTransaction = async (transactionId: string, changes: Partial<Transaction>) => {
+    if (!currentUser || !canRole(currentUser, TRANSACTION_WRITE_ROLES)) {
+      throw new Error('Your profile cannot edit ledger transactions.');
+    }
+    const updated = await fetchSaccoJson<Transaction>(`/api/transactions/${transactionId}`, currentUser, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...changes, recorderName: currentUser.name })
+    }, authToken);
+    setTransactions(prev => prev.map(tx => tx.id === updated.id ? updated : tx));
+    const data = await fetchSaccoJson<Member[]>('/api/members', currentUser, {}, authToken);
+    setMembers(data);
+    return updated;
   };
 
   const handleReverseTransaction = async (transactionId: string) => {
@@ -384,6 +374,7 @@ export default function App() {
             members={members}
             transactions={transactions}
             onAddTransaction={handleAddTransaction}
+            onUpdateTransaction={handleUpdateTransaction}
             currentUserRole={currentUser.role}
             currentUserName={currentUser.name}
           />
@@ -413,6 +404,7 @@ export default function App() {
             vehicles={vehicles}
             members={members}
             onAddTransaction={handleAddTransaction}
+            onUpdateTransaction={handleUpdateTransaction}
             onReverseTransaction={handleReverseTransaction}
             currentUser={currentUser}
           />
@@ -440,7 +432,7 @@ export default function App() {
   };
 
   return (
-    <div className="w-full h-screen bg-slate-100 flex flex-col md:flex-row overflow-hidden font-sans text-slate-900 relative">
+    <div className="app-shell w-full h-screen flex flex-col md:flex-row overflow-hidden font-sans text-slate-900 relative">
       {/* Mobile Top Navigation Bar */}
       <div className="md:hidden h-14 bg-white text-slate-800 border-b border-slate-200 flex items-center justify-between px-4 shrink-0 z-30">
         <button
@@ -470,13 +462,11 @@ export default function App() {
             setIsMobileSidebarOpen(false);
           }}
           currentUser={currentUser}
-          onSwitchUser={handleSwitchUser}
           onLogout={handleLogout}
           blueprintApproved={blueprintApproved}
           onClose={() => setIsMobileSidebarOpen(false)}
           isDatabaseEmpty={members.length === 0}
           onClearAllData={handleClearAllData}
-          onLoadDemoData={handleLoadDemoData}
           isCollapsed={isSidebarCollapsed}
           onToggleCollapse={() => {
             const next = !isSidebarCollapsed;
@@ -495,10 +485,10 @@ export default function App() {
       )}
 
       {/* Main Container */}
-      <div className="flex-1 flex flex-col overflow-hidden bg-slate-50/50">
+      <div className="app-main-surface flex-1 flex flex-col overflow-hidden">
         
         {/* Unified Top Header with Real-Time Global Search */}
-        <header className="h-16 bg-white border-b border-slate-200 px-4 sm:px-8 flex items-center justify-between shrink-0 z-20">
+        <header className="app-topbar h-16 bg-white border-b border-slate-200 px-4 sm:px-8 flex items-center justify-between shrink-0 z-20">
           {/* Left Side: Current view identifier */}
           <div className="hidden md:flex items-center space-x-2">
             <span className="text-xs font-bold text-slate-800 uppercase tracking-widest font-display">
@@ -553,12 +543,12 @@ export default function App() {
         </header>
 
         {/* Dynamic Inner Viewport */}
-        <div className="flex-1 flex flex-col overflow-hidden">
+        <div className="app-view flex-1 flex flex-col overflow-hidden">
           {renderViewContent()}
         </div>
 
         {/* Global Footer */}
-        <footer className="h-auto min-h-12 py-3 sm:py-0 bg-white border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between px-4 sm:px-8 text-[10px] text-slate-400 font-medium shrink-0 gap-2">
+        <footer className="app-topbar h-auto min-h-12 py-3 sm:py-0 bg-white border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between px-4 sm:px-8 text-[10px] text-slate-500 font-medium shrink-0 gap-2">
           <div className="text-center sm:text-left">&copy; 2026 Matatu Sacco Financial OS. Built for scalability &amp; auditability.</div>
           <div className="flex flex-wrap justify-center gap-4 uppercase tracking-wider font-mono">
             <span className="flex items-center">
