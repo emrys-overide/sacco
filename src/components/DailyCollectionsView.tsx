@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import type { Vehicle, Member, Transaction, VehicleClass } from '../types';
 import { STORAGE_KEYS } from '../lib/auth';
+import { sanitizeDecimalInput } from '../lib/inputValidation';
 import { 
   Printer, 
   Plus, 
@@ -87,6 +88,7 @@ export default function DailyCollectionsView({
   
   // Posting records entries in the ledger; only auditors are read-only.
   const isReadOnly = currentUserRole === 'Auditor';
+  const activeVehicles = vehicles.filter(vehicle => vehicle.status === 'Active');
 
   const rowDiffersFromLedger = (row: CollectionRow): boolean => {
     const original = transactions.find(tx => tx.id === row.transactionId);
@@ -259,7 +261,7 @@ export default function DailyCollectionsView({
     const nextNo = rows.length > 0 ? Math.max(...rows.map(r => r.no)) + 1 : 1;
     setRows(prev => [...prev, {
       no: nextNo,
-      vehiclePlate: vehicles[prev.length % vehicles.length]?.plateNumber || '',
+      vehiclePlate: activeVehicles[prev.length % Math.max(activeVehicles.length, 1)]?.plateNumber || '',
       vehicleClass: 'Nissan',
       operation: 0,
       entranceFee: 0,
@@ -272,6 +274,11 @@ export default function DailyCollectionsView({
 
   const handleDeleteRow = (no: number) => {
     if (isReadOnly) return;
+    const confirmed = window.confirm(
+      `Delete daily collection row ${no}? This cannot be undone. Do you want to proceed?`
+    );
+    if (!confirmed) return;
+
     setRows(prev => prev.filter(r => r.no !== no).map((r, index) => ({ ...r, no: index + 1 })));
   };
 
@@ -284,12 +291,22 @@ export default function DailyCollectionsView({
 
   const handleDeleteExpenseRow = (index: number) => {
     if (isReadOnly) return;
+    const confirmed = window.confirm(
+      `Delete expense line ${index + 1}? This cannot be undone. Do you want to proceed?`
+    );
+    if (!confirmed) return;
+
     setExpenses(prev => prev.filter((_, idx) => idx !== index));
   };
 
   // Reset to a blank daily sheet
   const handleResetDefaults = () => {
     if (isReadOnly) return;
+    const confirmed = window.confirm(
+      'Clear this daily sheet? All unposted collection and expense entries on this sheet will be removed. Do you want to proceed?'
+    );
+    if (!confirmed) return;
+
     setRows([]);
     setExpenses([]);
     setIsPosted(false);
@@ -306,6 +323,16 @@ export default function DailyCollectionsView({
     const timestampShort = selectedDate;
     const unpostedRows = rows.filter(row => !row.transactionId);
     const unpostedExpenses = expenses.filter(exp => !exp.transactionId && exp.amount > 0 && exp.description.trim());
+    const invalidRow = unpostedRows.find(row => {
+      if (getRowTotal(row) <= 0) return false;
+      const vehicle = activeVehicles.find(item => item.plateNumber === row.vehiclePlate);
+      const member = members.find(item => item.id === vehicle?.ownerId && item.status === 'Active');
+      return !vehicle || !member;
+    });
+    if (invalidRow) {
+      setErrorMessage(`Row ${invalidRow.no} must use an active onboarded vehicle linked to an active registered member.`);
+      return;
+    }
     if (!unpostedRows.length && !unpostedExpenses.length) {
       await handleSaveLocal(isPosted);
       setSuccessMessage('Changes saved. All visible entries are already linked to the Sacco ledger.');
@@ -550,19 +577,16 @@ export default function DailyCollectionsView({
                         <span className="font-mono font-bold text-slate-800">{row.vehiclePlate}</span>
                       ) : (
                         <>
-                        <input
-                          type="text"
-                          list={`daily-vehicle-plates-${row.no}`}
+                        <select
                           value={row.vehiclePlate}
-                          onChange={(e) => handleUpdateRowField(row.no, 'vehiclePlate', e.target.value.toUpperCase())}
-                          placeholder="e.g. KDA 123A"
+                          onChange={(e) => handleUpdateRowField(row.no, 'vehiclePlate', e.target.value)}
                           className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono font-bold bg-transparent text-slate-800 text-xs rounded focus:outline-none"
-                        />
-                        <datalist id={`daily-vehicle-plates-${row.no}`}>
-                          {vehicles.map(v => (
-                            <option key={v.id} value={v.plateNumber}>{v.plateNumber} ({v.driverName})</option>
+                        >
+                          <option value="">Select V.REG...</option>
+                          {activeVehicles.map(v => (
+                            <option key={v.id} value={v.plateNumber}>{v.plateNumber} — {v.ownerName}</option>
                           ))}
-                        </datalist>
+                        </select>
                         </>
                       )}
                     </td>
@@ -591,7 +615,8 @@ export default function DailyCollectionsView({
                         min="0"
                         value={row.operation || ''}
                         disabled={isReadOnly}
-                        onChange={(e) => handleUpdateRowField(row.no, 'operation', Number(e.target.value))}
+                        onChange={(e) => handleUpdateRowField(row.no, 'operation', Number(sanitizeDecimalInput(e.target.value)) || 0)}
+                        inputMode="decimal"
                         className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-emerald-800 font-bold text-xs rounded focus:outline-none focus:bg-white"
                       />
                     </td>
@@ -602,7 +627,8 @@ export default function DailyCollectionsView({
                         type="number"
                         value={row.entranceFee || ''}
                         disabled={isReadOnly}
-                        onChange={(e) => handleUpdateRowField(row.no, 'entranceFee', Number(e.target.value))}
+                        onChange={(e) => handleUpdateRowField(row.no, 'entranceFee', Number(sanitizeDecimalInput(e.target.value)) || 0)}
+                        inputMode="decimal"
                         className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-emerald-800 font-bold text-xs rounded focus:outline-none focus:bg-white"
                       />
                     </td>
@@ -613,7 +639,8 @@ export default function DailyCollectionsView({
                         type="number"
                         value={row.loanRepay || ''}
                         disabled={isReadOnly}
-                        onChange={(e) => handleUpdateRowField(row.no, 'loanRepay', Number(e.target.value))}
+                        onChange={(e) => handleUpdateRowField(row.no, 'loanRepay', Number(sanitizeDecimalInput(e.target.value)) || 0)}
+                        inputMode="decimal"
                         className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-slate-800 text-xs rounded focus:outline-none focus:bg-white"
                       />
                     </td>
@@ -624,7 +651,8 @@ export default function DailyCollectionsView({
                         type="number"
                         value={row.savings || ''}
                         disabled={isReadOnly}
-                        onChange={(e) => handleUpdateRowField(row.no, 'savings', Number(e.target.value))}
+                        onChange={(e) => handleUpdateRowField(row.no, 'savings', Number(sanitizeDecimalInput(e.target.value)) || 0)}
+                        inputMode="decimal"
                         className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-blue-800 font-bold text-xs rounded focus:outline-none focus:bg-white"
                       />
                     </td>
@@ -635,7 +663,8 @@ export default function DailyCollectionsView({
                         type="number"
                         value={row.sTicket || ''}
                         disabled={isReadOnly}
-                        onChange={(e) => handleUpdateRowField(row.no, 'sTicket', Number(e.target.value))}
+                        onChange={(e) => handleUpdateRowField(row.no, 'sTicket', Number(sanitizeDecimalInput(e.target.value)) || 0)}
+                        inputMode="decimal"
                         className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-amber-800 font-bold text-xs rounded focus:outline-none focus:bg-white"
                       />
                     </td>
@@ -646,7 +675,8 @@ export default function DailyCollectionsView({
                         type="number"
                         value={row.legalFee || ''}
                         disabled={isReadOnly}
-                        onChange={(e) => handleUpdateRowField(row.no, 'legalFee', Number(e.target.value))}
+                        onChange={(e) => handleUpdateRowField(row.no, 'legalFee', Number(sanitizeDecimalInput(e.target.value)) || 0)}
+                        inputMode="decimal"
                         className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-rose-800 font-bold text-xs rounded focus:outline-none focus:bg-white"
                       />
                     </td>
@@ -766,7 +796,8 @@ export default function DailyCollectionsView({
                       type="number"
                       value={exp.amount || ''}
                       disabled={isReadOnly}
-                      onChange={(e) => handleUpdateExpenseField(exp.no, idx, 'amount', Number(e.target.value))}
+                      onChange={(e) => handleUpdateExpenseField(exp.no, idx, 'amount', Number(sanitizeDecimalInput(e.target.value)) || 0)}
+                      inputMode="decimal"
                       className="w-full px-2 py-1 border border-slate-200 rounded text-right font-bold text-rose-700 text-xs bg-transparent focus:outline-none focus:border-slate-900 focus:bg-white"
                     />
                   </div>

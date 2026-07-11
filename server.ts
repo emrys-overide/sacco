@@ -31,6 +31,16 @@ import {
   normalizeTransactionInput,
   type LedgerInput
 } from './src/server/ledgerPolicy';
+import {
+  isValidKenyanVehiclePlate,
+  isValidPersonName,
+  isValidPhoneNumber,
+  sanitizeIntegerInput,
+  sanitizePersonName,
+  sanitizePhoneNumber,
+  sanitizeVehiclePlate
+} from './src/lib/inputValidation';
+import { requiresRegisteredMember } from './src/lib/transactionPolicy';
 import type {
   Member,
   PaymentRecord,
@@ -38,7 +48,8 @@ import type {
   PaymentStatus,
   Transaction,
   TransactionCategory,
-  UserRole
+  UserRole,
+  Vehicle
 } from './src/types';
 
 class HttpError extends Error {
@@ -246,17 +257,18 @@ async function createFirstAdminProfile(input: {
 
   if (postgresPool) {
     const result = await postgresPool.query(
-      `INSERT INTO users (firebase_uid, full_name, email, phone, role, is_active)
-       VALUES ($1, $2, $3, $4, 'Chairman', TRUE)
+      `INSERT INTO users (firebase_uid, full_name, email, phone, role, password_hash, is_active)
+       VALUES ($1, $2, $3, $4, 'Chairman', crypt(NULLIF($5, ''), gen_salt('bf')), TRUE)
        ON CONFLICT (email) DO UPDATE SET
          firebase_uid = COALESCE(users.firebase_uid, EXCLUDED.firebase_uid),
          full_name = EXCLUDED.full_name,
          phone = EXCLUDED.phone,
          role = 'Chairman',
+         password_hash = COALESCE(users.password_hash, EXCLUDED.password_hash),
          is_active = TRUE,
          updated_at = now()
        RETURNING id, firebase_uid, full_name, email, phone, role, is_active`,
-      [input.firebaseUid || null, fullName, email, input.phone || null]
+      [input.firebaseUid || null, fullName, email, input.phone || null, input.devPassword || null]
     );
     return mapDbUser(result.rows[0]);
   }
@@ -337,7 +349,51 @@ function signJwt(user: AuthorizedUser): { token: string; expiresAt: string } {
   };
 }
 
-function verifyJwt(token: string): AuthorizedUser {
+async function findDevelopmentUserByEmail(email: string): Promise<AuthorizedUser | null> {
+  if (postgresPool) {
+    const result = await postgresPool.query(
+      `SELECT id, firebase_uid, full_name, email, phone, role, is_active
+       FROM users
+       WHERE lower(email) = $1
+       LIMIT 1`,
+      [email]
+    );
+    return result.rowCount ? mapDbUser(result.rows[0]) : null;
+  }
+
+  if (useFirestore) {
+    return safeDbOperation<AuthorizedUser | null>(
+      async firestoreDb => {
+        const snap = await firestoreDb.collection('users').where('email', '==', email).limit(1).get();
+        return snap.empty ? null : snap.docs[0].data() as AuthorizedUser;
+      },
+      () => localStore.users.find(item => item.email.toLowerCase() === email) || null,
+      'users'
+    );
+  }
+
+  return localStore.users.find(item => item.email.toLowerCase() === email) || null;
+}
+
+async function authenticateDevelopmentUser(email: string, password: string): Promise<AuthorizedUser | null> {
+  if (postgresPool) {
+    const result = await postgresPool.query(
+      `SELECT id, firebase_uid, full_name, email, phone, role, is_active
+       FROM users
+       WHERE lower(email) = $1
+         AND password_hash IS NOT NULL
+         AND password_hash = crypt($2, password_hash)
+       LIMIT 1`,
+      [email, password]
+    );
+    return result.rowCount ? mapDbUser(result.rows[0]) : null;
+  }
+
+  const user = await findDevelopmentUserByEmail(email);
+  return user?.devPassword && password === user.devPassword ? user : null;
+}
+
+async function verifyJwt(token: string): Promise<AuthorizedUser> {
   const parts = token.split('.');
   if (parts.length !== 3) {
     throw new HttpError(401, 'Invalid authentication token format.', 'INVALID_JWT');
@@ -372,8 +428,8 @@ function verifyJwt(token: string): AuthorizedUser {
   // Their temporary internal ID can change, but the signed email and role remain
   // the stable identity. This keeps an otherwise valid browser session usable.
   const tokenEmail = String(payload.email || '').trim().toLowerCase();
-  const user = localStore.users.find(item => item.email.toLowerCase() === tokenEmail);
-  if (!user || user.role !== payload.role) {
+  const user = await findDevelopmentUserByEmail(tokenEmail);
+  if (!user || user.role !== payload.role || user.isActive === false) {
     throw new HttpError(401, 'Authentication token user is no longer authorized.', 'JWT_USER_REVOKED');
   }
 
@@ -386,6 +442,24 @@ function getDarajaMode(value: unknown = process.env.DARAJA_MODE): DarajaMode {
 
 function getDarajaBaseUrl(mode: DarajaMode): string {
   return mode === 'production' ? 'https://api.safaricom.co.ke' : 'https://sandbox.safaricom.co.ke';
+}
+
+function parsePublicDarajaCallbackUrl(value: unknown, fieldName: string): URL {
+  let callbackUrl: URL;
+  try {
+    callbackUrl = new URL(String(value || '').trim());
+  } catch {
+    throw new HttpError(400, `${fieldName} must be a valid public HTTPS URL.`, 'INVALID_CALLBACK_URL');
+  }
+
+  const host = callbackUrl.hostname.toLowerCase();
+  const isPrivateIpv4 = /^(127\.|10\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(host);
+  const isLocalHost = host === 'localhost' || host.endsWith('.localhost') || host === '::1' || host === '[::1]';
+  if (callbackUrl.protocol !== 'https:' || !host || isPrivateIpv4 || isLocalHost) {
+    throw new HttpError(400, `${fieldName} must use a publicly reachable HTTPS domain, not localhost or a private address.`, 'INVALID_CALLBACK_URL');
+  }
+
+  return callbackUrl;
 }
 
 function getDarajaSafeConfig(overrides: { shortcode?: unknown; mode?: unknown } = {}) {
@@ -540,6 +614,7 @@ async function applyFirestoreMemberBalance(firestoreDb: Firestore, tx: Transacti
 
 async function createLedgerTransaction(input: LedgerInput): Promise<Transaction> {
   const tx = normalizeTransactionInput(input);
+  await validateLedgerRegistration(tx);
 
   if (postgresPool) {
     return createPostgresTransaction(postgresPool, tx);
@@ -577,6 +652,16 @@ async function createLedgerTransaction(input: LedgerInput): Promise<Transaction>
 
 async function updateLedgerTransaction(transactionId: string, input: LedgerInput): Promise<Transaction> {
   if (postgresPool) {
+    const original = (await listPostgresTransactions(postgresPool)).find(transaction => transaction.id === transactionId);
+    if (!original) throw new HttpError(404, 'Transaction to edit was not found.', 'TRANSACTION_NOT_FOUND');
+    const candidate = normalizeTransactionInput({
+      ...original,
+      ...input,
+      id: original.id,
+      timestamp: original.timestamp,
+      refCode: original.refCode
+    });
+    await validateLedgerRegistration(candidate);
     return correctPostgresTransaction(postgresPool, transactionId, input);
   }
   const original = await safeDbOperation<Transaction | null>(
@@ -599,6 +684,7 @@ async function updateLedgerTransaction(transactionId: string, input: LedgerInput
     timestamp: original.timestamp,
     refCode: original.refCode
   });
+  await validateLedgerRegistration(updated);
   const reverseOriginal = { ...original, type: original.type === 'Credit' ? 'Debit' : 'Credit' } as Transaction;
 
   await safeDbOperation(
@@ -762,6 +848,101 @@ async function getAllMembers(): Promise<Member[]> {
   );
 }
 
+async function getAllVehicles(): Promise<Vehicle[]> {
+  if (postgresPool) {
+    return listPostgresVehicles(postgresPool);
+  }
+
+  return safeDbOperation<Vehicle[]>(
+    async (firestoreDb) => {
+      const snap = await firestoreDb.collection('vehicles').get();
+      return snap.docs.map(doc => doc.data() as Vehicle);
+    },
+    () => localStore.vehicles as Vehicle[],
+    'vehicles'
+  );
+}
+
+async function validateLedgerRegistration(tx: Transaction): Promise<void> {
+  if (!requiresRegisteredMember(tx.category) || tx.reversalOf) return;
+
+  const typedName = tx.memberName?.trim() || '';
+  if (!tx.memberId && !typedName) {
+    throw new HttpError(400, 'Type a registered member name before posting this transaction.', 'REGISTERED_MEMBER_REQUIRED');
+  }
+
+  if (postgresPool) {
+    const memberResult = tx.memberId
+      ? await postgresPool.query(
+          'SELECT id, full_name, status FROM members WHERE id::text = $1 LIMIT 1',
+          [tx.memberId]
+        )
+      : await postgresPool.query(
+          'SELECT id, full_name, status FROM members WHERE lower(trim(full_name)) = lower($1) LIMIT 1',
+          [typedName]
+        );
+    if (!memberResult.rowCount) {
+      throw new HttpError(400, `Name "${typedName || tx.memberId}" is not registered. Register the member first.`, 'MEMBER_NAME_NOT_REGISTERED');
+    }
+
+    const member = memberResult.rows[0];
+    if (member.status !== 'Active') {
+      throw new HttpError(409, `Member "${member.full_name}" is not active.`, 'MEMBER_NOT_ACTIVE');
+    }
+    tx.memberId = String(member.id);
+    tx.memberName = member.full_name;
+
+    if (!tx.vehiclePlate?.trim()) return;
+    const normalizedPlate = tx.vehiclePlate.replace(/\s+/g, '').toUpperCase();
+    const vehicleResult = await postgresPool.query(
+      `SELECT id, member_id, plate_number, status
+       FROM vehicles
+       WHERE upper(replace(plate_number, ' ', '')) = $1
+       LIMIT 1`,
+      [normalizedPlate]
+    );
+    if (!vehicleResult.rowCount) {
+      throw new HttpError(400, `Car/V.REG "${tx.vehiclePlate}" is not registered. Onboard the vehicle first.`, 'VEHICLE_NOT_REGISTERED');
+    }
+    const vehicle = vehicleResult.rows[0];
+    if (String(vehicle.member_id) !== tx.memberId) {
+      throw new HttpError(400, `Car/V.REG "${vehicle.plate_number}" is not registered under ${tx.memberName}.`, 'MEMBER_VEHICLE_MISMATCH');
+    }
+    if (vehicle.status !== 'Active') {
+      throw new HttpError(409, `Car/V.REG "${vehicle.plate_number}" is not active.`, 'VEHICLE_NOT_ACTIVE');
+    }
+    tx.vehiclePlate = vehicle.plate_number;
+    return;
+  }
+
+  const [members, vehicles] = await Promise.all([getAllMembers(), getAllVehicles()]);
+  const member = tx.memberId
+    ? members.find(item => item.id === tx.memberId)
+    : members.find(item => item.name.trim().toLowerCase() === typedName.toLowerCase());
+  if (!member) {
+    throw new HttpError(400, `Name "${typedName || tx.memberId}" is not registered. Register the member first.`, 'MEMBER_NAME_NOT_REGISTERED');
+  }
+  if (member.status !== 'Active') {
+    throw new HttpError(409, `Member "${member.name}" is not active.`, 'MEMBER_NOT_ACTIVE');
+  }
+  tx.memberId = member.id;
+  tx.memberName = member.name;
+
+  if (!tx.vehiclePlate?.trim()) return;
+  const normalizedPlate = tx.vehiclePlate.replace(/\s+/g, '').toUpperCase();
+  const vehicle = vehicles.find(item => item.plateNumber.replace(/\s+/g, '').toUpperCase() === normalizedPlate);
+  if (!vehicle) {
+    throw new HttpError(400, `Car/V.REG "${tx.vehiclePlate}" is not registered. Onboard the vehicle first.`, 'VEHICLE_NOT_REGISTERED');
+  }
+  if (vehicle.ownerId !== member.id) {
+    throw new HttpError(400, `Car/V.REG "${vehicle.plateNumber}" is not registered under ${member.name}.`, 'MEMBER_VEHICLE_MISMATCH');
+  }
+  if (vehicle.status !== 'Active') {
+    throw new HttpError(409, `Car/V.REG "${vehicle.plateNumber}" is not active.`, 'VEHICLE_NOT_ACTIVE');
+  }
+  tx.vehiclePlate = vehicle.plateNumber;
+}
+
 async function processIncomingPayment(input: IncomingPaymentInput): Promise<PaymentRecord> {
   const refCode = normalizeRefCode(input.refCode);
   const amount = Number(input.amount);
@@ -783,17 +964,44 @@ async function processIncomingPayment(input: IncomingPaymentInput): Promise<Paym
 
   const tillConfig = getTillFromShortcode(input.shortcode);
   const category = input.category || tillConfig.category;
-  const allMembers = await getAllMembers();
+  const [allMembers, allVehicles] = await Promise.all([getAllMembers(), getAllVehicles()]);
   const accountReference = String(input.accountReference || '').trim();
   const payerPhone = String(input.payerPhone || '').trim();
   const { member, matchMethod } = matchPaymentMember(allMembers, accountReference, payerPhone, input.memberId);
   const payerName = input.payerName || (member ? member.name : 'Unmatched M-Pesa Payer');
+  const normalizedAccountReference = accountReference.replace(/\s+/g, '').toUpperCase();
+  const matchedVehicle = member && normalizedAccountReference
+    ? allVehicles.find(vehicle =>
+        vehicle.ownerId === member.id &&
+        vehicle.status === 'Active' &&
+        vehicle.plateNumber.replace(/\s+/g, '').toUpperCase() === normalizedAccountReference
+      )
+    : undefined;
+  const canAutoReconcile = Boolean(member && member.status === 'Active');
+
+  if (input.source === 'Manual') {
+    if (!member || !canAutoReconcile) {
+      throw new HttpError(400, 'Select an active registered member before logging a manual payment.', 'REGISTERED_MEMBER_REQUIRED');
+    }
+    if (normalizedAccountReference && !matchedVehicle) {
+      const submittedVehicle = allVehicles.find(vehicle =>
+        vehicle.plateNumber.replace(/\s+/g, '').toUpperCase() === normalizedAccountReference
+      );
+      if (!submittedVehicle) {
+        throw new HttpError(400, `Car/V.REG "${accountReference}" is not registered.`, 'VEHICLE_NOT_REGISTERED');
+      }
+      if (submittedVehicle.ownerId !== member.id) {
+        throw new HttpError(400, `Car/V.REG "${submittedVehicle.plateNumber}" is not registered under ${member.name}.`, 'MEMBER_VEHICLE_MISMATCH');
+      }
+      throw new HttpError(409, `Car/V.REG "${submittedVehicle.plateNumber}" is not active.`, 'VEHICLE_NOT_ACTIVE');
+    }
+  }
 
   let payment: PaymentRecord = {
     id: `pay-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
     timestamp: new Date().toISOString(),
     source: input.source,
-    status: member ? 'Pending' : 'Unmatched',
+    status: canAutoReconcile ? 'Pending' : 'Unmatched',
     refCode,
     amount,
     tillNumber: tillConfig.tillNumber,
@@ -803,13 +1011,17 @@ async function processIncomingPayment(input: IncomingPaymentInput): Promise<Paym
     payerPhone,
     memberId: member?.id,
     memberName: member?.name,
-    vehiclePlate: member?.vehicleAssigned || accountReference,
+    vehiclePlate: matchedVehicle?.plateNumber || accountReference,
     matchMethod,
     rawPayload: input.rawPayload,
-    note: member ? `Matched by ${matchMethod}.` : 'Awaiting accountant reconciliation.'
+    note: canAutoReconcile
+      ? `Matched by ${matchMethod}.`
+      : member
+        ? 'Member matched, but the profile is not active.'
+        : 'Awaiting accountant reconciliation.'
   };
 
-  if (!member) {
+  if (!member || !canAutoReconcile) {
     return savePaymentRecord(payment);
   }
 
@@ -818,7 +1030,7 @@ async function processIncomingPayment(input: IncomingPaymentInput): Promise<Paym
     timestamp: payment.timestamp,
     memberId: member.id,
     memberName: member.name,
-    vehiclePlate: member.vehicleAssigned || accountReference,
+    vehiclePlate: matchedVehicle?.plateNumber || '',
     description: `M-Pesa ${input.source.toLowerCase()} payment of KES ${amount.toLocaleString()} received on ${tillConfig.paybillName} (Account Ref: ${accountReference || 'N/A'}). Reconciled automatically.`,
     refCode,
     type: 'Credit',
@@ -827,6 +1039,7 @@ async function processIncomingPayment(input: IncomingPaymentInput): Promise<Paym
     recorderName: input.recorderName,
     tillNumber: tillConfig.tillNumber
   });
+  await validateLedgerRegistration(transactionInput);
 
   payment = {
     ...payment,
@@ -853,10 +1066,21 @@ async function reconcilePaymentRecord(paymentId: string, memberId: string, recor
     throw new HttpError(409, 'Payment has already been reconciled.', 'PAYMENT_ALREADY_RECONCILED');
   }
 
-  const members = await getAllMembers();
+  const [members, vehicles] = await Promise.all([getAllMembers(), getAllVehicles()]);
   const member = members.find(item => item.id === memberId);
   if (!member) {
     throw new HttpError(404, 'Selected member was not found.', 'MEMBER_NOT_FOUND');
+  }
+  const normalizedPaymentPlate = String(payment.vehiclePlate || '').replace(/\s+/g, '').toUpperCase();
+  const memberVehicle = normalizedPaymentPlate
+    ? vehicles.find(vehicle =>
+        vehicle.ownerId === member.id &&
+        vehicle.status === 'Active' &&
+        vehicle.plateNumber.replace(/\s+/g, '').toUpperCase() === normalizedPaymentPlate
+      )
+    : undefined;
+  if (member.status !== 'Active') {
+    throw new HttpError(400, 'Select an active registered member.', 'REGISTERED_MEMBER_REQUIRED');
   }
 
   const transactionInput = normalizeTransactionInput({
@@ -864,7 +1088,7 @@ async function reconcilePaymentRecord(paymentId: string, memberId: string, recor
     timestamp: new Date().toISOString(),
     memberId: member.id,
     memberName: member.name,
-    vehiclePlate: member.vehicleAssigned || payment.accountReference,
+    vehiclePlate: memberVehicle?.plateNumber || '',
     description: `M-Pesa unmatched payment of KES ${payment.amount.toLocaleString()} assigned to ${member.name}. Original Account Ref: ${payment.accountReference || 'N/A'}.`,
     refCode: payment.refCode,
     type: 'Credit',
@@ -873,13 +1097,14 @@ async function reconcilePaymentRecord(paymentId: string, memberId: string, recor
     recorderName,
     tillNumber: payment.tillNumber
   });
+  await validateLedgerRegistration(transactionInput);
 
   const reconciledPayment: PaymentRecord = {
     ...payment,
     status: 'Reconciled',
     memberId: member.id,
     memberName: member.name,
-    vehiclePlate: member.vehicleAssigned || payment.vehiclePlate,
+    vehiclePlate: memberVehicle?.plateNumber || '',
     matchMethod: 'Manual Assignment',
     note: `Manually reconciled by ${recorderName}.`
   };
@@ -937,7 +1162,7 @@ const authenticateSaccoUser = async (req: express.Request, res: express.Response
           throw firebaseError;
         }
 
-        (req as any).user = verifyJwt(authHeader.slice('Bearer '.length).trim());
+        (req as any).user = await verifyJwt(authHeader.slice('Bearer '.length).trim());
         (req as any).authContext = {
           provider: 'dev-jwt',
           email: (req as any).user.email
@@ -1059,6 +1284,9 @@ async function startServer() {
         if (!allowDevBootstrap) {
           return res.status(401).json({ error: 'Firebase ID token is required to bootstrap the first admin.' });
         }
+        if (String(req.body?.password || '').length < 8) {
+          return res.status(400).json({ error: 'Create a password with at least 8 characters.', code: 'BOOTSTRAP_PASSWORD_REQUIRED' });
+        }
       }
 
       const user = await createFirstAdminProfile({
@@ -1088,7 +1316,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/auth/login', (req, res) => {
+  app.post('/api/auth/login', async (req, res) => {
     try {
       const allowDevLogin = !isProduction && process.env.ALLOW_DEV_AUTH_FALLBACK === 'true';
       if (!allowDevLogin) {
@@ -1096,8 +1324,11 @@ async function startServer() {
       }
 
       const { email, password } = req.body || {};
-      const user = localStore.users.find(item => item.email.toLowerCase() === String(email || '').toLowerCase());
-      if (!user || !user.devPassword || password !== user.devPassword) {
+      const user = await authenticateDevelopmentUser(
+        String(email || '').trim().toLowerCase(),
+        String(password || '')
+      );
+      if (!user || user.isActive === false) {
         return res.status(401).json({ error: 'Invalid Sacco profile or password.' });
       }
 
@@ -1168,15 +1399,38 @@ async function startServer() {
       if (!memberData.name || !memberData.idNumber) {
         return res.status(400).json({ error: 'Name and National ID Number are required.' });
       }
+      const name = sanitizePersonName(memberData.name).trim();
+      const idNumber = sanitizeIntegerInput(memberData.idNumber, 12);
+      const phoneNumber = sanitizePhoneNumber(memberData.phoneNumber);
+      const vehicleAssigned = sanitizeVehiclePlate(memberData.vehicleAssigned).trim();
+      if (!isValidPersonName(name)) {
+        return res.status(400).json({ error: 'Member name must contain letters only.' });
+      }
+      if (!idNumber || String(memberData.idNumber).trim() !== idNumber) {
+        return res.status(400).json({ error: 'National ID Number must contain digits only.' });
+      }
+      if (!isValidPhoneNumber(phoneNumber)) {
+        return res.status(400).json({ error: 'Enter a valid member phone number using digits only.' });
+      }
+      if (vehicleAssigned && !isValidKenyanVehiclePlate(vehicleAssigned)) {
+        return res.status(400).json({ error: 'Assigned vehicle plate must use a valid Kenyan plate format.' });
+      }
+      const registeredMembers = await getAllMembers();
+      if (registeredMembers.some(member => member.idNumber === idNumber)) {
+        return res.status(409).json({ error: `National ID Number ${idNumber} is already registered.`, code: 'MEMBER_ALREADY_REGISTERED' });
+      }
+      if (memberData.id && registeredMembers.some(member => member.id === memberData.id)) {
+        return res.status(409).json({ error: 'This member profile already exists.', code: 'MEMBER_ALREADY_REGISTERED' });
+      }
       const memberId = memberData.id || 'm-' + Date.now();
       const newMember = {
         id: memberId,
-        name: memberData.name,
-        idNumber: memberData.idNumber,
-        phoneNumber: memberData.phoneNumber || '+254 700 000 000',
+        name,
+        idNumber,
+        phoneNumber,
         status: memberData.status || 'Active',
         dateRegistered: memberData.dateRegistered || new Date().toISOString().substring(0, 10),
-        vehicleAssigned: memberData.vehicleAssigned || '',
+        vehicleAssigned,
         sharesAmount: Number(memberData.sharesAmount) || 0,
         savingsAmount: Number(memberData.savingsAmount) || 0,
         initialLoanAmount: Math.max(0, Number(memberData.initialLoanAmount ?? memberData.loanBalance) || 0),
@@ -1235,17 +1489,42 @@ async function startServer() {
   app.post('/api/vehicles', requireRoles(['Chairman', 'Secretary']), async (req, res) => {
     try {
       const vehicleData = req.body;
-      if (!vehicleData.plateNumber || !vehicleData.ownerName) {
-        return res.status(400).json({ error: 'Plate Number and Owner Name are required.' });
+      if (!vehicleData.plateNumber || !vehicleData.ownerId) {
+        return res.status(400).json({ error: 'Plate Number and a registered owner are required.' });
       }
+      const plateNumber = sanitizeVehiclePlate(vehicleData.plateNumber).trim();
+      const driverName = sanitizePersonName(vehicleData.driverName).trim();
+      const driverPhone = sanitizePhoneNumber(vehicleData.driverPhone);
+      if (!isValidKenyanVehiclePlate(plateNumber)) {
+        return res.status(400).json({ error: 'Plate Number must use a valid Kenyan plate format.' });
+      }
+      if (!isValidPersonName(driverName)) {
+        return res.status(400).json({ error: 'Driver name must contain letters only.' });
+      }
+      if (!isValidPhoneNumber(driverPhone)) {
+        return res.status(400).json({ error: 'Enter a valid driver phone number using digits only.' });
+      }
+      const [registeredMembers, registeredVehicles] = await Promise.all([getAllMembers(), getAllVehicles()]);
+      const owner = registeredMembers.find(member => member.id === String(vehicleData.ownerId));
+      if (!owner) {
+        return res.status(400).json({ error: 'Select a registered member as the vehicle owner.', code: 'MEMBER_NOT_FOUND' });
+      }
+      if (owner.status !== 'Active') {
+        return res.status(409).json({ error: `Member "${owner.name}" is not active.`, code: 'MEMBER_NOT_ACTIVE' });
+      }
+      const normalizedPlate = plateNumber.replace(/\s+/g, '');
+      if (registeredVehicles.some(vehicle => vehicle.plateNumber.replace(/\s+/g, '').toUpperCase() === normalizedPlate)) {
+        return res.status(409).json({ error: `Vehicle ${plateNumber} is already registered.`, code: 'VEHICLE_ALREADY_REGISTERED' });
+      }
+
       const vehicleId = vehicleData.id || 'v-' + Date.now();
       const newVehicle = {
         id: vehicleId,
-        plateNumber: vehicleData.plateNumber.toUpperCase(),
-        ownerId: vehicleData.ownerId || 'm-unknown',
-        ownerName: vehicleData.ownerName,
-        driverName: vehicleData.driverName || 'Douglas Mwangi',
-        driverPhone: vehicleData.driverPhone || '+254 700 111 222',
+        plateNumber,
+        ownerId: owner.id,
+        ownerName: owner.name,
+        driverName,
+        driverPhone,
         route: '17 Stage & Cabbanas',
         status: vehicleData.status || 'Active',
         capacity: ([7, 14, 33, 50].includes(Number(vehicleData.capacity)) ? Number(vehicleData.capacity) : 14) as 7 | 14 | 33 | 50
@@ -1510,6 +1789,12 @@ async function startServer() {
         return res.status(400).json({ error: 'Confirmation and validation callback URLs are required.' });
       }
 
+      const confirmationCallbackUrl = parsePublicDarajaCallbackUrl(confirmationUrl, 'Confirmation URL');
+      const validationCallbackUrl = parsePublicDarajaCallbackUrl(validationUrl, 'Validation URL');
+      if (confirmationCallbackUrl.pathname !== '/api/daraja/c2b-confirmation' || validationCallbackUrl.pathname !== '/api/daraja/c2b-validation') {
+        return res.status(400).json({ error: 'Use the generated /api/daraja/c2b-confirmation and /api/daraja/c2b-validation callback URLs.' });
+      }
+
       const accessToken = await getDarajaAccessToken(darajaConfig.mode);
 
       // 2. Call Safaricom C2B Register URL API
@@ -1522,14 +1807,32 @@ async function startServer() {
         body: JSON.stringify({
           ShortCode: darajaConfig.shortcode,
           ResponseType: 'Completed',
-          ConfirmationURL: confirmationUrl,
-          ValidationURL: validationUrl
+          ConfirmationURL: confirmationCallbackUrl.toString(),
+          ValidationURL: validationCallbackUrl.toString()
         })
       });
 
-      const registerData = await registerRes.json() as any;
-      
-      return res.json({
+      const registerResponseText = await registerRes.text();
+      let registerData: any = registerResponseText;
+      try {
+        registerData = registerResponseText ? JSON.parse(registerResponseText) : {};
+      } catch {
+        // Preserve a non-JSON Daraja response for the administrator's diagnosis.
+      }
+
+      if (!registerRes.ok) {
+        const remoteMessage = typeof registerData === 'object'
+          ? registerData.errorMessage || registerData.error || 'Safaricom rejected the callback registration request.'
+          : 'Safaricom rejected the callback registration request.';
+        return res.status(registerRes.status >= 500 ? 502 : registerRes.status).json({
+          status: 'failed',
+          statusCode: registerRes.status,
+          error: remoteMessage,
+          response: registerData
+        });
+      }
+
+      return res.status(200).json({
         status: 'success',
         statusCode: registerRes.status,
         response: registerData
@@ -1661,7 +1964,8 @@ async function startServer() {
   // API 16: Log direct M-Pesa cashless payment for both paybills
   app.post('/api/mpesa/log-payment', authenticateSaccoUser, requireRoles(['Chairman', 'Treasurer', 'Accountant']), async (req, res) => {
     try {
-      const { memberId, amount, category, refCode, tillNumber } = req.body;
+      const { memberId, accountReference, payerPhone, amount, category, refCode, tillNumber } = req.body;
+      const normalizedPayerPhone = sanitizePhoneNumber(payerPhone);
 
       if (!amount || !category || !refCode || !tillNumber) {
         return res.status(400).json({ error: 'Parameters (amount, category, refCode, tillNumber) are required.' });
@@ -1670,6 +1974,9 @@ async function startServer() {
       if (tillNumber !== 'VehicleTill' && tillNumber !== 'UtilityTill') {
         return res.status(400).json({ error: 'Invalid paybill selection. Must be VehicleTill (824 9102) or UtilityTill (481 0294).' });
       }
+      if (normalizedPayerPhone && !isValidPhoneNumber(normalizedPayerPhone)) {
+        return res.status(400).json({ error: 'Payer phone number must contain 9 to 15 digits.' });
+      }
 
       const payment = await processIncomingPayment({
         source: 'Manual',
@@ -1677,6 +1984,8 @@ async function startServer() {
         amount,
         shortcode: tillNumber === 'UtilityTill' ? '4810294' : '8249102',
         memberId,
+        accountReference: String(accountReference || '').trim(),
+        payerPhone: normalizedPayerPhone,
         category,
         recorderName: `M-Pesa Gateway (${(req as any).user?.role || 'System'})`
       });

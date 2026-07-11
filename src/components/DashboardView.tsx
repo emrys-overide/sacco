@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import { Transaction, Vehicle, Member, UserRole, VehicleClass } from '../types';
 import { PlusCircle, Search, FileDown, ShieldCheck, DollarSign, Activity, AlertCircle, ArrowUpRight, CheckCircle2, Sparkles, Minimize2, Maximize2, LayoutDashboard } from 'lucide-react';
+import { sanitizeDecimalInput, sanitizePersonName, sanitizeVehiclePlate } from '../lib/inputValidation';
+import { isExpenseTransactionCategory, requiresRegisteredMember } from '../lib/transactionPolicy';
 
 interface SparklineProps {
   data: number[];
@@ -92,7 +94,7 @@ function SaccoAnalyticsChart({ transactions }: SaccoAnalyticsChartProps) {
     : '';
 
   return (
-    <div className="bg-white border border-slate-200 rounded-3xl p-5 sm:p-6 shadow-[0_4px_30px_rgba(0,0,0,0.015)] flex flex-col justify-between h-full hover:shadow-md transition-all duration-300">
+    <div className="dashboard-panel bg-white border border-slate-200 rounded-3xl p-5 sm:p-6 shadow-[0_4px_30px_rgba(0,0,0,0.015)] flex flex-col justify-between h-full hover:shadow-md transition-all duration-300">
       <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
         <div>
           <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider font-display">Sacco Cash Collection Flow</h3>
@@ -251,6 +253,8 @@ export default function DashboardView({
   const dailyGrossAmount = [operationAmount, entranceFee, loanRepay, savingsContribution, sTicket, legalFee]
     .reduce((sum, value) => sum + (Number(value) || 0), 0);
   const dailyNetAmount = Math.max(0, dailyGrossAmount - (Number(expenseDeduction) || 0));
+  const isExpenseEntry = isExpenseTransactionCategory(category);
+  const activeVehicles = vehicles.filter(vehicle => vehicle.status === 'Active');
 
   // Calculations
   const todayCredits = transactions
@@ -285,9 +289,11 @@ export default function DashboardView({
   // Auto set Type & Till depending on category
   const handleCategoryChange = (cat: typeof category) => {
     setCategory(cat);
-    if (cat === 'Office Expenses' || cat === 'Petty Cash' || cat === 'Utilities' || cat === 'Equipment') {
+    if (isExpenseTransactionCategory(cat)) {
       setType('Debit');
       setTillNumber('UtilityTill');
+      setMemberId('');
+      setVehiclePlate('');
     } else {
       setType('Credit');
       setTillNumber('VehicleTill');
@@ -304,27 +310,37 @@ export default function DashboardView({
       return;
     }
 
-    if (category === 'Daily Contribution' && vehicleClass === 'Member Contribution' && !personName.trim()) {
-      setError('Enter the contributor’s name for a Member Contribution.');
-      return;
-    }
-
     const normalizedVehiclePlate = vehiclePlate.trim().toUpperCase();
-    const matchedVehicle = vehicles.find(v => v.plateNumber.trim().toUpperCase() === normalizedVehiclePlate);
-    const memberAssignedToPlate = members.find(member =>
-      member.vehicleAssigned?.trim().toUpperCase() === normalizedVehiclePlate
+    const matchedMember = members.find(member =>
+      member.status === 'Active' && member.name.trim().toLowerCase() === personName.trim().toLowerCase()
     );
-    const matchedMember = members.find(m => m.id === (memberId || matchedVehicle?.ownerId || memberAssignedToPlate?.id));
-    if (category === 'Daily Contribution' && Number(loanRepay) > 0 && !matchedMember) {
-      setError('Select the member or enter a registered V.REG before recording a loan repayment.');
-      return;
+    const matchedVehicle = normalizedVehiclePlate
+      ? vehicles.find(v => v.plateNumber.replace(/\s+/g, '').toUpperCase() === normalizedVehiclePlate.replace(/\s+/g, ''))
+      : undefined;
+    if (requiresRegisteredMember(category)) {
+      if (!matchedMember) {
+        setError(`Name "${personName.trim() || 'blank'}" is not registered. Register the member first.`);
+        return;
+      }
+      if (normalizedVehiclePlate && !matchedVehicle) {
+        setError(`Car/V.REG "${normalizedVehiclePlate}" is not registered. Onboard the vehicle first.`);
+        return;
+      }
+      if (matchedVehicle && matchedVehicle.ownerId !== matchedMember.id) {
+        setError(`Car/V.REG "${matchedVehicle.plateNumber}" is not registered under ${matchedMember.name}.`);
+        return;
+      }
+      if (matchedVehicle && matchedVehicle.status !== 'Active') {
+        setError(`Car/V.REG "${matchedVehicle.plateNumber}" is not active.`);
+        return;
+      }
     }
     const automaticRefCode = `SWT-MAN-${Date.now()}`;
     
     onAddTransaction({
-      memberId: memberId || matchedMember?.id,
+      memberId: isExpenseEntry ? undefined : matchedMember?.id,
       memberName: personName.trim() || matchedMember?.name || undefined,
-      vehiclePlate: normalizedVehiclePlate || undefined,
+      vehiclePlate: isExpenseEntry ? undefined : normalizedVehiclePlate,
       category,
       type,
       amount: transactionAmount,
@@ -367,6 +383,8 @@ export default function DashboardView({
   };
 
   const isTreasurer = currentUserRole === 'Treasurer' || currentUserRole === 'Chairman';
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
 
   return (
     <motion.div
@@ -376,13 +394,14 @@ export default function DashboardView({
       className="flex-1 flex flex-col overflow-y-auto bg-slate-50 font-sans"
     >
       {/* Premium Dashboard Header Greeting */}
-      <header className="py-6 sm:py-8 bg-white border-b border-slate-200/80 px-4 sm:px-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shrink-0">
-        <div className="space-y-1">
+      <header className="dashboard-hero py-7 sm:py-9 bg-white border-b border-slate-200/80 px-4 sm:px-8 flex flex-col sm:flex-row sm:items-center justify-between gap-5 shrink-0">
+        <div className="space-y-2">
+          <span className="dashboard-eyebrow">Operations command centre</span>
           <h2 className="text-2xl font-bold tracking-tight text-slate-900 font-display">
-            Good morning, {currentUserName.split(' ')[0]} 👋
+            {greeting}, {currentUserName.split(' ')[0]}.
           </h2>
           <p className="text-xs sm:text-sm text-slate-500">
-            Here's what's happening with Sowetamu Sacco today.
+            Your live collections, fleet activity and financial controls—at a glance.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -390,7 +409,7 @@ export default function DashboardView({
             <button
               onClick={() => setShowAddModal(true)}
               id="dashboard-new-tx-btn"
-              className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl tracking-wide shadow-sm shadow-blue-200 flex items-center space-x-2 transition-all cursor-pointer transform active:scale-95"
+              className="dashboard-primary-action px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl tracking-wide shadow-sm shadow-blue-200 flex items-center space-x-2 transition-all cursor-pointer transform active:scale-95"
             >
               <PlusCircle className="w-4 h-4" />
               <span>Record Transaction</span>
@@ -472,7 +491,7 @@ export default function DashboardView({
           </div>
         </div>
       ) : (
-        <div className="p-4 sm:p-8 grid grid-cols-1 md:grid-cols-12 gap-6 flex-1 bg-slate-50/50">
+        <div className="dashboard-grid p-4 sm:p-8 grid grid-cols-1 md:grid-cols-12 gap-6 flex-1 bg-slate-50/50">
         
         {/* Brand New App guided flow */}
         {members.length === 0 && (
@@ -576,7 +595,7 @@ export default function DashboardView({
           initial={{ opacity: 0, y: 15 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.3, delay: 0.05 }}
-          className="md:col-span-3 bg-white border border-slate-200/80 p-5 rounded-3xl shadow-[0_4px_20px_rgba(0,0,0,0.02)] hover:shadow-lg hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between group backdrop-blur-md bg-white/90 relative overflow-hidden"
+          className="dashboard-metric md:col-span-3 bg-white border border-slate-200/80 p-5 rounded-3xl shadow-[0_4px_20px_rgba(0,0,0,0.02)] hover:shadow-lg hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between group backdrop-blur-md bg-white/90 relative overflow-hidden"
         >
           <div>
             <div className="flex items-center justify-between">
@@ -600,7 +619,7 @@ export default function DashboardView({
           initial={{ opacity: 0, y: 15 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.3, delay: 0.1 }}
-          className="md:col-span-3 bg-white border border-slate-200/80 p-5 rounded-3xl shadow-[0_4px_20px_rgba(0,0,0,0.02)] hover:shadow-lg hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between group backdrop-blur-md bg-white/90 relative overflow-hidden"
+          className="dashboard-metric md:col-span-3 bg-white border border-slate-200/80 p-5 rounded-3xl shadow-[0_4px_20px_rgba(0,0,0,0.02)] hover:shadow-lg hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between group backdrop-blur-md bg-white/90 relative overflow-hidden"
         >
           <div>
             <div className="flex items-center justify-between">
@@ -626,7 +645,7 @@ export default function DashboardView({
           initial={{ opacity: 0, y: 15 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.3, delay: 0.15 }}
-          className="md:col-span-3 bg-white border border-slate-200/80 p-5 rounded-3xl shadow-[0_4px_20px_rgba(0,0,0,0.02)] hover:shadow-lg hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between group backdrop-blur-md bg-white/90 relative overflow-hidden"
+          className="dashboard-metric md:col-span-3 bg-white border border-slate-200/80 p-5 rounded-3xl shadow-[0_4px_20px_rgba(0,0,0,0.02)] hover:shadow-lg hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between group backdrop-blur-md bg-white/90 relative overflow-hidden"
         >
           <div>
             <div className="flex items-center justify-between">
@@ -652,7 +671,7 @@ export default function DashboardView({
           initial={{ opacity: 0, y: 15 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.3, delay: 0.2 }}
-          className="md:col-span-3 bg-white border border-slate-200/80 p-5 rounded-3xl shadow-[0_4px_20px_rgba(0,0,0,0.02)] hover:shadow-lg hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between group backdrop-blur-md bg-white/90 relative overflow-hidden"
+          className="dashboard-metric md:col-span-3 bg-white border border-slate-200/80 p-5 rounded-3xl shadow-[0_4px_20px_rgba(0,0,0,0.02)] hover:shadow-lg hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between group backdrop-blur-md bg-white/90 relative overflow-hidden"
         >
           <div>
             <div className="flex items-center justify-between">
@@ -861,7 +880,6 @@ export default function DashboardView({
                       onChange={(e) => {
                         const nextClass = e.target.value as VehicleClass;
                         setVehicleClass(nextClass);
-                        if (nextClass === 'Member Contribution') setVehiclePlate('');
                       }}
                       className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold"
                     >
@@ -886,7 +904,8 @@ export default function DashboardView({
                           type="number"
                           min="0"
                           value={value as string}
-                          onChange={(e) => (setter as React.Dispatch<React.SetStateAction<string>>)(e.target.value)}
+                          onChange={(e) => (setter as React.Dispatch<React.SetStateAction<string>>)(sanitizeDecimalInput(e.target.value))}
+                          inputMode="decimal"
                           className="mt-1 w-full rounded-lg border border-slate-200 bg-white p-2 text-right font-mono text-xs text-slate-900"
                         />
                       </label>
@@ -896,7 +915,7 @@ export default function DashboardView({
                   <div className="grid grid-cols-3 gap-2 border-t border-slate-300 pt-3 font-mono text-xs">
                     <div><span className="block text-[9px] text-slate-500">GROSS</span><strong>KES {dailyGrossAmount.toLocaleString()}</strong></div>
                     <label className="text-[9px] font-bold text-rose-600">DEDUCTION
-                      <input type="number" min="0" value={expenseDeduction} onChange={(e) => setExpenseDeduction(e.target.value)} className="mt-1 w-full rounded border border-rose-200 bg-white p-1.5 text-right text-xs" />
+                      <input type="number" min="0" value={expenseDeduction} onChange={(e) => setExpenseDeduction(sanitizeDecimalInput(e.target.value))} inputMode="decimal" className="mt-1 w-full rounded border border-rose-200 bg-white p-1.5 text-right text-xs" />
                     </label>
                     <div className="text-right"><span className="block text-[9px] text-emerald-700">NET BANKABLE</span><strong className="text-emerald-700">KES {dailyNetAmount.toLocaleString()}</strong></div>
                   </div>
@@ -927,7 +946,8 @@ export default function DashboardView({
                     type="number"
                     required
                     value={category === 'Daily Contribution' ? dailyNetAmount : amount}
-                    onChange={(e) => setAmount(e.target.value)}
+                    onChange={(e) => setAmount(sanitizeDecimalInput(e.target.value))}
+                    inputMode="decimal"
                     disabled={category === 'Daily Contribution'}
                     className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-mono focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 disabled:bg-emerald-50 disabled:text-emerald-800 disabled:font-bold"
                   />
@@ -946,55 +966,69 @@ export default function DashboardView({
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              {isExpenseEntry ? (
                 <div>
                   <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
-                    Paying Member (Optional)
-                  </label>
-                  <select
-                    value={memberId}
-                    onChange={(e) => setMemberId(e.target.value)}
-                    className="w-full p-2.5 border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 bg-white"
-                  >
-                    <option value="">N/A (Office Account)</option>
-                    {members.map(member => (
-                      <option key={member.id} value={member.id}>{member.name}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
-                    Person's Name
+                    External Payee / Recipient (Optional)
                   </label>
                   <input
                     type="text"
                     value={personName}
-                    onChange={(e) => setPersonName(e.target.value)}
-                    placeholder="Enter payer or driver's name"
+                    onChange={(e) => setPersonName(sanitizePersonName(e.target.value))}
+                    inputMode="text"
+                    pattern="[A-Za-z .'-]*"
+                    title="Use letters only."
+                    placeholder="Enter the person receiving the expense"
                     className="w-full p-2.5 border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 bg-white"
                   />
                 </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
+                      Registered Member Name *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      list="registered-member-names"
+                      value={personName}
+                      onChange={(e) => {
+                        const nextName = sanitizePersonName(e.target.value);
+                        const member = members.find(item => item.name.trim().toLowerCase() === nextName.trim().toLowerCase());
+                        setPersonName(nextName);
+                        setMemberId(member?.id || '');
+                      }}
+                      placeholder="Type the member's registered name"
+                      className="w-full p-2.5 border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 bg-white"
+                    />
+                    <datalist id="registered-member-names">
+                      {members.filter(member => member.status === 'Active').map(member => (
+                        <option key={member.id} value={member.name} />
+                      ))}
+                    </datalist>
+                  </div>
 
-                <div className="col-span-2">
-                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
-                    V.REG — Vehicle Registration
-                  </label>
-                  <input
-                    type="text"
-                    list="registered-vehicle-plates"
-                    value={vehiclePlate}
-                    onChange={(e) => setVehiclePlate(e.target.value.toUpperCase())}
-                    placeholder="e.g. KDA 123A"
-                    className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-mono uppercase focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 bg-white"
-                  />
-                  <datalist id="registered-vehicle-plates">
-                    {vehicles.map(v => (
-                      <option key={v.id} value={v.plateNumber}>{v.plateNumber}</option>
-                    ))}
-                  </datalist>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
+                      V.REG / Car (Optional)
+                    </label>
+                    <input
+                      type="text"
+                      list="active-onboarded-vehicles"
+                      value={vehiclePlate}
+                      onChange={(e) => setVehiclePlate(sanitizeVehiclePlate(e.target.value))}
+                      placeholder="Leave blank or type a registered V.REG"
+                      className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-mono uppercase focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 bg-white"
+                    />
+                    <datalist id="active-onboarded-vehicles">
+                      {activeVehicles.map(vehicle => (
+                        <option key={vehicle.id} value={vehicle.plateNumber}>{vehicle.ownerName}</option>
+                      ))}
+                    </datalist>
+                  </div>
                 </div>
-              </div>
+              )}
 
               <div>
                 <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">

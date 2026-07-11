@@ -187,6 +187,11 @@ export default function App() {
   };
 
   const handleClearAllData = () => {
+    const confirmed = window.confirm(
+      'Clear the local Sacco state? This removes the saved local registers and sheets from this browser. Do you want to proceed?'
+    );
+    if (!confirmed) return;
+
     localStorage.removeItem(STORAGE_KEYS.legacyMembers);
     localStorage.removeItem(STORAGE_KEYS.legacyVehicles);
     localStorage.removeItem(STORAGE_KEYS.legacyTransactions);
@@ -425,6 +430,7 @@ export default function App() {
         return (
           <PaybillView
             members={members}
+            vehicles={vehicles}
             currentUserRole={currentUser?.role || 'Member'}
             fallbackAuthToken={authToken}
             onRefreshData={handleRefreshData}
@@ -438,7 +444,7 @@ export default function App() {
   return (
     <div className="app-shell w-full h-screen flex flex-col md:flex-row overflow-hidden font-sans text-slate-900 relative">
       {/* Mobile Top Navigation Bar */}
-      <div className="md:hidden h-14 bg-white text-slate-800 border-b border-slate-200 flex items-center justify-between px-4 shrink-0 z-30">
+      <div className="app-topbar md:hidden h-14 bg-white text-slate-800 border-b border-slate-200 flex items-center justify-between px-4 shrink-0 z-30">
         <button
           onClick={() => setIsMobileSidebarOpen(true)}
           className="p-1.5 rounded hover:bg-slate-50 transition-colors"
@@ -450,7 +456,7 @@ export default function App() {
           <span className="font-bold uppercase tracking-tight text-sm text-slate-900 font-display">Sowetamu</span>
           <span className="text-blue-600 text-xs font-black">Pro</span>
         </div>
-        <div className="w-7 h-7 rounded bg-blue-50 flex items-center justify-center font-bold text-[10px] text-blue-600 font-display">
+        <div className="topbar-avatar w-8 h-8 rounded-xl bg-blue-50 flex items-center justify-center font-bold text-[10px] text-blue-600 font-display">
           {currentUser.name.split(' ').map(n => n[0]).join('')}
         </div>
       </div>
@@ -494,7 +500,8 @@ export default function App() {
         {/* Unified Top Header with Real-Time Global Search */}
         <header className="app-topbar h-16 bg-white border-b border-slate-200 px-4 sm:px-8 flex items-center justify-between shrink-0 z-20">
           {/* Left Side: Current view identifier */}
-          <div className="hidden md:flex items-center space-x-2">
+          <div className="hidden md:flex items-center space-x-3">
+            <span className="topbar-view-orb" aria-hidden="true"></span>
             <span className="text-xs font-bold text-slate-800 uppercase tracking-widest font-display">
               {globalSearchQuery.trim() ? 'GLOBAL SYSTEM SEARCH' : `${currentTab}`}
             </span>
@@ -520,7 +527,9 @@ export default function App() {
               type="text"
               value={globalSearchQuery}
               onChange={(e) => setGlobalSearchQuery(e.target.value)}
-              className="w-full pl-9 pr-9 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium focus:outline-none focus:bg-white focus:border-blue-600 focus:ring-1 focus:ring-blue-600 transition-all placeholder-slate-400 text-slate-800 shadow-inner"
+              placeholder="Search members, vehicles or references..."
+              aria-label="Search the SACCO system"
+              className="global-search w-full pl-9 pr-9 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium focus:outline-none focus:bg-white focus:border-blue-600 focus:ring-1 focus:ring-blue-600 transition-all placeholder-slate-400 text-slate-800 shadow-inner"
               id="global-search-header-input"
             />
             {globalSearchQuery && (
@@ -535,13 +544,16 @@ export default function App() {
           </div>
 
           {/* Right Side: Active role pill */}
-          <div className="hidden sm:flex items-center space-x-4">
+          <div className="hidden sm:flex items-center space-x-3">
             <div className="flex flex-col items-end">
               <span className="text-[9px] text-slate-400 font-mono font-medium tracking-widest uppercase">AUDIT SAFE</span>
               <span className="text-[11px] font-bold text-blue-700 flex items-center font-mono">
                 <span className="w-1.5 h-1.5 bg-blue-500 rounded-full mr-1.5 animate-pulse"></span>
                 {currentUser.role.toUpperCase()}
               </span>
+            </div>
+            <div className="topbar-avatar w-9 h-9 rounded-xl flex items-center justify-center text-[10px] font-black font-display" title={currentUser.name}>
+              {currentUser.name.split(' ').map(n => n[0]).join('').slice(0, 2)}
             </div>
           </div>
         </header>
@@ -552,7 +564,7 @@ export default function App() {
         </div>
 
         {/* Global Footer */}
-        <footer className="app-topbar h-auto min-h-12 py-3 sm:py-0 bg-white border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between px-4 sm:px-8 text-[10px] text-slate-500 font-medium shrink-0 gap-2">
+        <footer className="app-footer app-topbar h-auto min-h-12 py-3 sm:py-0 bg-white border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between px-4 sm:px-8 text-[10px] text-slate-500 font-medium shrink-0 gap-2">
           <div className="text-center sm:text-left">&copy; 2026 Matatu Sacco Financial OS. Built for scalability &amp; auditability.</div>
           <div className="flex flex-wrap justify-center gap-4 uppercase tracking-wider font-mono">
             <span className="flex items-center">

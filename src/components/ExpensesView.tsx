@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Transaction, UserRole, TillType } from '../types';
+import { sanitizeDecimalInput } from '../lib/inputValidation';
 import { 
   Plus, 
   Search, 
@@ -579,10 +580,11 @@ export default function ExpensesView({
                     Amount (KES) *
                   </label>
                   <input
-                    type="number"
-                    required
-                    value={amount}
-                    onChange={(e) => setAmount(e.target.value)}
+                  type="number"
+                  required
+                  value={amount}
+                  onChange={(e) => setAmount(sanitizeDecimalInput(e.target.value))}
+                  inputMode="decimal"
                     className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-mono focus:outline-none focus:border-rose-600"
                   />
                 </div>

@@ -27,6 +27,15 @@ import {
   ClipboardCheck,
   Building
 } from 'lucide-react';
+import {
+  isValidPersonName,
+  isValidPhoneNumber,
+  sanitizeDecimalInput,
+  sanitizeIntegerInput,
+  sanitizePersonName,
+  sanitizePhoneNumber,
+  sanitizeVehiclePlate
+} from '../lib/inputValidation';
 
 interface MembersViewProps {
   members: Member[];
@@ -88,6 +97,14 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
     e.preventDefault();
     if (!name.trim() || !idNumber.trim() || !phoneNumber.trim()) {
       setError('Please fill in all required fields.');
+      return;
+    }
+    if (!isValidPersonName(name)) {
+      setError('Full name must use letters only.');
+      return;
+    }
+    if (!isValidPhoneNumber(phoneNumber)) {
+      setError('Enter a valid phone number using digits only.');
       return;
     }
     try {
@@ -624,7 +641,10 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                   type="text"
                   required
                   value={name}
-                  onChange={(e) => setName(e.target.value)}
+                  onChange={(e) => setName(sanitizePersonName(e.target.value))}
+                  inputMode="text"
+                  pattern="[A-Za-z .'-]+"
+                  title="Letters only."
                   className="w-full p-2 border border-slate-200 rounded text-xs focus:outline-none focus:border-emerald-600"
                 />
               </div>
@@ -635,10 +655,13 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                     National ID Number *
                   </label>
                   <input
-                    type="text"
-                    required
-                    value={idNumber}
-                    onChange={(e) => setIdNumber(e.target.value)}
+                  type="text"
+                  required
+                  value={idNumber}
+                  onChange={(e) => setIdNumber(sanitizeIntegerInput(e.target.value, 12))}
+                  inputMode="numeric"
+                  pattern="[0-9]+"
+                  title="Numbers only."
                     className="w-full p-2 border border-slate-200 rounded text-xs font-mono focus:outline-none focus:border-emerald-600"
                   />
                 </div>
@@ -648,10 +671,13 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                     Phone Number (M-Pesa linked) *
                   </label>
                   <input
-                    type="text"
-                    required
-                    value={phoneNumber}
-                    onChange={(e) => setPhoneNumber(e.target.value)}
+                  type="tel"
+                  required
+                  value={phoneNumber}
+                  onChange={(e) => setPhoneNumber(sanitizePhoneNumber(e.target.value))}
+                  inputMode="tel"
+                  pattern="[+]?[0-9]{9,15}"
+                  title="Use a phone number only."
                     className="w-full p-2 border border-slate-200 rounded text-xs focus:outline-none focus:border-emerald-600"
                   />
                 </div>
@@ -664,7 +690,7 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                 <input
                   type="text"
                   value={assignedVehicle}
-                  onChange={(e) => setAssignedVehicle(e.target.value.toUpperCase())}
+                  onChange={(e) => setAssignedVehicle(sanitizeVehiclePlate(e.target.value))}
                   className="w-full p-2 border border-slate-200 rounded text-xs font-mono uppercase focus:outline-none focus:border-emerald-600"
                 />
               </div>
@@ -677,7 +703,8 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                   type="number"
                   min="0"
                   value={openingLoanBalance}
-                  onChange={(e) => setOpeningLoanBalance(e.target.value)}
+                  onChange={(e) => setOpeningLoanBalance(sanitizeDecimalInput(e.target.value))}
+                  inputMode="decimal"
                   placeholder="0"
                   className="w-full p-2 border border-slate-200 rounded text-xs font-mono focus:outline-none focus:border-emerald-600"
                 />

@@ -72,7 +72,7 @@ export default function Sidebar({
       }`}>
         {!displayCollapsed ? (
           <div className="flex items-center space-x-2.5">
-            <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center shadow-sm shadow-blue-200">
+            <div className="brand-mark w-9 h-9 bg-blue-600 rounded-xl flex items-center justify-center shadow-sm shadow-blue-200">
               <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
               </svg>
@@ -89,7 +89,7 @@ export default function Sidebar({
           </div>
         ) : (
           <div className="flex flex-col items-center md:items-center space-y-1.5 md:block hidden" title="Sowetamu Pro Sacco OS">
-            <div className="w-9 h-9 bg-blue-600 rounded-lg flex items-center justify-center shadow-sm shadow-blue-200">
+            <div className="brand-mark w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center shadow-sm shadow-blue-200">
               <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
               </svg>
@@ -130,6 +130,11 @@ export default function Sidebar({
       {/* Nav Actions inside Scrollable Container */}
       <div className="flex-1 overflow-y-auto space-y-5 py-4 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent">
         <nav className={`p-3 space-y-1 ${displayCollapsed ? 'md:flex md:flex-col md:items-center md:px-2' : ''}`}>
+          {!displayCollapsed && (
+            <p className="px-2 pb-2 text-[8px] font-bold uppercase tracking-[0.22em] text-emerald-200/45 font-mono">
+              Operations workspace
+            </p>
+          )}
           {menuItems.map((item) => {
             const isActive = currentTab === item.name;
             return (
@@ -142,7 +147,7 @@ export default function Sidebar({
                 title={displayCollapsed ? `${item.name} Directory` : undefined}
                 whileHover={{ scale: 1.015, x: displayCollapsed ? 0 : 2 }}
                 whileTap={{ scale: 0.985 }}
-                className={`w-full flex items-center transition-all duration-200 text-left cursor-pointer relative ${
+                className={`sidebar-nav-item ${isActive ? 'is-active' : ''} w-full flex items-center transition-all duration-200 text-left cursor-pointer relative ${
                   displayCollapsed 
                     ? `md:justify-center md:p-2.5 rounded-xl ${
                         isActive 
@@ -187,7 +192,7 @@ export default function Sidebar({
 
         {/* Clean Database Controls */}
         {!displayCollapsed ? (
-          <div className="mx-4 p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+          <div className="sidebar-section-card mx-4 p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-[9px] font-mono font-bold text-slate-500 uppercase tracking-widest">
                 Sacco Database
@@ -214,7 +219,7 @@ export default function Sidebar({
             </div>
           </div>
         ) : (
-          <div className="mx-2 p-2 bg-slate-50 border border-slate-200 rounded-xl flex flex-col items-center space-y-3 hidden md:flex">
+          <div className="sidebar-section-card mx-2 p-2 bg-slate-50 border border-slate-200 rounded-xl flex flex-col items-center space-y-3 hidden md:flex">
             <span 
               className={`p-1.5 rounded-lg border ${
                 isDatabaseEmpty 
@@ -239,7 +244,7 @@ export default function Sidebar({
       </div>
 
       {/* Profile Selector & User Meta (Fixed Bottom) */}
-      <div className={`p-4 border-t border-slate-100 bg-white flex flex-col transition-all duration-300 ${
+      <div className={`sidebar-profile p-4 border-t border-slate-100 bg-white flex flex-col transition-all duration-300 ${
         displayCollapsed ? 'md:space-y-4 md:items-center md:justify-center' : 'space-y-3'
       }`}>
         <div className={`flex items-center justify-between pt-2 border-t border-slate-100 w-full ${
@@ -247,7 +252,7 @@ export default function Sidebar({
         }`}>
           <div className="flex items-center space-x-3">
             <div 
-              className="w-8 h-8 rounded bg-blue-50 text-blue-600 flex items-center justify-center font-bold text-xs font-display shrink-0"
+              className="sidebar-avatar w-9 h-9 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center font-bold text-xs font-display shrink-0"
               title={`${currentUser.name} (${currentUser.role})`}
             >
               {currentUser.name.split(' ').map(n => n[0]).join('')}

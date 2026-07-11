@@ -39,6 +39,14 @@ export function normalizeRefCode(refCode: unknown): string {
   return String(refCode || '').trim().toUpperCase();
 }
 
+function normalizeNonNegativeAmount(value: unknown, fieldName: string): number {
+  const amount = Number(value ?? 0);
+  if (!Number.isFinite(amount) || amount < 0) {
+    throw new LedgerPolicyError(400, `${fieldName} must contain a valid non-negative number.`, 'INVALID_NUMERIC_FIELD');
+  }
+  return amount;
+}
+
 export function normalizeTransactionInput(input: LedgerInput): Transaction {
   const description = String(input.description || '').trim();
   const refCode = normalizeRefCode(input.refCode);
@@ -68,14 +76,14 @@ export function normalizeTransactionInput(input: LedgerInput): Transaction {
     recorderName: input.recorderName || 'SACCO Ledger OS',
     tillNumber,
     vehicleClass: input.vehicleClass,
-    operationAmount: Number(input.operationAmount || 0),
-    entranceFee: Number(input.entranceFee || 0),
-    loanRepay: Number(input.loanRepay || 0),
-    savingsContribution: input.savingsContribution === undefined ? undefined : Number(input.savingsContribution || 0),
-    sTicket: Number(input.sTicket || 0),
-    legalFee: Number(input.legalFee || 0),
-    expenseDeduction: Number(input.expenseDeduction || 0),
-    grossAmount: Number(input.grossAmount || amount),
+    operationAmount: normalizeNonNegativeAmount(input.operationAmount, 'Operation amount'),
+    entranceFee: normalizeNonNegativeAmount(input.entranceFee, 'Entrance fee'),
+    loanRepay: normalizeNonNegativeAmount(input.loanRepay, 'Loan repayment'),
+    savingsContribution: input.savingsContribution === undefined ? undefined : normalizeNonNegativeAmount(input.savingsContribution, 'Savings contribution'),
+    sTicket: normalizeNonNegativeAmount(input.sTicket, 'S/Ticket'),
+    legalFee: normalizeNonNegativeAmount(input.legalFee, 'Legal fee'),
+    expenseDeduction: normalizeNonNegativeAmount(input.expenseDeduction, 'Expense deduction'),
+    grossAmount: input.grossAmount === undefined ? amount : normalizeNonNegativeAmount(input.grossAmount, 'Gross amount'),
     reversalOf: input.reversalOf,
     reversedAt: input.reversedAt,
     reversedBy: input.reversedBy

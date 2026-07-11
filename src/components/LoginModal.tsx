@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword, updateProfile } from 'firebase/auth';
 import { User } from '../types';
 import { firebaseAuth } from '../lib/firebase';
+import { sanitizePersonName, sanitizePhoneNumber } from '../lib/inputValidation';
 import { CheckCircle2, LogIn, ShieldCheck, UserPlus } from 'lucide-react';
 
 interface LoginModalProps {
@@ -213,7 +214,10 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
                     id="full-name"
                     type="text"
                     value={fullName}
-                    onChange={(e) => setFullName(e.target.value)}
+                    onChange={(e) => setFullName(sanitizePersonName(e.target.value))}
+                    inputMode="text"
+                    pattern="[A-Za-z .'-]+"
+                    title="Use letters, spaces, apostrophes, periods, and hyphens only."
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-emerald-600 shadow-xs"
                     required
                   />
@@ -226,7 +230,10 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
                     id="phone"
                     type="tel"
                     value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
+                    onChange={(e) => setPhone(sanitizePhoneNumber(e.target.value))}
+                    inputMode="tel"
+                    pattern="[+]?[0-9]{9,15}"
+                    title="Use a phone number only."
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-emerald-600 shadow-xs"
                   />
                 </div>

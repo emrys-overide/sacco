@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import type { Member, PaymentRecord, Transaction } from '../types';
+import type { Member, PaymentRecord, Transaction, Vehicle } from '../types';
 import { getSaccoAccessToken } from '../lib/api';
+import { sanitizeDecimalInput, sanitizeIntegerInput, sanitizePhoneNumber, sanitizeReferenceCode } from '../lib/inputValidation';
 import { 
   Smartphone, 
   CheckCircle2, 
@@ -20,6 +21,7 @@ import {
 
 interface PaybillViewProps {
   members: Member[];
+  vehicles: Vehicle[];
   currentUserRole: string;
   fallbackAuthToken: string;
   onRefreshData?: () => void;
@@ -35,8 +37,24 @@ interface DarajaPublicConfig {
   stkPushEnabled: boolean;
 }
 
+function getPublicCallbackUrlError(value: string): string | null {
+  try {
+    const callbackUrl = new URL(value.trim());
+    const host = callbackUrl.hostname.toLowerCase();
+    const isPrivateIpv4 = /^(127\.|10\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(host);
+    const isLocalHost = host === 'localhost' || host.endsWith('.localhost') || host === '::1' || host === '[::1]';
+    if (callbackUrl.protocol !== 'https:' || !host || isPrivateIpv4 || isLocalHost) {
+      return 'Use a public HTTPS callback URL. Safaricom cannot reach localhost or a private network address.';
+    }
+    return null;
+  } catch {
+    return 'Enter a valid public HTTPS callback URL.';
+  }
+}
+
 export default function PaybillView({
   members,
+  vehicles,
   currentUserRole,
   fallbackAuthToken,
   onRefreshData
@@ -44,6 +62,7 @@ export default function PaybillView({
   // Logger Form State
   const [targetTill, setTargetTill] = useState<'VehicleTill' | 'UtilityTill'>('VehicleTill');
   const [selectedMemberId, setSelectedMemberId] = useState('');
+  const [selectedVehiclePlate, setSelectedVehiclePlate] = useState('');
   const [amount, setAmount] = useState('');
   const [refCode, setRefCode] = useState('');
   const [category, setCategory] = useState<'Daily Contribution' | 'Registration Fee' | 'Management Fee' | 'Penalty'>('Daily Contribution');
@@ -82,6 +101,11 @@ export default function PaybillView({
   const [reconcileSelections, setReconcileSelections] = useState<Record<string, string>>({});
   const [reconcilingPaymentId, setReconcilingPaymentId] = useState('');
   const [isDataLoading, setIsDataLoading] = useState(false);
+  const activePaymentVehicles = vehicles.filter(vehicle => vehicle.status === 'Active');
+  const eligiblePaymentMembers = members.filter(member => member.status === 'Active');
+  const eligibleMemberVehicles = activePaymentVehicles.filter(vehicle => vehicle.ownerId === selectedMemberId);
+  const callbackUrlError = getPublicCallbackUrlError(callbackBaseUrl);
+  const canRunSandboxCallbackTest = Boolean(darajaConfig?.credentialsConfigured) && !callbackUrlError;
 
   // Security headers helper
   const getSaccoSecurityHeaders = async () => {
@@ -113,6 +137,7 @@ export default function PaybillView({
   // Sync phone number on member selection
   const handleMemberSelect = (memberId: string) => {
     setSelectedMemberId(memberId);
+    setSelectedVehiclePlate('');
     if (!memberId) {
       setPhoneNumber('');
       return;
@@ -198,6 +223,18 @@ export default function PaybillView({
       setErrorMsg('M-Pesa transaction reference code is required.');
       return;
     }
+    const selectedMember = eligiblePaymentMembers.find(member => member.id === selectedMemberId);
+    const selectedVehicle = selectedVehiclePlate
+      ? activePaymentVehicles.find(vehicle => vehicle.plateNumber === selectedVehiclePlate && vehicle.ownerId === selectedMember?.id)
+      : undefined;
+    if (!selectedMember) {
+      setErrorMsg('Select an active registered member.');
+      return;
+    }
+    if (selectedVehiclePlate && !selectedVehicle) {
+      setErrorMsg(`Car/V.REG "${selectedVehiclePlate}" is not registered under ${selectedMember.name}.`);
+      return;
+    }
 
     const refExists = paymentRecords.some(payment => payment.refCode.toUpperCase() === refCode.trim().toUpperCase()) ||
       mpesaTransactions.some(tx => tx.refCode.toUpperCase() === refCode.trim().toUpperCase());
@@ -213,6 +250,8 @@ export default function PaybillView({
         headers: await getSaccoSecurityHeaders(),
         body: JSON.stringify({
           memberId: selectedMemberId || null,
+          accountReference: selectedVehiclePlate,
+          payerPhone: phoneNumber.trim(),
           amount: Number(amount),
           category,
           refCode: refCode.trim(),
@@ -235,6 +274,7 @@ export default function PaybillView({
       // Reset form variables
       setAmount('');
       setSelectedMemberId('');
+      setSelectedVehiclePlate('');
       setPhoneNumber('');
       generateRandomRefCode();
 
@@ -263,6 +303,10 @@ export default function PaybillView({
 
     if (!simAmount || Number(simAmount) <= 0) {
       setErrorMsg('Please enter a valid KES amount for simulation.');
+      return;
+    }
+    if (callbackUrlError) {
+      setErrorMsg(callbackUrlError);
       return;
     }
 
@@ -311,6 +355,10 @@ export default function PaybillView({
 
     if (!darajaConfig?.credentialsConfigured) {
       setErrorMsg('Daraja server credentials are not configured. Set DARAJA_CONSUMER_KEY and DARAJA_CONSUMER_SECRET in the server environment.');
+      return;
+    }
+    if (callbackUrlError) {
+      setErrorMsg(callbackUrlError);
       return;
     }
 
@@ -606,22 +654,40 @@ export default function PaybillView({
                 {/* MEMBER ASSIGNMENT */}
                 <div>
                   <label className="block text-[10px] font-black uppercase text-slate-600 tracking-wider mb-1.5 font-mono flex justify-between">
-                    <span>Associate Member Account</span>
-                    <span className="text-[9px] lowercase font-normal text-slate-400 italic">optional</span>
+                    <span>Registered Member *</span>
                   </label>
                   <div className="relative">
                     <User className="absolute left-3 top-3 h-4 w-4 text-slate-400" />
                     <select
+                      required
                       value={selectedMemberId}
                       onChange={(e) => handleMemberSelect(e.target.value)}
                       className="w-full pl-9 pr-3 py-2 border-2 border-slate-200 rounded-lg bg-white focus:outline-none focus:border-slate-900 font-bold text-slate-800"
                     >
-                      <option value="">-- Direct Payment (No Member Linked) --</option>
-                      {members.map(m => (
-                        <option key={m.id} value={m.id}>{m.name} ({m.vehicleAssigned || 'No Fleet Assigned'})</option>
+                      <option value="">Select a registered member...</option>
+                      {eligiblePaymentMembers.map(m => (
+                        <option key={m.id} value={m.id}>
+                          {m.name}
+                        </option>
                       ))}
                     </select>
                   </div>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-black uppercase text-slate-600 tracking-wider mb-1.5 font-mono">
+                    Onboarded V.REG (Optional)
+                  </label>
+                  <select
+                    value={selectedVehiclePlate}
+                    onChange={(e) => setSelectedVehiclePlate(e.target.value)}
+                    className="w-full px-3 py-2 border-2 border-slate-200 rounded-lg bg-white focus:outline-none focus:border-slate-900 font-mono font-bold text-slate-800"
+                  >
+                    <option value="">No vehicle attached</option>
+                    {eligibleMemberVehicles.map(vehicle => (
+                      <option key={vehicle.id} value={vehicle.plateNumber}>{vehicle.plateNumber}</option>
+                    ))}
+                  </select>
                 </div>
 
                 {/* SUBSCRIBER PHONE */}
@@ -630,9 +696,11 @@ export default function PaybillView({
                     Payer Phone Number
                   </label>
                   <input
-                    type="text"
+                    type="tel"
                     value={phoneNumber}
-                    onChange={(e) => setPhoneNumber(e.target.value)}
+                    onChange={(e) => setPhoneNumber(sanitizePhoneNumber(e.target.value))}
+                    inputMode="tel"
+                    pattern="[+]?[0-9]{9,15}"
                     className="w-full px-3 py-2 border-2 border-slate-200 rounded-lg focus:outline-none focus:border-slate-900 font-mono text-[11px]"
                   />
                 </div>
@@ -652,9 +720,9 @@ export default function PaybillView({
                   <div className="relative">
                     <Hash className="absolute left-3 top-3 h-4 w-4 text-slate-400" />
                     <input
-                      type="text"
-                      value={refCode}
-                      onChange={(e) => setRefCode(e.target.value.toUpperCase())}
+                    type="text"
+                    value={refCode}
+                    onChange={(e) => setRefCode(sanitizeReferenceCode(e.target.value, 10))}
                       maxLength={10}
                       className="w-full pl-9 pr-3 py-2 border-2 border-slate-200 rounded-lg focus:outline-none focus:border-slate-900 font-mono font-bold text-slate-900 text-[12px] uppercase"
                     />
@@ -684,9 +752,10 @@ export default function PaybillView({
                       Amount (KES)
                     </label>
                     <input
-                      type="number"
-                      value={amount}
-                      onChange={(e) => setAmount(e.target.value)}
+                    type="number"
+                    value={amount}
+                    onChange={(e) => setAmount(sanitizeDecimalInput(e.target.value))}
+                    inputMode="decimal"
                       className="w-full px-3 py-2 border-2 border-slate-200 rounded-lg focus:outline-none focus:border-slate-900 font-bold text-emerald-600 text-[13px]"
                     />
                   </div>
@@ -747,9 +816,9 @@ export default function PaybillView({
                       onChange={(e) => setCallbackBaseUrl(e.target.value)}
                       className="w-full px-2.5 py-2 border border-slate-300 rounded bg-white text-[11px] font-mono text-slate-800"
                     />
-                    {!callbackBaseUrl.startsWith('https://') && (
+                    {callbackUrlError && (
                       <p className="text-[9px] text-amber-700 mt-1 font-sans">
-                        Live Daraja callbacks require a public HTTPS URL. Use your deployed domain or an HTTPS tunnel during testing.
+                        {callbackUrlError} Use your deployed domain or an HTTPS tunnel during testing.
                       </p>
                     )}
                   </div>
@@ -822,7 +891,9 @@ export default function PaybillView({
                       <input
                         type="text"
                         value={regShortcode}
-                        onChange={(e) => setRegShortcode(e.target.value)}
+                        onChange={(e) => setRegShortcode(sanitizeIntegerInput(e.target.value, 10))}
+                        inputMode="numeric"
+                        pattern="[0-9]+"
                         className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-[11px] font-mono font-bold"
                       />
                     </div>
@@ -854,7 +925,7 @@ export default function PaybillView({
 
                   <button
                     type="submit"
-                    disabled={isRegistering || !darajaConfig?.credentialsConfigured}
+                    disabled={isRegistering || !canRunSandboxCallbackTest}
                     className="w-full py-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-black text-[10px] uppercase tracking-wider rounded border border-slate-950 flex items-center justify-center space-x-1.5 transition-all shadow-sm"
                   >
                     {isRegistering ? (
@@ -944,9 +1015,11 @@ export default function PaybillView({
                       Phone (MSISDN)
                     </label>
                     <input
-                      type="text"
+                      type="tel"
                       value={simPhone}
-                      onChange={(e) => setSimPhone(e.target.value)}
+                      onChange={(e) => setSimPhone(sanitizePhoneNumber(e.target.value))}
+                      inputMode="tel"
+                      pattern="[+]?[0-9]{9,15}"
                       className="w-full px-3 py-2 border-2 border-slate-200 rounded-lg focus:outline-none focus:border-slate-900 font-mono"
                     />
                   </div>
@@ -958,7 +1031,8 @@ export default function PaybillView({
                     <input
                       type="number"
                       value={simAmount}
-                      onChange={(e) => setSimAmount(e.target.value)}
+                      onChange={(e) => setSimAmount(sanitizeDecimalInput(e.target.value))}
+                      inputMode="decimal"
                       className="w-full px-3 py-2 border-2 border-slate-200 rounded-lg focus:outline-none focus:border-slate-900 font-bold text-emerald-600"
                     />
                   </div>
@@ -979,7 +1053,7 @@ export default function PaybillView({
                 {/* SIMULATE BUTTON */}
                 <button
                   type="submit"
-                  disabled={isSimulating || !darajaConfig?.credentialsConfigured}
+                  disabled={isSimulating || !canRunSandboxCallbackTest}
                   className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-black text-xs uppercase tracking-wider rounded-lg border border-emerald-700 flex items-center justify-center space-x-2 transition-all shadow-md"
                 >
                   {isSimulating ? (
@@ -1051,7 +1125,7 @@ export default function PaybillView({
                           className="w-full px-2 py-1.5 border border-amber-200 bg-white rounded text-[11px] font-bold text-slate-700"
                         >
                           <option value="">Select member</option>
-                          {members.map(member => (
+                          {eligiblePaymentMembers.map(member => (
                             <option key={member.id} value={member.id}>
                               {member.name} ({member.vehicleAssigned || member.phoneNumber})
                             </option>
