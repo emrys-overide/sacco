@@ -7,8 +7,13 @@
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
+    "db:up": "node scripts/database.mjs up",
+    "db:migrate": "node scripts/database.mjs migrate",
+    "db:status": "node scripts/database.mjs status",
+    "db:down": "node scripts/database.mjs down",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts"
   },
   "dependencies": {
     "@google-cloud/firestore": "^8.6.0",

@@ -30,7 +30,7 @@ import {
 
 interface MembersViewProps {
   members: Member[];
-  onAddMember: (newMember: Omit<Member, 'id' | 'dateRegistered' | 'sharesAmount' | 'savingsAmount'>) => void;
+  onAddMember: (newMember: Omit<Member, 'id' | 'dateRegistered' | 'sharesAmount' | 'savingsAmount'>) => Promise<void>;
   currentUserRole: UserRole;
   transactions: Transaction[];
 }
@@ -84,21 +84,26 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
   const totalFleetTill = memberTransactions.filter(t => t.tillNumber === 'VehicleTill' && t.type === 'Credit').reduce((acc, t) => acc + t.amount, 0);
   const totalUtilityTill = memberTransactions.filter(t => t.tillNumber === 'UtilityTill').reduce((acc, t) => acc + t.amount, 0);
 
-  const handleCreate = (e: React.FormEvent) => {
+  const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim() || !idNumber.trim() || !phoneNumber.trim()) {
       setError('Please fill in all required fields.');
       return;
     }
-    onAddMember({
-      name,
-      idNumber,
-      phoneNumber,
-      status: 'Active', // Automatically registered as Active for administrative ease in prototype
-      vehicleAssigned: assignedVehicle.trim() || undefined,
-      initialLoanAmount: Number(openingLoanBalance) || 0,
-      loanBalance: Number(openingLoanBalance) || 0
-    });
+    try {
+      await onAddMember({
+        name,
+        idNumber,
+        phoneNumber,
+        status: 'Active',
+        vehicleAssigned: assignedVehicle.trim() || undefined,
+        initialLoanAmount: Number(openingLoanBalance) || 0,
+        loanBalance: Number(openingLoanBalance) || 0
+      });
+    } catch (error: any) {
+      setError(error?.message || 'Member registration failed. Check the server connection and retry.');
+      return;
+    }
     // Reset Form
     setName('');
     setIdNumber('');

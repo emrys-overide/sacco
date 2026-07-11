@@ -3,8 +3,8 @@ import { signOut } from 'firebase/auth';
 import type { User, Member, Vehicle, Transaction, UserRole } from './types';
 import { Menu, ShieldAlert, Search, X } from 'lucide-react';
 import { canRole, STORAGE_KEYS } from './lib/auth';
-import { ApiError, fetchSaccoJson, postSaccoJson } from './lib/api';
-import { firebaseAuth } from './lib/firebase';
+import { fetchSaccoJson, postSaccoJson } from './lib/api';
+import { firebaseAuth, onIdTokenChanged } from './lib/firebase';
 
 // Subcomponents
 import LoginModal from './components/LoginModal';
@@ -22,13 +22,13 @@ import PaybillView from './components/PaybillView';
 const MEMBER_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary', 'Treasurer'];
 const VEHICLE_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary'];
 const TRANSACTION_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Treasurer', 'Accountant'];
-const CLEAN_START_VERSION = 'clean-start-v1';
+const CLEAN_START_VERSION = 'secure-session-v2';
 
 function prepareCleanStartStorage() {
   if (localStorage.getItem(STORAGE_KEYS.installVersion) === CLEAN_START_VERSION) return;
   [
-    STORAGE_KEYS.currentUser,
-    STORAGE_KEYS.authToken,
+    'sacco_current_user',
+    'sacco_auth_token',
     STORAGE_KEYS.legacyMembers,
     STORAGE_KEYS.legacyVehicles,
     STORAGE_KEYS.legacyTransactions,
@@ -40,13 +40,9 @@ function prepareCleanStartStorage() {
 export default function App() {
   prepareCleanStartStorage();
   // Authentication State
-  const [currentUser, setCurrentUser] = useState<User | null>(() => {
-    const stored = localStorage.getItem(STORAGE_KEYS.currentUser);
-    return stored ? JSON.parse(stored) : null;
-  });
-  const [authToken, setAuthToken] = useState<string>(() => {
-    return localStorage.getItem(STORAGE_KEYS.authToken) || '';
-  });
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [authToken, setAuthToken] = useState('');
+  const [isAuthInitializing, setIsAuthInitializing] = useState(Boolean(firebaseAuth));
 
   // Security Alert State
   const [securityAlert, setSecurityAlert] = useState<{ title: string; message: string } | null>(null);
@@ -81,6 +77,42 @@ export default function App() {
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [refreshTrigger, setRefreshTrigger] = useState<number>(0);
 
+  useEffect(() => {
+    if (!firebaseAuth) {
+      setIsAuthInitializing(false);
+      return;
+    }
+
+    return onIdTokenChanged(firebaseAuth, async firebaseUser => {
+      if (!firebaseUser) {
+        setCurrentUser(null);
+        setAuthToken('');
+        setIsAuthInitializing(false);
+        return;
+      }
+
+      try {
+        const token = await firebaseUser.getIdToken();
+        const response = await fetch('/api/auth/session', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || 'Could not restore the SACCO session.');
+        }
+        setCurrentUser(data.user);
+        setAuthToken(token);
+      } catch (error: any) {
+        console.error('Could not restore authenticated session:', error);
+        setCurrentUser(null);
+        setAuthToken('');
+      } finally {
+        setIsAuthInitializing(false);
+      }
+    });
+  }, []);
+
   // Sync state from server on component mount or profile switch
   useEffect(() => {
     if (!currentUser || !authToken) {
@@ -93,9 +125,9 @@ export default function App() {
       try {
         setIsLoading(true);
         const [mData, vData, tData] = await Promise.all([
-          fetchSaccoJson<Member[]>('/api/members', currentUser, {}, authToken),
-          fetchSaccoJson<Vehicle[]>('/api/vehicles', currentUser, {}, authToken),
-          fetchSaccoJson<Transaction[]>('/api/transactions', currentUser, {}, authToken)
+          fetchSaccoJson<Member[]>('/api/members', {}, authToken),
+          fetchSaccoJson<Vehicle[]>('/api/vehicles', {}, authToken),
+          fetchSaccoJson<Transaction[]>('/api/transactions', {}, authToken)
         ]);
 
         if (active) {
@@ -104,7 +136,13 @@ export default function App() {
           setTransactions(tData);
         }
       } catch (error) {
-        console.error("Critical error syncing Sacco registers with Firestore:", error);
+        console.error('Critical error syncing SACCO registers:', error);
+        if (active) {
+          setSecurityAlert({
+            title: 'Data Synchronization Failed',
+            message: error instanceof Error ? error.message : 'The server could not load the SACCO registers. Retry after checking the database connection.'
+          });
+        }
       } finally {
         if (active) setIsLoading(false);
       }
@@ -122,8 +160,6 @@ export default function App() {
   const handleLogin = (user: User, token: string) => {
     setCurrentUser(user);
     setAuthToken(token);
-    localStorage.setItem(STORAGE_KEYS.currentUser, JSON.stringify(user));
-    localStorage.setItem(STORAGE_KEYS.authToken, token);
   };
 
   const handleLogout = () => {
@@ -132,8 +168,6 @@ export default function App() {
     }
     setCurrentUser(null);
     setAuthToken('');
-    localStorage.removeItem(STORAGE_KEYS.currentUser);
-    localStorage.removeItem(STORAGE_KEYS.authToken);
   };
 
   const handleApproveBlueprint = () => {
@@ -173,72 +207,43 @@ export default function App() {
     });
   };
 
-  // State Mutators connected directly to the Backend Express API and Firestore Database
-  const handleAddMember = (newMemberData: Omit<Member, 'id' | 'dateRegistered' | 'sharesAmount' | 'savingsAmount'>) => {
+  // State mutators connected to the authenticated backend API.
+  const handleAddMember = async (newMemberData: Omit<Member, 'id' | 'dateRegistered' | 'sharesAmount' | 'savingsAmount'>) => {
     if (!currentUser || !canRole(currentUser, MEMBER_WRITE_ROLES)) {
       setSecurityAlert({
         title: "Unauthorized Action Blocked",
         message: `Your active profile [${currentUser?.role}] is read-only and restricted from registering new members into the Sacco registry.`
       });
-      return;
+      throw new Error('Your profile cannot register SACCO members.');
     }
-    
-    postSaccoJson<Member, typeof newMemberData>('/api/members', currentUser, newMemberData, authToken)
-    .then(newMember => {
+
+    try {
+      const newMember = await postSaccoJson<Member, typeof newMemberData>('/api/members', newMemberData, authToken);
       setMembers(prev => [newMember, ...prev]);
-    })
-    .catch(err => {
+    } catch (err) {
       console.error("Error creating Sacco member:", err);
-      if (err instanceof ApiError && err.status < 500) {
-        setSecurityAlert({
-          title: "Member Registration Blocked",
-          message: err.message
-        });
-        return;
-      }
-      // Fallback local operation
-      const fallbackMember: Member = {
-        ...newMemberData,
-        id: `m-${Date.now()}`,
-        dateRegistered: new Date().toISOString().slice(0, 10),
-        sharesAmount: 0,
-        savingsAmount: 0,
-        initialLoanAmount: Number(newMemberData.initialLoanAmount ?? newMemberData.loanBalance) || 0,
-        loanBalance: Number(newMemberData.loanBalance) || 0
-      };
-      setMembers(prev => [fallbackMember, ...prev]);
-    });
+      throw err;
+    }
   };
 
-  const handleAddVehicle = (newVehicleData: Omit<Vehicle, 'id'>) => {
+  const handleAddVehicle = async (newVehicleData: Omit<Vehicle, 'id'>) => {
     if (!currentUser || !canRole(currentUser, VEHICLE_WRITE_ROLES)) {
       setSecurityAlert({
         title: "Unauthorized Action Blocked",
         message: `Your active profile [${currentUser?.role}] does not possess Sacco Secretary or Chairman privileges. Vehicle registration blocked.`
       });
-      return;
+      throw new Error('Your profile cannot register SACCO vehicles.');
     }
 
-    postSaccoJson<Vehicle, typeof newVehicleData>('/api/vehicles', currentUser, newVehicleData, authToken)
-    .then(newVehicle => {
+    try {
+      const newVehicle = await postSaccoJson<Vehicle, typeof newVehicleData>('/api/vehicles', newVehicleData, authToken);
       setVehicles(prev => [newVehicle, ...prev]);
-      fetchSaccoJson<Member[]>('/api/members', currentUser, {}, authToken).then(data => setMembers(data));
-    })
-    .catch(err => {
+      const data = await fetchSaccoJson<Member[]>('/api/members', {}, authToken);
+      setMembers(data);
+    } catch (err) {
       console.error("Error registering vehicle:", err);
-      if (err instanceof ApiError && err.status < 500) {
-        setSecurityAlert({
-          title: "Vehicle Registration Blocked",
-          message: err.message
-        });
-        return;
-      }
-      const fallbackVehicle: Vehicle = {
-        ...newVehicleData,
-        id: `v-${Date.now()}`
-      };
-      setVehicles(prev => [fallbackVehicle, ...prev]);
-    });
+      throw err;
+    }
   };
 
   const handleAddTransaction = async (newTxData: Omit<Transaction, 'id' | 'timestamp' | 'recorderName'>) => {
@@ -257,26 +262,18 @@ export default function App() {
     };
 
     try {
-      const newTx = await postSaccoJson<Transaction, typeof payload>('/api/transactions', currentUser, payload, authToken);
+      const newTx = await postSaccoJson<Transaction, typeof payload>('/api/transactions', payload, authToken);
       setTransactions(prev => [newTx, ...prev]);
-      const data = await fetchSaccoJson<Member[]>('/api/members', currentUser, {}, authToken);
+      const data = await fetchSaccoJson<Member[]>('/api/members', {}, authToken);
       setMembers(data);
       return newTx;
     } catch (err) {
       console.error("Error posting ledger entry:", err);
-      if (err instanceof ApiError && err.status < 500) {
-        setSecurityAlert({
-          title: "Ledger Entry Blocked",
-          message: err.message
-        });
-        throw err;
-      }
-      const fallbackTx: Transaction = {
-        ...payload,
-        id: `t-${Date.now()}`
-      };
-      setTransactions(prev => [fallbackTx, ...prev]);
-      return fallbackTx;
+      setSecurityAlert({
+        title: 'Ledger Entry Not Saved',
+        message: err instanceof Error ? err.message : 'The server rejected the ledger entry. No local entry was created.'
+      });
+      throw err;
     }
   };
 
@@ -284,14 +281,17 @@ export default function App() {
     if (!currentUser || !canRole(currentUser, TRANSACTION_WRITE_ROLES)) {
       throw new Error('Your profile cannot edit ledger transactions.');
     }
-    const updated = await fetchSaccoJson<Transaction>(`/api/transactions/${transactionId}`, currentUser, {
+    const updated = await fetchSaccoJson<Transaction>(`/api/transactions/${transactionId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...changes, recorderName: currentUser.name })
     }, authToken);
-    setTransactions(prev => prev.map(tx => tx.id === updated.id ? updated : tx));
-    const data = await fetchSaccoJson<Member[]>('/api/members', currentUser, {}, authToken);
-    setMembers(data);
+    const [transactionData, memberData] = await Promise.all([
+      fetchSaccoJson<Transaction[]>('/api/transactions', {}, authToken),
+      fetchSaccoJson<Member[]>('/api/members', {}, authToken)
+    ]);
+    setTransactions(transactionData);
+    setMembers(memberData);
     return updated;
   };
 
@@ -300,15 +300,19 @@ export default function App() {
       throw new Error('Your profile cannot reverse ledger transactions.');
     }
 
-    const reversal = await fetchSaccoJson<Transaction>(`/api/transactions/${transactionId}/reverse`, currentUser, {
+    const reversal = await fetchSaccoJson<Transaction>(`/api/transactions/${transactionId}/reverse`, {
       method: 'POST'
     }, authToken);
     setTransactions(prev => [reversal, ...prev]);
-    const data = await fetchSaccoJson<Member[]>('/api/members', currentUser, {}, authToken);
+    const data = await fetchSaccoJson<Member[]>('/api/members', {}, authToken);
     setMembers(data);
   };
 
   // Auth Screen Guard
+  if (isAuthInitializing) {
+    return <div className="min-h-screen bg-slate-50 flex items-center justify-center text-sm text-slate-600">Restoring secure session...</div>;
+  }
+
   if (!currentUser || !authToken) {
     return <LoginModal onLoginSuccess={handleLogin} />;
   }
@@ -323,7 +327,7 @@ export default function App() {
           </div>
           <div className="text-center">
             <h3 className="text-xs font-bold text-slate-800 uppercase tracking-widest font-mono">Syncing Sacco OS Ledger</h3>
-            <p className="text-[10px] text-slate-400 font-mono mt-1">Establishing secure Firestore zero-trust connection...</p>
+            <p className="text-[10px] text-slate-400 font-mono mt-1">Loading records from persistent storage...</p>
           </div>
         </div>
       );
@@ -422,7 +426,7 @@ export default function App() {
           <PaybillView
             members={members}
             currentUserRole={currentUser?.role || 'Member'}
-            authToken={authToken}
+            fallbackAuthToken={authToken}
             onRefreshData={handleRefreshData}
           />
         );

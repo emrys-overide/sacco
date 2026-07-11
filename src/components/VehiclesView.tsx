@@ -6,7 +6,7 @@ import { Search, Bus, PlusCircle, Wrench, Ban, AlertTriangle, CheckCircle2 } fro
 interface VehiclesViewProps {
   vehicles: Vehicle[];
   members: Member[];
-  onAddVehicle: (newVehicle: Omit<Vehicle, 'id'>) => void;
+  onAddVehicle: (newVehicle: Omit<Vehicle, 'id'>) => Promise<void>;
   currentUserRole: UserRole;
 }
 
@@ -47,7 +47,7 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
     setError('');
   };
 
-  const handleCreate = (e: React.FormEvent) => {
+  const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!plateNumber.trim() || !ownerId || !driverName.trim() || !driverPhone.trim()) {
       setError('Please fill in all required fields.');
@@ -67,16 +67,21 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
       return;
     }
 
-    onAddVehicle({
-      plateNumber: plateNumber.toUpperCase().trim(),
-      ownerId,
-      ownerName: owner.name,
-      driverName: driverName.trim(),
-      driverPhone: driverPhone.trim(),
-      route,
-      status: 'Active',
-      capacity
-    });
+    try {
+      await onAddVehicle({
+        plateNumber: plateNumber.toUpperCase().trim(),
+        ownerId,
+        ownerName: owner.name,
+        driverName: driverName.trim(),
+        driverPhone: driverPhone.trim(),
+        route,
+        status: 'Active',
+        capacity
+      });
+    } catch (error: any) {
+      setError(error?.message || 'Vehicle registration failed. Check the server connection and retry.');
+      return;
+    }
 
     // Reset Form
     setPlateNumber('');

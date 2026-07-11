@@ -1,0 +1,493 @@
+import type { Pool, PoolClient, QueryResultRow } from 'pg';
+import type { Member, PaymentRecord, Transaction, TransactionCategory, Vehicle } from '../types';
+import { normalizeTransactionInput, type LedgerInput } from './ledgerPolicy';
+
+const CATEGORY_TO_ACCOUNT: Record<TransactionCategory, string> = {
+  'Daily Contribution': 'DailyContribution',
+  'Registration Fee': 'RegistrationFee',
+  'Management Fee': 'ManagementFee',
+  'Office Expenses': 'OfficeExpenses',
+  'Petty Cash': 'PettyCash',
+  Penalty: 'Penalty',
+  Utilities: 'Utilities',
+  Equipment: 'Equipment'
+};
+
+const ACCOUNT_TO_CATEGORY = Object.fromEntries(
+  Object.entries(CATEGORY_TO_ACCOUNT).map(([category, account]) => [account, category])
+) as Record<string, TransactionCategory>;
+
+const MATCH_TO_DB: Record<PaymentRecord['matchMethod'], string> = {
+  'Member ID': 'MemberID',
+  'Vehicle Plate': 'VehiclePlate',
+  'Phone Number': 'PhoneNumber',
+  'Manual Assignment': 'ManualAssignment',
+  None: 'None'
+};
+
+const DB_TO_MATCH = Object.fromEntries(
+  Object.entries(MATCH_TO_DB).map(([match, dbValue]) => [dbValue, match])
+) as Record<string, PaymentRecord['matchMethod']>;
+
+export class PersistenceError extends Error {
+  constructor(public status: number, message: string, public code: string) {
+    super(message);
+    this.name = 'PersistenceError';
+  }
+}
+
+function toNumber(value: unknown): number {
+  return Number(value || 0);
+}
+
+function transactionMetadata(transaction: Transaction) {
+  return {
+    memberName: transaction.memberName || '',
+    vehiclePlate: transaction.vehiclePlate || '',
+    recorderName: transaction.recorderName,
+    vehicleClass: transaction.vehicleClass,
+    operationAmount: transaction.operationAmount,
+    entranceFee: transaction.entranceFee,
+    loanRepay: transaction.loanRepay,
+    savingsContribution: transaction.savingsContribution,
+    sTicket: transaction.sTicket,
+    legalFee: transaction.legalFee,
+    expenseDeduction: transaction.expenseDeduction,
+    grossAmount: transaction.grossAmount,
+    reversedAt: transaction.reversedAt,
+    reversedBy: transaction.reversedBy
+  };
+}
+
+function mapMember(row: QueryResultRow): Member {
+  return {
+    id: String(row.id),
+    name: row.full_name,
+    idNumber: row.national_id || '',
+    phoneNumber: row.phone || '',
+    status: row.status,
+    dateRegistered: row.date_registered ? String(row.date_registered).slice(0, 10) : '',
+    vehicleAssigned: row.vehicle_assigned || undefined,
+    sharesAmount: toNumber(row.shares_amount),
+    savingsAmount: toNumber(row.savings_amount),
+    initialLoanAmount: toNumber(row.initial_loan_amount),
+    loanBalance: toNumber(row.derived_loan_balance)
+  };
+}
+
+function mapVehicle(row: QueryResultRow): Vehicle {
+  return {
+    id: String(row.id),
+    plateNumber: row.plate_number,
+    ownerId: row.member_id ? String(row.member_id) : '',
+    ownerName: row.owner_name || '',
+    driverName: row.driver_name || '',
+    driverPhone: row.driver_phone || '',
+    route: row.route_name || '',
+    status: row.status,
+    capacity: Number(row.capacity || 14) as Vehicle['capacity']
+  };
+}
+
+function mapTransaction(row: QueryResultRow): Transaction {
+  const metadata = row.metadata || {};
+  return {
+    id: String(row.id),
+    timestamp: new Date(row.entry_time).toISOString(),
+    memberId: row.member_id ? String(row.member_id) : '',
+    memberName: metadata.memberName || row.member_name || '',
+    vehiclePlate: metadata.vehiclePlate || row.plate_number || '',
+    description: row.description,
+    refCode: row.reference_code || '',
+    type: row.transaction_type,
+    category: ACCOUNT_TO_CATEGORY[row.account_type] || 'Daily Contribution',
+    amount: toNumber(row.amount),
+    recorderName: metadata.recorderName || row.recorder_name || 'SACCO Ledger OS',
+    tillNumber: row.till_type,
+    vehicleClass: metadata.vehicleClass,
+    operationAmount: metadata.operationAmount,
+    entranceFee: metadata.entranceFee,
+    loanRepay: metadata.loanRepay,
+    savingsContribution: metadata.savingsContribution,
+    sTicket: metadata.sTicket,
+    legalFee: metadata.legalFee,
+    expenseDeduction: metadata.expenseDeduction,
+    grossAmount: metadata.grossAmount,
+    reversalOf: row.reversal_of ? String(row.reversal_of) : undefined,
+    reversedAt: metadata.reversedAt,
+    reversedBy: metadata.reversedBy
+  };
+}
+
+function mapPayment(row: QueryResultRow): PaymentRecord {
+  const metadata = row.metadata || {};
+  return {
+    id: String(row.id),
+    timestamp: new Date(row.transaction_time).toISOString(),
+    source: row.source === 'DarajaWebhook' ? 'Webhook' : 'Manual',
+    status: row.status,
+    refCode: row.trans_id,
+    amount: toNumber(row.amount),
+    tillNumber: row.till_type,
+    category: ACCOUNT_TO_CATEGORY[metadata.accountType] || metadata.category || 'Daily Contribution',
+    accountReference: row.bill_ref_number || '',
+    payerName: row.payer_name || '',
+    payerPhone: row.msisdn || '',
+    memberId: row.matched_member_id ? String(row.matched_member_id) : undefined,
+    memberName: row.member_name || metadata.memberName,
+    vehiclePlate: row.plate_number || metadata.vehiclePlate,
+    matchMethod: DB_TO_MATCH[row.match_method] || 'None',
+    transactionId: row.ledger_entry_id ? String(row.ledger_entry_id) : undefined,
+    note: metadata.note,
+    rawPayload: row.raw_payload
+  };
+}
+
+function translatePgError(error: any): never {
+  if (error instanceof PersistenceError) throw error;
+  if (error?.code === '23505') {
+    throw new PersistenceError(409, 'That reference or unique identifier already exists.', 'DUPLICATE_RECORD');
+  }
+  if (error?.code === '23503') {
+    throw new PersistenceError(400, 'A linked member, vehicle, or ledger record does not exist.', 'INVALID_REFERENCE');
+  }
+  throw error;
+}
+
+export async function listPostgresUsers(pool: Pool) {
+  const result = await pool.query(
+    `SELECT id, full_name AS name, email, role, COALESCE(phone, '') AS phone
+     FROM users WHERE is_active = TRUE ORDER BY full_name`
+  );
+  return result.rows;
+}
+
+export async function listPostgresMembers(pool: Pool): Promise<Member[]> {
+  const result = await pool.query(
+    `SELECT m.*,
+       assigned_vehicle.plate_number AS vehicle_assigned,
+       COALESCE(fin.shares_amount, 0) AS shares_amount,
+       COALESCE(fin.savings_amount, 0) AS savings_amount,
+       GREATEST(0, m.initial_loan_amount - COALESCE(fin.loan_repaid, 0)) AS derived_loan_balance
+     FROM members m
+     LEFT JOIN LATERAL (
+       SELECT v.plate_number FROM vehicles v
+       WHERE v.member_id = m.id ORDER BY v.created_at LIMIT 1
+     ) assigned_vehicle ON TRUE
+     LEFT JOIN LATERAL (
+       SELECT
+         SUM(CASE WHEN le.account_type = 'DailyContribution' THEN
+           (CASE WHEN le.transaction_type = 'Credit' THEN 1 ELSE -1 END) *
+           (CASE WHEN le.metadata ? 'savingsContribution' THEN 0 ELSE le.amount * 0.30 END)
+           ELSE 0 END) AS shares_amount,
+         SUM(CASE WHEN le.account_type = 'DailyContribution' THEN
+           (CASE WHEN le.transaction_type = 'Credit' THEN 1 ELSE -1 END) *
+           (CASE WHEN le.metadata ? 'savingsContribution'
+             THEN COALESCE((le.metadata->>'savingsContribution')::numeric, 0)
+             ELSE le.amount * 0.70 END)
+           ELSE 0 END) AS savings_amount,
+         SUM((CASE WHEN le.transaction_type = 'Credit' THEN 1 ELSE -1 END) *
+           COALESCE((le.metadata->>'loanRepay')::numeric, 0)) AS loan_repaid
+       FROM ledger_entries le
+       WHERE le.member_id = m.id AND le.status IN ('Posted', 'Reversed')
+     ) fin ON TRUE
+     ORDER BY m.created_at DESC`
+  );
+  return result.rows.map(mapMember);
+}
+
+export async function createPostgresMember(pool: Pool, member: Omit<Member, 'id'>): Promise<Member> {
+  try {
+    const result = await pool.query(
+      `INSERT INTO members (full_name, national_id, phone, status, date_registered, initial_loan_amount, loan_balance)
+       VALUES ($1, $2, $3, $4, $5, $6, $6)
+       RETURNING *`,
+      [member.name, member.idNumber, member.phoneNumber, member.status, member.dateRegistered, member.initialLoanAmount || 0]
+    );
+    return mapMember({ ...result.rows[0], shares_amount: 0, savings_amount: 0, derived_loan_balance: member.initialLoanAmount || 0 });
+  } catch (error) {
+    return translatePgError(error);
+  }
+}
+
+export async function listPostgresVehicles(pool: Pool): Promise<Vehicle[]> {
+  const result = await pool.query(
+    `SELECT v.*, m.full_name AS owner_name, r.route_name
+     FROM vehicles v
+     LEFT JOIN members m ON m.id = v.member_id
+     LEFT JOIN routes r ON r.id = v.route_id
+     ORDER BY v.created_at DESC`
+  );
+  return result.rows.map(mapVehicle);
+}
+
+export async function createPostgresVehicle(pool: Pool, vehicle: Omit<Vehicle, 'id'>): Promise<Vehicle> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const routeResult = await client.query(
+      `INSERT INTO routes (route_name) VALUES ($1)
+       ON CONFLICT (route_name) DO UPDATE SET route_name = EXCLUDED.route_name
+       RETURNING id`,
+      [vehicle.route]
+    );
+    const result = await client.query(
+      `INSERT INTO vehicles (plate_number, member_id, route_id, capacity, driver_name, driver_phone, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING *`,
+      [vehicle.plateNumber, vehicle.ownerId, routeResult.rows[0].id, vehicle.capacity, vehicle.driverName, vehicle.driverPhone, vehicle.status]
+    );
+    await client.query('COMMIT');
+    return mapVehicle({ ...result.rows[0], owner_name: vehicle.ownerName, route_name: vehicle.route });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    return translatePgError(error);
+  } finally {
+    client.release();
+  }
+}
+
+const TRANSACTION_SELECT = `
+  SELECT le.*, m.full_name AS member_name, v.plate_number, u.full_name AS recorder_name
+  FROM ledger_entries le
+  LEFT JOIN members m ON m.id = le.member_id
+  LEFT JOIN vehicles v ON v.id = le.vehicle_id
+  LEFT JOIN users u ON u.id = le.recorded_by`;
+
+export async function listPostgresTransactions(pool: Pool): Promise<Transaction[]> {
+  const result = await pool.query(`${TRANSACTION_SELECT} ORDER BY le.entry_time DESC`);
+  return result.rows.map(mapTransaction);
+}
+
+async function insertTransaction(client: Pool | PoolClient, transaction: Transaction): Promise<Transaction> {
+  try {
+    const result = await client.query(
+      `INSERT INTO ledger_entries (
+         entry_date, entry_time, transaction_type, account_type, till_type, amount,
+         member_id, vehicle_id, reference_code, description, source, status,
+         reversal_of, metadata
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6,
+         $7, (SELECT id FROM vehicles WHERE upper(replace(plate_number, ' ', '')) = upper(replace($8, ' ', '')) LIMIT 1),
+         $9, $10, $11, 'Posted', $12, $13::jsonb
+       )
+       RETURNING *`,
+      [
+        transaction.timestamp.slice(0, 10), transaction.timestamp, transaction.type,
+        CATEGORY_TO_ACCOUNT[transaction.category], transaction.tillNumber, transaction.amount,
+        transaction.memberId || null, transaction.vehiclePlate || '', transaction.refCode,
+        transaction.description, transaction.refCode.startsWith('Q') ? 'DarajaWebhook' : 'Manual',
+        transaction.reversalOf || null, JSON.stringify(transactionMetadata(transaction))
+      ]
+    );
+    return mapTransaction(result.rows[0]);
+  } catch (error) {
+    return translatePgError(error);
+  }
+}
+
+export async function createPostgresTransaction(pool: Pool, transaction: Transaction): Promise<Transaction> {
+  return insertTransaction(pool, transaction);
+}
+
+export async function reversePostgresTransaction(pool: Pool, transactionId: string, recorderName: string): Promise<Transaction> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const originalResult = await client.query(`${TRANSACTION_SELECT} WHERE le.id = $1 FOR UPDATE OF le`, [transactionId]);
+    if (!originalResult.rowCount) {
+      throw new PersistenceError(404, 'Transaction to reverse was not found.', 'TRANSACTION_NOT_FOUND');
+    }
+    const original = mapTransaction(originalResult.rows[0]);
+    const existing = await client.query('SELECT 1 FROM ledger_entries WHERE reversal_of = $1 LIMIT 1', [transactionId]);
+    if (existing.rowCount) {
+      throw new PersistenceError(409, `Transaction ${original.refCode} has already been reversed.`, 'ALREADY_REVERSED');
+    }
+    const reversedAt = new Date().toISOString();
+    const reversal = await insertTransaction(client, {
+      ...original,
+      id: '',
+      timestamp: reversedAt,
+      type: original.type === 'Credit' ? 'Debit' : 'Credit',
+      description: `Reversal of ${original.refCode}: ${original.description}`,
+      refCode: `REV-${original.refCode}-${Date.now().toString().slice(-6)}`,
+      recorderName,
+      reversalOf: original.id,
+      reversedAt,
+      reversedBy: recorderName
+    });
+    await client.query(
+      `UPDATE ledger_entries
+       SET status = 'Reversed', is_reversed = TRUE,
+           metadata = metadata || $2::jsonb
+       WHERE id = $1`,
+      [transactionId, JSON.stringify({ reversedAt, reversedBy: recorderName })]
+    );
+    await client.query('COMMIT');
+    return reversal;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (error instanceof PersistenceError) throw error;
+    return translatePgError(error);
+  } finally {
+    client.release();
+  }
+}
+
+export async function correctPostgresTransaction(
+  pool: Pool,
+  transactionId: string,
+  changes: LedgerInput
+): Promise<Transaction> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const originalResult = await client.query(`${TRANSACTION_SELECT} WHERE le.id = $1 FOR UPDATE OF le`, [transactionId]);
+    if (!originalResult.rowCount) {
+      throw new PersistenceError(404, 'Transaction to correct was not found.', 'TRANSACTION_NOT_FOUND');
+    }
+    const original = mapTransaction(originalResult.rows[0]);
+    const existing = await client.query('SELECT 1 FROM ledger_entries WHERE reversal_of = $1 LIMIT 1', [transactionId]);
+    if (existing.rowCount) {
+      throw new PersistenceError(409, `Transaction ${original.refCode} has already been reversed or corrected.`, 'ALREADY_REVERSED');
+    }
+
+    const correctedAt = new Date().toISOString();
+    const recorderName = changes.recorderName || original.recorderName;
+    await insertTransaction(client, {
+      ...original,
+      id: '',
+      timestamp: correctedAt,
+      type: original.type === 'Credit' ? 'Debit' : 'Credit',
+      description: `Correction reversal of ${original.refCode}: ${original.description}`,
+      refCode: `REV-${original.refCode}-${Date.now().toString().slice(-6)}`,
+      recorderName,
+      reversalOf: original.id,
+      reversedAt: correctedAt,
+      reversedBy: recorderName
+    });
+    await client.query(
+      `UPDATE ledger_entries
+       SET status = 'Reversed', is_reversed = TRUE,
+           metadata = metadata || $2::jsonb
+       WHERE id = $1`,
+      [transactionId, JSON.stringify({ reversedAt: correctedAt, reversedBy: recorderName })]
+    );
+
+    const corrected = normalizeTransactionInput({
+      ...original,
+      ...changes,
+      id: undefined,
+      timestamp: correctedAt,
+      refCode: `COR-${original.refCode}-${Date.now().toString().slice(-6)}`,
+      recorderName,
+      reversalOf: undefined,
+      reversedAt: undefined,
+      reversedBy: undefined
+    });
+    const result = await insertTransaction(client, corrected);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    return translatePgError(error);
+  } finally {
+    client.release();
+  }
+}
+
+export async function listPostgresPayments(pool: Pool): Promise<PaymentRecord[]> {
+  const result = await pool.query(
+    `SELECT p.*, m.full_name AS member_name, v.plate_number
+     FROM mpesa_payments p
+     LEFT JOIN members m ON m.id = p.matched_member_id
+     LEFT JOIN vehicles v ON v.id = p.matched_vehicle_id
+     ORDER BY p.transaction_time DESC`
+  );
+  return result.rows.map(mapPayment);
+}
+
+export async function findPostgresPaymentByRef(pool: Pool, refCode: string): Promise<PaymentRecord | null> {
+  const result = await pool.query(
+    `SELECT p.*, m.full_name AS member_name, v.plate_number
+     FROM mpesa_payments p
+     LEFT JOIN members m ON m.id = p.matched_member_id
+     LEFT JOIN vehicles v ON v.id = p.matched_vehicle_id
+     WHERE p.trans_id = $1 LIMIT 1`,
+    [refCode]
+  );
+  return result.rowCount ? mapPayment(result.rows[0]) : null;
+}
+
+export async function savePostgresPayment(pool: Pool | PoolClient, payment: PaymentRecord): Promise<PaymentRecord> {
+  const metadata = {
+    category: payment.category,
+    accountType: CATEGORY_TO_ACCOUNT[payment.category],
+    memberName: payment.memberName,
+    vehiclePlate: payment.vehiclePlate,
+    note: payment.note
+  };
+  try {
+    const result = await pool.query(
+      `INSERT INTO mpesa_payments (
+         trans_id, bill_ref_number, business_short_code, msisdn, payer_name, till_type,
+         amount, transaction_time, status, match_method, matched_member_id,
+         matched_vehicle_id, ledger_entry_id, raw_payload, source, metadata
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+         (SELECT id FROM vehicles WHERE upper(replace(plate_number, ' ', '')) = upper(replace($12, ' ', '')) LIMIT 1),
+         $13, $14::jsonb, $15, $16::jsonb
+       )
+       ON CONFLICT (trans_id) DO UPDATE SET
+         status = EXCLUDED.status, match_method = EXCLUDED.match_method,
+         matched_member_id = EXCLUDED.matched_member_id,
+         matched_vehicle_id = EXCLUDED.matched_vehicle_id,
+         ledger_entry_id = EXCLUDED.ledger_entry_id,
+         metadata = EXCLUDED.metadata,
+         reconciled_at = CASE WHEN EXCLUDED.status = 'Reconciled' THEN now() ELSE mpesa_payments.reconciled_at END
+       RETURNING *`,
+      [
+        payment.refCode, payment.accountReference, payment.tillNumber === 'VehicleTill' ? '8249102' : '4810294',
+        payment.payerPhone, payment.payerName, payment.tillNumber, payment.amount, payment.timestamp,
+        payment.status, MATCH_TO_DB[payment.matchMethod], payment.memberId || null, payment.vehiclePlate || '',
+        payment.transactionId || null, JSON.stringify(payment.rawPayload || {}),
+        payment.source === 'Webhook' ? 'DarajaWebhook' : 'Manual', JSON.stringify(metadata)
+      ]
+    );
+    return mapPayment(result.rows[0]);
+  } catch (error) {
+    return translatePgError(error);
+  }
+}
+
+export async function reconcilePostgresPayment(
+  pool: Pool,
+  payment: PaymentRecord,
+  transaction: Transaction
+): Promise<PaymentRecord> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const existing = await client.query(
+      'SELECT status FROM mpesa_payments WHERE trans_id = $1 FOR UPDATE',
+      [payment.refCode]
+    );
+    if (existing.rows[0]?.status === 'Reconciled') {
+      throw new PersistenceError(409, `Payment ${payment.refCode} has already been reconciled.`, 'PAYMENT_ALREADY_RECONCILED');
+    }
+
+    const ledgerEntry = await insertTransaction(client, transaction);
+    const reconciled = await savePostgresPayment(client, {
+      ...payment,
+      status: 'Reconciled',
+      transactionId: ledgerEntry.id
+    });
+    await client.query('COMMIT');
+    return reconciled;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    return translatePgError(error);
+  } finally {
+    client.release();
+  }
+}

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import type { Member, PaymentRecord, Transaction } from '../types';
+import { getSaccoAccessToken } from '../lib/api';
 import { 
   Smartphone, 
   CheckCircle2, 
@@ -20,7 +21,7 @@ import {
 interface PaybillViewProps {
   members: Member[];
   currentUserRole: string;
-  authToken: string;
+  fallbackAuthToken: string;
   onRefreshData?: () => void;
 }
 
@@ -37,7 +38,7 @@ interface DarajaPublicConfig {
 export default function PaybillView({
   members,
   currentUserRole,
-  authToken,
+  fallbackAuthToken,
   onRefreshData
 }: PaybillViewProps) {
   // Logger Form State
@@ -83,10 +84,11 @@ export default function PaybillView({
   const [isDataLoading, setIsDataLoading] = useState(false);
 
   // Security headers helper
-  const getSaccoSecurityHeaders = () => {
+  const getSaccoSecurityHeaders = async () => {
+    const token = await getSaccoAccessToken(fallbackAuthToken);
     return {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${authToken}`
+      Authorization: `Bearer ${token}`
     };
   };
 
@@ -127,31 +129,32 @@ export default function PaybillView({
   const fetchHistory = async () => {
     setIsDataLoading(true);
     try {
-      const headers = getSaccoSecurityHeaders();
+      const headers = await getSaccoSecurityHeaders();
       const configRes = await fetch('/api/mpesa/config', { headers });
-      if (configRes.ok) {
-        const config = await configRes.json();
-        setDarajaConfig(config);
-        setRegMode(config.mode || 'sandbox');
-        if (config.shortcode) {
-          setRegShortcode(config.shortcode);
-          setSimShortcode(config.shortcode);
-        }
-        if (config.callbackBaseUrl) {
-          setCallbackBaseUrl(config.callbackBaseUrl);
-        }
+      const config = await configRes.json();
+      if (!configRes.ok) {
+        throw new Error(config.error || 'Could not load the M-Pesa configuration.');
+      }
+      setDarajaConfig(config);
+      setRegMode(config.mode || 'sandbox');
+      if (config.shortcode) {
+        setRegShortcode(config.shortcode);
+        setSimShortcode(config.shortcode);
+      }
+      if (config.callbackBaseUrl) {
+        setCallbackBaseUrl(config.callbackBaseUrl);
       }
       
       const txRes = await fetch('/api/transactions', { headers });
-      let txs: Transaction[] = [];
-      if (txRes.ok) {
-        txs = await txRes.json();
+      const txs = await txRes.json();
+      if (!txRes.ok) {
+        throw new Error(txs.error || 'Could not load M-Pesa ledger entries.');
       }
 
       const paymentsRes = await fetch('/api/payments', { headers });
-      let payments: PaymentRecord[] = [];
-      if (paymentsRes.ok) {
-        payments = await paymentsRes.json();
+      const payments = await paymentsRes.json();
+      if (!paymentsRes.ok) {
+        throw new Error(payments.error || 'Could not load payment reconciliation records.');
       }
 
       // Filter M-Pesa transactions (containing mpesa or matching TillType)
@@ -170,6 +173,7 @@ export default function PaybillView({
 
     } catch (err) {
       console.error('Error fetching paybill history:', err);
+      setErrorMsg(err instanceof Error ? err.message : 'Could not load paybill history. Retry after checking the server connection.');
     } finally {
       setIsDataLoading(false);
     }
@@ -177,7 +181,7 @@ export default function PaybillView({
 
   useEffect(() => {
     fetchHistory();
-  }, [currentUserRole, authToken]);
+  }, [currentUserRole, fallbackAuthToken]);
 
   // Handle direct logging submission
   const handleSubmitLog = async (e: React.FormEvent) => {
@@ -206,7 +210,7 @@ export default function PaybillView({
     try {
       const res = await fetch('/api/mpesa/log-payment', {
         method: 'POST',
-        headers: getSaccoSecurityHeaders(),
+        headers: await getSaccoSecurityHeaders(),
         body: JSON.stringify({
           memberId: selectedMemberId || null,
           amount: Number(amount),
@@ -266,7 +270,7 @@ export default function PaybillView({
     try {
       const res = await fetch('/api/mpesa/simulate-c2b', {
         method: 'POST',
-        headers: getSaccoSecurityHeaders(),
+        headers: await getSaccoSecurityHeaders(),
         body: JSON.stringify({
           shortcode: simShortcode.trim(),
           mode: regMode,
@@ -323,7 +327,7 @@ export default function PaybillView({
 
       const res = await fetch('/api/mpesa/register-url', {
         method: 'POST',
-        headers: getSaccoSecurityHeaders(),
+        headers: await getSaccoSecurityHeaders(),
         body: JSON.stringify({
           shortcode: regShortcode.trim(),
           mode: regMode,
@@ -362,7 +366,7 @@ export default function PaybillView({
     try {
       const res = await fetch(`/api/payments/${paymentId}/reconcile`, {
         method: 'POST',
-        headers: getSaccoSecurityHeaders(),
+        headers: await getSaccoSecurityHeaders(),
         body: JSON.stringify({ memberId })
       });
 

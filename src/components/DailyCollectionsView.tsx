@@ -88,6 +88,19 @@ export default function DailyCollectionsView({
   // Posting records entries in the ledger; only auditors are read-only.
   const isReadOnly = currentUserRole === 'Auditor';
 
+  const rowDiffersFromLedger = (row: CollectionRow): boolean => {
+    const original = transactions.find(tx => tx.id === row.transactionId);
+    if (!original) return false;
+    return original.vehiclePlate !== row.vehiclePlate ||
+      original.vehicleClass !== row.vehicleClass ||
+      Number(original.operationAmount || 0) !== Number(row.operation || 0) ||
+      Number(original.entranceFee || 0) !== Number(row.entranceFee || 0) ||
+      Number(original.loanRepay || 0) !== Number(row.loanRepay || 0) ||
+      Number(original.savingsContribution || 0) !== Number(row.savings || 0) ||
+      Number(original.sTicket || 0) !== Number(row.sTicket || 0) ||
+      Number(original.legalFee || 0) !== Number(row.legalFee || 0);
+  };
+
   // Load from local storage on mount
   useEffect(() => {
     const cached = localStorage.getItem(STORAGE_KEYS.savedSheets);
@@ -129,12 +142,13 @@ export default function DailyCollectionsView({
     rowsToSave: CollectionRow[] = rows,
     expensesToSave: ExpenseRow[] = expenses
   ) => {
+    let effectiveRows = rowsToSave;
     try {
-      await Promise.all(rowsToSave.filter(row => row.transactionId).map(row => {
+      const corrections = await Promise.all(rowsToSave.filter(row => row.transactionId && rowDiffersFromLedger(row)).map(async row => {
         const grossAmount = getRowTotal(row);
         const original = transactions.find(tx => tx.id === row.transactionId);
         const deduction = Number(original?.expenseDeduction || 0);
-        return onUpdateTransaction(row.transactionId!, {
+        const corrected = await onUpdateTransaction(row.transactionId!, {
           vehiclePlate: row.vehiclePlate,
           vehicleClass: row.vehicleClass,
           operationAmount: row.operation,
@@ -146,7 +160,13 @@ export default function DailyCollectionsView({
           grossAmount,
           amount: Math.max(0, grossAmount - deduction)
         });
+        return { originalId: row.transactionId!, correctedId: corrected.id };
       }));
+      const correctedIds = new Map(corrections.map(item => [item.originalId, item.correctedId]));
+      effectiveRows = rowsToSave.map(row => row.transactionId && correctedIds.has(row.transactionId)
+        ? { ...row, transactionId: correctedIds.get(row.transactionId) }
+        : row);
+      setRows(effectiveRows);
     } catch (error: any) {
       setErrorMessage(error?.message || 'Could not save ledger corrections.');
       return;
@@ -156,7 +176,7 @@ export default function DailyCollectionsView({
       id: sheetId,
       date: selectedDate,
       route: selectedRoute,
-      rows: rowsToSave,
+      rows: effectiveRows,
       expenses: expensesToSave,
       posted: postedStatus,
       postedAt: postedStatus ? new Date().toLocaleString() : undefined

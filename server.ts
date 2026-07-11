@@ -7,34 +7,39 @@ import { Firestore } from '@google-cloud/firestore';
 import { Pool } from 'pg';
 import { applicationDefault, cert, getApps, initializeApp as initializeFirebaseAdminApp } from 'firebase-admin/app';
 import { getAuth, type DecodedIdToken } from 'firebase-admin/auth';
-import { getSaccoUserKey } from './src/lib/auth';
+import {
+  PersistenceError,
+  correctPostgresTransaction,
+  createPostgresMember,
+  createPostgresTransaction,
+  createPostgresVehicle,
+  findPostgresPaymentByRef,
+  listPostgresMembers,
+  listPostgresPayments,
+  listPostgresTransactions,
+  listPostgresUsers,
+  listPostgresVehicles,
+  reconcilePostgresPayment,
+  reversePostgresTransaction,
+  savePostgresPayment
+} from './src/server/postgresStore';
+import {
+  LedgerPolicyError,
+  getDailyContributionBalanceDelta,
+  matchPaymentMember,
+  normalizeRefCode,
+  normalizeTransactionInput,
+  type LedgerInput
+} from './src/server/ledgerPolicy';
 import type {
   Member,
-  PaymentMatchMethod,
   PaymentRecord,
   PaymentSource,
   PaymentStatus,
-  TillType,
   Transaction,
   TransactionCategory,
-  TransactionType,
   UserRole
 } from './src/types';
-
-const TRANSACTION_TYPES: readonly TransactionType[] = ['Credit', 'Debit'];
-const TRANSACTION_CATEGORIES: readonly TransactionCategory[] = [
-  'Daily Contribution',
-  'Registration Fee',
-  'Management Fee',
-  'Office Expenses',
-  'Petty Cash',
-  'Penalty',
-  'Utilities',
-  'Equipment'
-];
-const TILL_TYPES: readonly TillType[] = ['VehicleTill', 'UtilityTill', 'None'];
-const SHARES_ALLOCATION_RATE = 0.3;
-const SAVINGS_ALLOCATION_RATE = 0.7;
 
 class HttpError extends Error {
   status: number;
@@ -47,12 +52,6 @@ class HttpError extends Error {
     this.code = code;
   }
 }
-
-type LedgerInput = Partial<Transaction> & {
-  description?: string;
-  refCode?: string;
-  amount?: number | string;
-};
 
 type IncomingPaymentInput = {
   source: PaymentSource;
@@ -88,7 +87,7 @@ type DarajaMode = 'sandbox' | 'production';
 const JWT_ISSUER = 'matatu-sacco-management-system';
 const JWT_AUDIENCE = 'sacco-api';
 const DEFAULT_JWT_EXPIRES_SECONDS = 60 * 60 * 8;
-const DEV_JWT_SECRET = 'dev-only-change-me-sacco-jwt-secret';
+const isProduction = process.env.NODE_ENV === 'production';
 const postgresPool = process.env.DATABASE_URL
   ? new Pool({
       connectionString: process.env.DATABASE_URL,
@@ -301,10 +300,10 @@ function decodeBase64Url(input: string): Buffer {
 
 function getJwtSecret(): string {
   const secret = process.env.JWT_SECRET;
-  if (!secret && process.env.NODE_ENV === 'production') {
-    throw new HttpError(500, 'JWT_SECRET must be configured in production.', 'JWT_SECRET_MISSING');
+  if (!secret) {
+    throw new HttpError(500, 'JWT_SECRET must be configured when development JWT authentication is enabled.', 'JWT_SECRET_MISSING');
   }
-  return secret || DEV_JWT_SECRET;
+  return secret;
 }
 
 function getJwtExpiresSeconds(): number {
@@ -446,7 +445,7 @@ const defaultMPesaConfig = {
   stkPushEnabled: process.env.DARAJA_STK_PUSH_ENABLED !== 'false'
 };
 
-// Firestore Setup - credentials and project identifiers are supplied by environment.
+// Optional Firestore development adapter.
 const firestoreOptions: ConstructorParameters<typeof Firestore>[0] = {};
 const firestoreProjectId = process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT;
 if (firestoreProjectId) {
@@ -457,7 +456,7 @@ if (process.env.FIRESTORE_DATABASE_ID) {
 }
 const db = new Firestore(firestoreOptions);
 
-// Sacco Memory-Backed Ledger Storage (Fallback engine for development and sandbox stability)
+// Disposable in-memory store, available only through an explicit development flag.
 const localStore = {
   users: [...initialUsers],
   members: [...initialMembers],
@@ -467,111 +466,39 @@ const localStore = {
   mpesaConfig: { ...defaultMPesaConfig }
 };
 
-// State flag indicating if we are using Firestore or Local Fallback
+// Firestore is used only when its development credentials are configured.
 let useFirestore = Boolean(
   process.env.GOOGLE_APPLICATION_CREDENTIALS ||
   process.env.GOOGLE_CLOUD_PROJECT ||
   process.env.GCLOUD_PROJECT
 );
+const allowInMemoryStore = !isProduction && process.env.ALLOW_IN_MEMORY_DB === 'true';
 
-// Helper to safely execute any Firestore database operation with automatic, zero-downtime local ledger fallback
+// Firestore errors fail closed; the in-memory adapter is selected only at startup.
 async function safeDbOperation<T>(
   operation: (firestoreDb: Firestore) => Promise<T>,
   fallback: () => T | Promise<T>,
   collectionName: string
 ): Promise<T> {
   if (!useFirestore) {
-    return Promise.resolve(fallback());
+    if (allowInMemoryStore) {
+      return Promise.resolve(fallback());
+    }
+    throw new HttpError(
+      503,
+      'No persistent database is configured. Set DATABASE_URL or Firestore credentials. Use ALLOW_IN_MEMORY_DB=true only for disposable local development.',
+      'DATABASE_NOT_CONFIGURED'
+    );
   }
   try {
     return await operation(db);
   } catch (error: any) {
-    if (error instanceof HttpError) {
+    if (error instanceof HttpError || error instanceof LedgerPolicyError) {
       throw error;
     }
-    console.warn(`[Sacco Ledger OS] Firestore connection/permission unavailable for [${collectionName}]. Operating in high-security Local Ledger Fallback Mode.`, error.message || error);
-    useFirestore = false;
-    return Promise.resolve(fallback());
+    console.error(`[Sacco Ledger OS] Firestore operation failed for [${collectionName}].`, error.message || error);
+    throw new HttpError(503, `Persistent storage is unavailable for ${collectionName}. Retry after restoring the database connection.`, 'DATABASE_UNAVAILABLE');
   }
-}
-
-function normalizeRefCode(refCode: unknown): string {
-  return String(refCode || '').trim().toUpperCase();
-}
-
-function normalizeTransactionInput(input: LedgerInput): Transaction {
-  const description = String(input.description || '').trim();
-  const refCode = normalizeRefCode(input.refCode);
-  const amount = Number(input.amount);
-  const type = (input.type || 'Credit') as TransactionType;
-  const category = (input.category || 'Daily Contribution') as TransactionCategory;
-  const tillNumber = (input.tillNumber || 'UtilityTill') as TillType;
-
-  if (!description) {
-    throw new HttpError(400, 'Transaction description is required.', 'MISSING_DESCRIPTION');
-  }
-  if (!refCode) {
-    throw new HttpError(400, 'Transaction reference code is required.', 'MISSING_REF_CODE');
-  }
-  if (!Number.isFinite(amount) || amount <= 0) {
-    throw new HttpError(400, 'Transaction amount must be greater than zero.', 'INVALID_AMOUNT');
-  }
-  if (!TRANSACTION_TYPES.includes(type)) {
-    throw new HttpError(400, 'Transaction type must be Credit or Debit.', 'INVALID_TRANSACTION_TYPE');
-  }
-  if (!TRANSACTION_CATEGORIES.includes(category)) {
-    throw new HttpError(400, `Unsupported transaction category: ${category}`, 'INVALID_TRANSACTION_CATEGORY');
-  }
-  if (!TILL_TYPES.includes(tillNumber)) {
-    throw new HttpError(400, `Unsupported till number: ${tillNumber}`, 'INVALID_TILL');
-  }
-
-  return {
-    id: input.id || 't-' + Date.now(),
-    timestamp: input.timestamp || new Date().toISOString(),
-    memberId: input.memberId || '',
-    memberName: input.memberName || '',
-    vehiclePlate: input.vehiclePlate || '',
-    description,
-    refCode,
-    type,
-    category,
-    amount,
-    recorderName: input.recorderName || 'Sacco Ledger OS',
-    tillNumber,
-    vehicleClass: input.vehicleClass,
-    operationAmount: Number(input.operationAmount || 0),
-    entranceFee: Number(input.entranceFee || 0),
-    loanRepay: Number(input.loanRepay || 0),
-    savingsContribution: Number(input.savingsContribution || 0),
-    sTicket: Number(input.sTicket || 0),
-    legalFee: Number(input.legalFee || 0),
-    expenseDeduction: Number(input.expenseDeduction || 0),
-    grossAmount: Number(input.grossAmount || amount),
-    reversalOf: input.reversalOf,
-    reversedAt: input.reversedAt,
-    reversedBy: input.reversedBy
-  };
-}
-
-function getDailyContributionBalanceDelta(tx: Transaction): { shares: number; savings: number; loan: number } {
-  if (!tx.memberId || tx.category !== 'Daily Contribution') {
-    return { shares: 0, savings: 0, loan: 0 };
-  }
-
-  const direction = tx.type === 'Credit' ? 1 : -1;
-  if (tx.savingsContribution !== undefined) {
-    return {
-      shares: 0,
-      savings: direction * Number(tx.savingsContribution || 0),
-      loan: -direction * Number(tx.loanRepay || 0)
-    };
-  }
-  return {
-    shares: direction * Math.round(tx.amount * SHARES_ALLOCATION_RATE),
-    savings: direction * Math.round(tx.amount * SAVINGS_ALLOCATION_RATE),
-    loan: -direction * Number(tx.loanRepay || 0)
-  };
 }
 
 function applyLocalMemberBalance(tx: Transaction) {
@@ -614,6 +541,10 @@ async function applyFirestoreMemberBalance(firestoreDb: Firestore, tx: Transacti
 async function createLedgerTransaction(input: LedgerInput): Promise<Transaction> {
   const tx = normalizeTransactionInput(input);
 
+  if (postgresPool) {
+    return createPostgresTransaction(postgresPool, tx);
+  }
+
   await safeDbOperation(
     async (firestoreDb) => {
       const duplicateSnap = await firestoreDb
@@ -645,6 +576,9 @@ async function createLedgerTransaction(input: LedgerInput): Promise<Transaction>
 }
 
 async function updateLedgerTransaction(transactionId: string, input: LedgerInput): Promise<Transaction> {
+  if (postgresPool) {
+    return correctPostgresTransaction(postgresPool, transactionId, input);
+  }
   const original = await safeDbOperation<Transaction | null>(
     async firestoreDb => {
       const snap = await firestoreDb.collection('transactions').doc(transactionId).get();
@@ -685,6 +619,9 @@ async function updateLedgerTransaction(transactionId: string, input: LedgerInput
 }
 
 async function reverseLedgerTransaction(transactionId: string, recorderName: string): Promise<Transaction> {
+  if (postgresPool) {
+    return reversePostgresTransaction(postgresPool, transactionId, recorderName);
+  }
   const original = await safeDbOperation<Transaction | null>(
     async (firestoreDb) => {
       const snap = await firestoreDb.collection('transactions').doc(transactionId).get();
@@ -733,7 +670,7 @@ async function reverseLedgerTransaction(transactionId: string, recorderName: str
 }
 
 function sendApiError(res: express.Response, error: any) {
-  if (error instanceof HttpError) {
+  if (error instanceof HttpError || error instanceof PersistenceError || error instanceof LedgerPolicyError) {
     return res.status(error.status).json({ error: error.message, code: error.code });
   }
   return res.status(500).json({ error: error.message || 'Unexpected server error.' });
@@ -755,43 +692,11 @@ function getTillFromShortcode(shortcode: unknown): { tillNumber: 'VehicleTill' |
   };
 }
 
-function getLast9Digits(value: unknown): string {
-  return String(value || '').replace(/\D/g, '').slice(-9);
-}
-
-function matchPaymentMember(
-  members: Member[],
-  accountReference: string,
-  payerPhone: string,
-  preferredMemberId?: string
-): { member: Member | null; matchMethod: PaymentMatchMethod } {
-  if (preferredMemberId) {
-    const member = members.find(m => m.id === preferredMemberId);
-    if (member) return { member, matchMethod: 'Manual Assignment' };
-  }
-
-  const normalizedRef = accountReference.trim().toUpperCase().replace(/\s+/g, '');
-  if (normalizedRef) {
-    const byId = members.find(m => m.id.trim().toUpperCase() === normalizedRef);
-    if (byId) return { member: byId, matchMethod: 'Member ID' };
-
-    const byPlate = members.find(m => {
-      const plate = (m.vehicleAssigned || '').trim().toUpperCase().replace(/\s+/g, '');
-      return plate && plate === normalizedRef;
-    });
-    if (byPlate) return { member: byPlate, matchMethod: 'Vehicle Plate' };
-  }
-
-  const payerLast9 = getLast9Digits(payerPhone);
-  if (payerLast9.length === 9) {
-    const byPhone = members.find(m => getLast9Digits(m.phoneNumber) === payerLast9);
-    if (byPhone) return { member: byPhone, matchMethod: 'Phone Number' };
-  }
-
-  return { member: null, matchMethod: 'None' };
-}
-
 async function listPaymentRecords(): Promise<PaymentRecord[]> {
+  if (postgresPool) {
+    return listPostgresPayments(postgresPool);
+  }
+
   const list = await safeDbOperation<PaymentRecord[]>(
     async (firestoreDb) => {
       const snap = await firestoreDb.collection('payments').get();
@@ -805,6 +710,10 @@ async function listPaymentRecords(): Promise<PaymentRecord[]> {
 }
 
 async function savePaymentRecord(record: PaymentRecord): Promise<PaymentRecord> {
+  if (postgresPool) {
+    return savePostgresPayment(postgresPool, record);
+  }
+
   await safeDbOperation(
     async (firestoreDb) => {
       await firestoreDb.collection('payments').doc(record.id).set(record);
@@ -824,6 +733,10 @@ async function savePaymentRecord(record: PaymentRecord): Promise<PaymentRecord> 
 }
 
 async function findPaymentByRef(refCode: string): Promise<PaymentRecord | null> {
+  if (postgresPool) {
+    return findPostgresPaymentByRef(postgresPool, refCode);
+  }
+
   return safeDbOperation<PaymentRecord | null>(
     async (firestoreDb) => {
       const snap = await firestoreDb.collection('payments').where('refCode', '==', refCode).limit(1).get();
@@ -835,6 +748,10 @@ async function findPaymentByRef(refCode: string): Promise<PaymentRecord | null> 
 }
 
 async function getAllMembers(): Promise<Member[]> {
+  if (postgresPool) {
+    return listPostgresMembers(postgresPool);
+  }
+
   return safeDbOperation<Member[]>(
     async (firestoreDb) => {
       const snap = await firestoreDb.collection('members').get();
@@ -852,24 +769,7 @@ async function processIncomingPayment(input: IncomingPaymentInput): Promise<Paym
     throw new HttpError(400, 'Payment reference code is required.', 'MISSING_PAYMENT_REF');
   }
   if (!Number.isFinite(amount) || amount <= 0) {
-    const tillConfig = getTillFromShortcode(input.shortcode);
-    const rejected = await savePaymentRecord({
-      id: `pay-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-      timestamp: new Date().toISOString(),
-      source: input.source,
-      status: 'Rejected',
-      refCode: refCode || `INVALID-${Date.now()}`,
-      amount: Number.isFinite(amount) ? amount : 0,
-      tillNumber: tillConfig.tillNumber,
-      category: input.category || tillConfig.category,
-      accountReference: input.accountReference || '',
-      payerName: input.payerName || 'Unknown Payer',
-      payerPhone: input.payerPhone || '',
-      matchMethod: 'None',
-      note: 'Invalid payment amount.',
-      rawPayload: input.rawPayload
-    });
-    return rejected;
+    throw new HttpError(400, 'Payment amount must be greater than zero.', 'INVALID_PAYMENT_AMOUNT');
   }
 
   const existing = await findPaymentByRef(refCode);
@@ -913,7 +813,7 @@ async function processIncomingPayment(input: IncomingPaymentInput): Promise<Paym
     return savePaymentRecord(payment);
   }
 
-  const transaction = await createLedgerTransaction({
+  const transactionInput = normalizeTransactionInput({
     id: `t-mpesa-${Date.now()}`,
     timestamp: payment.timestamp,
     memberId: member.id,
@@ -931,9 +831,15 @@ async function processIncomingPayment(input: IncomingPaymentInput): Promise<Paym
   payment = {
     ...payment,
     status: 'Reconciled',
-    transactionId: transaction.id,
     note: `Auto-reconciled by ${matchMethod}.`
   };
+
+  if (postgresPool) {
+    return reconcilePostgresPayment(postgresPool, payment, transactionInput);
+  }
+
+  const transaction = await createLedgerTransaction(transactionInput);
+  payment.transactionId = transaction.id;
   return savePaymentRecord(payment);
 }
 
@@ -953,7 +859,7 @@ async function reconcilePaymentRecord(paymentId: string, memberId: string, recor
     throw new HttpError(404, 'Selected member was not found.', 'MEMBER_NOT_FOUND');
   }
 
-  const transaction = await createLedgerTransaction({
+  const transactionInput = normalizeTransactionInput({
     id: `t-mpesa-${Date.now()}`,
     timestamp: new Date().toISOString(),
     memberId: member.id,
@@ -968,41 +874,22 @@ async function reconcilePaymentRecord(paymentId: string, memberId: string, recor
     tillNumber: payment.tillNumber
   });
 
-  return savePaymentRecord({
+  const reconciledPayment: PaymentRecord = {
     ...payment,
     status: 'Reconciled',
     memberId: member.id,
     memberName: member.name,
     vehiclePlate: member.vehicleAssigned || payment.vehiclePlate,
     matchMethod: 'Manual Assignment',
-    transactionId: transaction.id,
     note: `Manually reconciled by ${recorderName}.`
-  });
-}
+  };
 
-function authenticateLegacyHeaders(req: express.Request): AuthorizedUser {
-  const email = req.headers['x-sacco-user-email'] as string;
-  const role = req.headers['x-sacco-user-role'] as UserRole;
-  const key = req.headers['x-sacco-user-key'] as string;
-
-  if (!email || !role || !key) {
-    throw new HttpError(401, 'Sacco Security OS: Missing authentication credentials.', 'AUTH_MISSING');
+  if (postgresPool) {
+    return reconcilePostgresPayment(postgresPool, reconciledPayment, transactionInput);
   }
 
-  const user = localStore.users.find(u => u.email.toLowerCase() === email.toLowerCase());
-  if (!user) {
-    throw new HttpError(401, 'Sacco Security OS: User not found in authorized register.', 'AUTH_USER_NOT_FOUND');
-  }
-
-  if (user.role !== role) {
-    throw new HttpError(401, 'Sacco Security OS: Role validation mismatch.', 'AUTH_ROLE_MISMATCH');
-  }
-
-  if (key !== getSaccoUserKey(user.role as UserRole)) {
-    throw new HttpError(401, 'Sacco Security OS: Invalid role security credential key.', 'AUTH_BAD_KEY');
-  }
-
-  return user;
+  const transaction = await createLedgerTransaction(transactionInput);
+  return savePaymentRecord({ ...reconciledPayment, transactionId: transaction.id });
 }
 
 async function authenticateFirebaseBearer(req: express.Request): Promise<AuthorizedUser> {
@@ -1016,7 +903,16 @@ async function authenticateFirebaseBearer(req: express.Request): Promise<Authori
     throw new HttpError(503, 'Firebase Admin credentials are not configured on the server.', 'FIREBASE_ADMIN_NOT_CONFIGURED');
   }
 
-  const decodedToken = await adminAuth.verifyIdToken(authHeader.slice('Bearer '.length).trim());
+  let decodedToken: DecodedIdToken;
+  try {
+    decodedToken = await adminAuth.verifyIdToken(authHeader.slice('Bearer '.length).trim());
+  } catch (error: any) {
+    const code = String(error?.code || error?.errorInfo?.code || '');
+    if (code.startsWith('auth/')) {
+      throw new HttpError(401, 'Firebase ID token is invalid, expired, or revoked.', 'FIREBASE_TOKEN_INVALID');
+    }
+    throw error;
+  }
   const user = await findSaccoUserByFirebaseToken(decodedToken);
   (req as any).authContext = {
     provider: 'firebase',
@@ -1036,7 +932,7 @@ const authenticateSaccoUser = async (req: express.Request, res: express.Response
         await recordAuditLog(req, 'API_AUTHORIZED', req.path);
         return next();
       } catch (firebaseError: any) {
-        const allowDevJwt = process.env.ALLOW_DEV_JWT_AUTH === 'true' || process.env.NODE_ENV !== 'production';
+        const allowDevJwt = !isProduction && process.env.ALLOW_DEV_JWT_AUTH === 'true';
         if (!allowDevJwt) {
           throw firebaseError;
         }
@@ -1049,17 +945,6 @@ const authenticateSaccoUser = async (req: express.Request, res: express.Response
         await recordAuditLog(req, 'API_AUTHORIZED_DEV_JWT', req.path);
         return next();
       }
-    }
-
-    const allowLegacyHeaders = process.env.ALLOW_LEGACY_AUTH_HEADERS === 'true';
-    if (allowLegacyHeaders) {
-      (req as any).user = authenticateLegacyHeaders(req);
-      (req as any).authContext = {
-        provider: 'legacy-headers',
-        email: (req as any).user.email
-      };
-      await recordAuditLog(req, 'API_AUTHORIZED_LEGACY', req.path);
-      return next();
     }
 
     return res.status(401).json({ error: 'Firebase Bearer token authentication is required.' });
@@ -1087,10 +972,24 @@ const requireRoles = (allowedRoles: string[]) => {
   };
 };
 
-// Initialize/Seed Firestore collections with Mock Data if empty
+// Verify the selected persistence adapter before accepting requests.
 async function seedDatabaseIfEmpty() {
+  if (postgresPool) {
+    await postgresPool.query('SELECT 1');
+    console.log('PostgreSQL connection check complete.');
+    return;
+  }
+
+  if (isProduction) {
+    throw new Error('DATABASE_URL is required in production. Firestore and in-memory storage are development adapters only.');
+  }
+
   if (!useFirestore) {
-    console.log("No Google Cloud credentials detected. Skipping Firestore seeding and using Local Ledger Fallback Mode.");
+    if (allowInMemoryStore) {
+      console.warn('No persistent database configured. ALLOW_IN_MEMORY_DB is enabled; all development data will be lost when the server stops.');
+    } else {
+      console.warn('No persistent database configured. Functional API requests will fail closed.');
+    }
     return;
   }
 
@@ -1099,8 +998,7 @@ async function seedDatabaseIfEmpty() {
     await db.collection('system').doc('status').get();
     console.log("Firestore connection check complete. No sample data was seeded.");
   } catch (error: any) {
-    console.warn("[Sacco Ledger OS] Firestore connection/permission unavailable on startup. Automatically operating in high-security Local Ledger Fallback Mode.", error.message || error);
-    useFirestore = false;
+    throw new Error(`Firestore connection failed during startup: ${error.message || error}`);
   }
 }
 
@@ -1157,7 +1055,7 @@ async function startServer() {
         email = String(decoded.email || email).trim().toLowerCase();
         fullName = fullName || String(decoded.name || '').trim();
       } else {
-        const allowDevBootstrap = process.env.ALLOW_DEV_AUTH_FALLBACK === 'true' || process.env.NODE_ENV !== 'production';
+        const allowDevBootstrap = !isProduction && process.env.ALLOW_DEV_AUTH_FALLBACK === 'true';
         if (!allowDevBootstrap) {
           return res.status(401).json({ error: 'Firebase ID token is required to bootstrap the first admin.' });
         }
@@ -1192,14 +1090,14 @@ async function startServer() {
 
   app.post('/api/auth/login', (req, res) => {
     try {
-      const allowDevLogin = process.env.ALLOW_DEV_AUTH_FALLBACK === 'true' || process.env.NODE_ENV !== 'production';
+      const allowDevLogin = !isProduction && process.env.ALLOW_DEV_AUTH_FALLBACK === 'true';
       if (!allowDevLogin) {
         return res.status(404).json({ error: 'Password login is disabled. Use Firebase Auth.' });
       }
 
       const { email, password } = req.body || {};
       const user = localStore.users.find(item => item.email.toLowerCase() === String(email || '').toLowerCase());
-      if (!user || (password !== user.devPassword && password !== getSaccoUserKey(user.role as UserRole))) {
+      if (!user || !user.devPassword || password !== user.devPassword) {
         return res.status(401).json({ error: 'Invalid Sacco profile or password.' });
       }
 
@@ -1224,8 +1122,11 @@ async function startServer() {
   app.use('/api/system', authenticateSaccoUser);
 
   // API 2: Get Users
-  app.get('/api/users', async (req, res) => {
+  app.get('/api/users', requireRoles(['Chairman', 'Secretary', 'Auditor']), async (req, res) => {
     try {
+      if (postgresPool) {
+        return res.json(await listPostgresUsers(postgresPool));
+      }
       const list = await safeDbOperation(
         async (firestoreDb) => {
           const snap = await firestoreDb.collection('users').get();
@@ -1236,13 +1137,16 @@ async function startServer() {
       );
       res.json(list);
     } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      sendApiError(res, error);
     }
   });
 
   // API 3: Get Sacco Members
   app.get('/api/members', async (req, res) => {
     try {
+      if (postgresPool) {
+        return res.json(await listPostgresMembers(postgresPool));
+      }
       const list = await safeDbOperation(
         async (firestoreDb) => {
           const snap = await firestoreDb.collection('members').get();
@@ -1253,7 +1157,7 @@ async function startServer() {
       );
       res.json(list);
     } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      sendApiError(res, error);
     }
   });
 
@@ -1279,6 +1183,12 @@ async function startServer() {
         loanBalance: Math.max(0, Number(memberData.loanBalance) || 0)
       };
 
+      if (postgresPool) {
+        const created = await createPostgresMember(postgresPool, newMember);
+        await recordAuditLog(req, 'MEMBER_CREATED', 'members', created.id, undefined, created);
+        return res.status(201).json(created);
+      }
+
       await safeDbOperation(
         async (firestoreDb) => {
           await firestoreDb.collection('members').doc(memberId).set(newMember);
@@ -1294,15 +1204,19 @@ async function startServer() {
         'members'
       );
 
+      await recordAuditLog(req, 'MEMBER_CREATED', 'members', newMember.id, undefined, newMember);
       res.status(201).json(newMember);
     } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      sendApiError(res, error);
     }
   });
 
   // API 5: Get Fleet Vehicles
   app.get('/api/vehicles', async (req, res) => {
     try {
+      if (postgresPool) {
+        return res.json(await listPostgresVehicles(postgresPool));
+      }
       const list = await safeDbOperation(
         async (firestoreDb) => {
           const snap = await firestoreDb.collection('vehicles').get();
@@ -1313,7 +1227,7 @@ async function startServer() {
       );
       res.json(list);
     } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      sendApiError(res, error);
     }
   });
 
@@ -1334,8 +1248,14 @@ async function startServer() {
         driverPhone: vehicleData.driverPhone || '+254 700 111 222',
         route: '17 Stage & Cabbanas',
         status: vehicleData.status || 'Active',
-        capacity: [7, 14, 33, 50].includes(Number(vehicleData.capacity)) ? Number(vehicleData.capacity) : 14
+        capacity: ([7, 14, 33, 50].includes(Number(vehicleData.capacity)) ? Number(vehicleData.capacity) : 14) as 7 | 14 | 33 | 50
       };
+
+      if (postgresPool) {
+        const created = await createPostgresVehicle(postgresPool, newVehicle);
+        await recordAuditLog(req, 'VEHICLE_CREATED', 'vehicles', created.id, undefined, created);
+        return res.status(201).json(created);
+      }
 
       await safeDbOperation(
         async (firestoreDb) => {
@@ -1359,15 +1279,19 @@ async function startServer() {
         'vehicles'
       );
 
+      await recordAuditLog(req, 'VEHICLE_CREATED', 'vehicles', newVehicle.id, undefined, newVehicle);
       res.status(201).json(newVehicle);
     } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      sendApiError(res, error);
     }
   });
 
   // API 7: Get Ledger Transactions
   app.get('/api/transactions', async (req, res) => {
     try {
+      if (postgresPool) {
+        return res.json(await listPostgresTransactions(postgresPool));
+      }
       const list = await safeDbOperation(
         async (firestoreDb) => {
           const snap = await firestoreDb.collection('transactions').get();
@@ -1380,7 +1304,7 @@ async function startServer() {
       list.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
       res.json(list);
     } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      sendApiError(res, error);
     }
   });
 
@@ -1388,6 +1312,7 @@ async function startServer() {
   app.post('/api/transactions', requireRoles(['Chairman', 'Treasurer', 'Accountant']), async (req, res) => {
     try {
       const newTx = await createLedgerTransaction(req.body);
+      await recordAuditLog(req, 'LEDGER_ENTRY_POSTED', 'ledger_entries', newTx.id, undefined, newTx);
       res.status(201).json(newTx);
     } catch (error: any) {
       sendApiError(res, error);
@@ -1397,6 +1322,10 @@ async function startServer() {
   app.put('/api/transactions/:id', requireRoles(['Chairman', 'Treasurer', 'Accountant']), async (req, res) => {
     try {
       const updated = await updateLedgerTransaction(req.params.id, req.body);
+      await recordAuditLog(req, 'LEDGER_ENTRY_CORRECTED', 'ledger_entries', updated.id, undefined, {
+        correctedEntryId: updated.id,
+        originalEntryId: req.params.id
+      });
       res.json(updated);
     } catch (error: any) {
       sendApiError(res, error);
@@ -1408,6 +1337,7 @@ async function startServer() {
     try {
       const user = (req as any).user;
       const reversal = await reverseLedgerTransaction(req.params.id, user?.name || 'Sacco Ledger OS');
+      await recordAuditLog(req, 'LEDGER_ENTRY_REVERSED', 'ledger_entries', reversal.id, undefined, reversal);
       res.status(201).json(reversal);
     } catch (error: any) {
       sendApiError(res, error);
@@ -1436,6 +1366,25 @@ async function startServer() {
   // API 9: Sacco Dynamic Ledger Status (computed on server side)
   app.get('/api/system/status', async (req, res) => {
     try {
+      if (postgresPool) {
+        const [transactions, members, vehicles] = await Promise.all([
+          listPostgresTransactions(postgresPool),
+          listPostgresMembers(postgresPool),
+          listPostgresVehicles(postgresPool)
+        ]);
+        const totalCredits = transactions.filter(tx => tx.type === 'Credit').reduce((sum, tx) => sum + tx.amount, 0);
+        const totalDebits = transactions.filter(tx => tx.type === 'Debit').reduce((sum, tx) => sum + tx.amount, 0);
+        return res.json({
+          totalTransactionsCount: transactions.length,
+          totalMembersCount: members.length,
+          totalFleetCount: vehicles.length,
+          netCashFlow: totalCredits - totalDebits,
+          totalCapitalReserve: members.reduce((sum, member) => sum + member.sharesAmount, 0),
+          totalMemberSavings: members.reduce((sum, member) => sum + member.savingsAmount, 0),
+          systemHealth: 'ok',
+          auditTimestamp: new Date().toISOString()
+        });
+      }
       const data = await safeDbOperation(
         async (firestoreDb) => {
           const txSnap = await firestoreDb.collection('transactions').get();
@@ -1506,7 +1455,7 @@ async function startServer() {
 
       res.json(data);
     } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      sendApiError(res, error);
     }
   });
 
@@ -1544,12 +1493,12 @@ async function startServer() {
         ...getDarajaSafeConfig({ shortcode: updated.shortcode, mode: updated.mode })
       });
     } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      sendApiError(res, error);
     }
   });
 
   // API 15C: Safaricom C2B register URL using server-side Daraja credentials
-  app.post('/api/mpesa/register-url', authenticateSaccoUser, async (req, res) => {
+  app.post('/api/mpesa/register-url', authenticateSaccoUser, requireRoles(['Chairman', 'Treasurer']), async (req, res) => {
     try {
       const { shortcode, mode, confirmationUrl, validationUrl } = req.body;
       const darajaConfig = getDarajaSafeConfig({ shortcode, mode });
@@ -1593,7 +1542,7 @@ async function startServer() {
   });
 
   // API 15D: Safaricom C2B sandbox simulation trigger
-  app.post('/api/mpesa/simulate-c2b', authenticateSaccoUser, async (req, res) => {
+  app.post('/api/mpesa/simulate-c2b', authenticateSaccoUser, requireRoles(['Chairman', 'Treasurer']), async (req, res) => {
     try {
       const { shortcode, mode, amount, msisdn, billRefNumber } = req.body;
       const darajaConfig = getDarajaSafeConfig({ shortcode, mode });
@@ -1710,7 +1659,7 @@ async function startServer() {
   app.post('/api/daraja/c2b-confirmation', handleC2BConfirmation);
 
   // API 16: Log direct M-Pesa cashless payment for both paybills
-  app.post('/api/mpesa/log-payment', authenticateSaccoUser, async (req, res) => {
+  app.post('/api/mpesa/log-payment', authenticateSaccoUser, requireRoles(['Chairman', 'Treasurer', 'Accountant']), async (req, res) => {
     try {
       const { memberId, amount, category, refCode, tillNumber } = req.body;
 
