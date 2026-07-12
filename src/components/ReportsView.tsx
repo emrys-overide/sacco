@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import type { Transaction, Vehicle, Member, User, UserRole } from '../types';
 import { canRole } from '../lib/auth';
 import { sanitizeDecimalInput, sanitizeReferenceCode } from '../lib/inputValidation';
-import { requiresRegisteredMember } from '../lib/transactionPolicy';
+import { isExpenseTransactionCategory, requiresRegisteredMember } from '../lib/transactionPolicy';
 import { 
   FileText, 
   Download, 
@@ -62,13 +62,13 @@ export default function ReportsView({
 
   // Accountant Workspace States
   const [journalType, setJournalType] = useState<'Credit' | 'Debit'>('Credit');
-  const [journalCategory, setJournalCategory] = useState<'Daily Contribution' | 'Registration Fee' | 'Management Fee' | 'Office Expenses' | 'Petty Cash' | 'Penalty' | 'Utilities' | 'Equipment'>('Daily Contribution');
+  const [journalCategory, setJournalCategory] = useState<'Daily Contribution' | 'Savings Contribution' | 'Registration Fee' | 'Management Fee' | 'Office Expenses' | 'Petty Cash' | 'Penalty' | 'Utilities' | 'Equipment'>('Daily Contribution');
   const [journalAmount, setJournalAmount] = useState<string>('');
   const [journalDescription, setJournalDescription] = useState<string>('');
   const [journalRefCode, setJournalRefCode] = useState<string>('');
   const [journalMemberId, setJournalMemberId] = useState<string>('');
   const [journalVehiclePlate, setJournalVehiclePlate] = useState<string>('');
-  const [journalTill, setJournalTill] = useState<'VehicleTill' | 'UtilityTill' | 'None'>('UtilityTill');
+  const [journalTill, setJournalTill] = useState<'VehicleTill' | 'UtilityTill' | 'None'>('VehicleTill');
   const [journalSuccess, setJournalSuccess] = useState<string>('');
   const [journalError, setJournalError] = useState<string>('');
   const journalRequiresRegistration = requiresRegisteredMember(journalCategory);
@@ -118,13 +118,13 @@ export default function ReportsView({
   const totalDebits = transactions.filter(t => t.type === 'Debit').reduce((acc, t) => acc + t.amount, 0);
   const netBalance = totalCredits - totalDebits;
 
-  // Till 1: Vehicle Fleet Till (Till: 824 9102)
+  // Account 1: Operations / Daily Collection (48277)
   const vehicleTx = transactions.filter(t => t.tillNumber === 'VehicleTill');
   const vehicleCredits = vehicleTx.filter(t => t.type === 'Credit').reduce((acc, t) => acc + t.amount, 0);
   const vehicleDebits = vehicleTx.filter(t => t.type === 'Debit').reduce((acc, t) => acc + t.amount, 0);
   const vehicleNet = vehicleCredits - vehicleDebits;
 
-  // Till 2: Sacco Operating Utility Till (Till: 481 0294)
+  // Account 2: Member Savings (871671)
   const utilityTx = transactions.filter(t => t.tillNumber === 'UtilityTill');
   const utilityCredits = utilityTx.filter(t => t.type === 'Credit').reduce((acc, t) => acc + t.amount, 0);
   const utilityDebits = utilityTx.filter(t => t.type === 'Debit').reduce((acc, t) => acc + t.amount, 0);
@@ -256,12 +256,12 @@ export default function ReportsView({
 
     content += `INDIVIDUAL TILL LEDGER SUMMARIES:\n`;
     content += `------------------------------------------------------\n`;
-    content += `1. VEHICLE TILL NO. 824 9102 (FLEET COLLECTIONS)\n`;
+    content += `1. CO-OP ACCOUNT 48277 (OPERATIONS / DAILY COLLECTIONS)\n`;
     content += `   - Total Deposits     : KES ${vehicleCredits.toLocaleString()}.00\n`;
     content += `   - Total Payouts/Fees : KES ${vehicleDebits.toLocaleString()}.00\n`;
     content += `   - Net Till Balance   : KES ${vehicleNet.toLocaleString()}.00\n\n`;
 
-    content += `2. OPERATING UTILITY TILL NO. 481 0294 (ADMIN & UTILITIES)\n`;
+    content += `2. CO-OP ACCOUNT 871671 (MEMBER SAVINGS)\n`;
     content += `   - Total Deposits     : KES ${utilityCredits.toLocaleString()}.00\n`;
     content += `   - Total Office Exp   : KES ${utilityDebits.toLocaleString()}.00\n`;
     content += `   - Net Till Balance   : KES ${utilityNet.toLocaleString()}.00\n\n`;
@@ -291,7 +291,7 @@ export default function ReportsView({
     content += `Date       Till Type       Ref Code      Type    Category             Amount\n`;
     transactions.forEach(t => {
       const dateStr = t.timestamp.substring(0, 10);
-      const tillStr = (t.tillNumber === 'VehicleTill' ? 'Till 8249102' : t.tillNumber === 'UtilityTill' ? 'Till 4810294' : 'Cash Drawer').padEnd(15);
+      const tillStr = (t.tillNumber === 'VehicleTill' ? 'Acct 48277' : t.tillNumber === 'UtilityTill' ? 'Acct 871671' : 'Cash Drawer').padEnd(15);
       const refCode = t.refCode.padEnd(13);
       const typeStr = t.type.padEnd(7);
       const catStr = t.category.padEnd(20);
@@ -403,7 +403,7 @@ export default function ReportsView({
             }`}
           >
             <Activity className="w-3.5 h-3.5" />
-            <span>Cashless Tills Hub</span>
+            <span>Co-op Accounts Hub</span>
           </button>
           
           <button
@@ -475,7 +475,7 @@ export default function ReportsView({
               }`}
             >
               <div className="w-full flex items-center justify-between">
-                <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 font-mono">VEHICLE TILL (No. 824 9102)</span>
+                <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 font-mono">OPERATIONS / DAILY (48277)</span>
                 <Wallet className={`w-4 h-4 ${activeTillTab === 'vehicle' ? 'text-emerald-600' : 'text-slate-400'}`} />
               </div>
               <div className="mt-4">
@@ -497,7 +497,7 @@ export default function ReportsView({
               }`}
             >
               <div className="w-full flex items-center justify-between">
-                <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 font-mono">UTILITY TILL (No. 481 0294)</span>
+                <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 font-mono">MEMBER SAVINGS (871671)</span>
                 <Server className={`w-4 h-4 ${activeTillTab === 'utility' ? 'text-blue-600' : 'text-slate-400'}`} />
               </div>
               <div className="mt-4">
@@ -506,7 +506,7 @@ export default function ReportsView({
               </div>
               <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between w-full">
                 <span className="text-[9px] font-mono uppercase bg-blue-700 text-white px-2 py-0.5 rounded-sm">Operational Ledger</span>
-                <span className="text-[10px] text-blue-700 font-bold hover:underline">Inspect Utility &rarr;</span>
+                <span className="text-[10px] text-blue-700 font-bold hover:underline">Inspect Savings &rarr;</span>
               </div>
             </button>
           </div>
@@ -534,7 +534,7 @@ export default function ReportsView({
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       <div className="border border-slate-200 p-4 rounded">
                         <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wide border-b pb-2 mb-3">
-                          Vehicle Till Part-Account (No. 824 9102)
+                          Operations / Daily Account (48277)
                         </h4>
                         <div className="space-y-2 text-xs">
                           <div className="flex justify-between">
@@ -554,7 +554,7 @@ export default function ReportsView({
 
                       <div className="border border-slate-200 p-4 rounded">
                         <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wide border-b pb-2 mb-3">
-                          Utility Till Part-Account (No. 481 0294)
+                          Member Savings Account (871671)
                         </h4>
                         <div className="space-y-2 text-xs">
                           <div className="flex justify-between">
@@ -584,13 +584,13 @@ export default function ReportsView({
                     </div>
 
                     <div>
-                      <h4 className="text-xs font-black uppercase tracking-wider text-slate-800 mb-3 font-display">Combined Transaction Conjunction (All Tills)</h4>
+                      <h4 className="text-xs font-black uppercase tracking-wider text-slate-800 mb-3 font-display">Combined Transaction Conjunction (All Accounts)</h4>
                       <div className="overflow-x-auto border border-slate-200 rounded">
                         <table className="w-full text-left">
                           <thead className="bg-slate-100 text-[9px] text-slate-500 font-bold uppercase tracking-wider border-b border-slate-200">
                             <tr>
                               <th className="px-4 py-2">Date</th>
-                              <th className="px-4 py-2">Till Account</th>
+                              <th className="px-4 py-2">Co-op Account</th>
                               <th className="px-4 py-2">Category</th>
                               <th className="px-4 py-2">Memo Description</th>
                               <th className="px-4 py-2 text-right">Amount</th>
@@ -611,7 +611,7 @@ export default function ReportsView({
                                       ? 'bg-blue-50 text-blue-800 border border-blue-200' 
                                       : 'bg-slate-100 text-slate-700'
                                   }`}>
-                                    {t.tillNumber === 'VehicleTill' ? 'Till: 8249102' : t.tillNumber === 'UtilityTill' ? 'Till: 4810294' : 'Cash Box'}
+                                    {t.tillNumber === 'VehicleTill' ? 'Account: 48277' : t.tillNumber === 'UtilityTill' ? 'Account: 871671' : 'Cash Box'}
                                   </span>
                                 </td>
                                 <td className="px-4 py-3 text-slate-700 font-medium">{t.category}</td>
@@ -636,7 +636,7 @@ export default function ReportsView({
                   <div className="px-6 py-4 bg-emerald-950 border-b border-emerald-800 flex items-center justify-between">
                     <div className="flex items-center space-x-2 text-white">
                       <Wallet className="w-4 h-4 text-emerald-400" />
-                      <h3 className="text-xs font-black uppercase tracking-wider font-display">Vehicle Till Ledger (Till No. 824 9102)</h3>
+                      <h3 className="text-xs font-black uppercase tracking-wider font-display">Operations / Daily Ledger (Account 48277)</h3>
                     </div>
                     <span className="text-[10px] font-mono bg-emerald-500 text-emerald-950 font-black px-2.5 py-0.5 rounded">Fleet Core Collections</span>
                   </div>
@@ -661,10 +661,10 @@ export default function ReportsView({
                     </div>
 
                     <div>
-                      <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-3">Vehicle Till Dedicated Ledger Logs</h4>
+                      <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-3">Operations Account Ledger Logs</h4>
                       {vehicleTx.length === 0 ? (
                         <div className="text-center py-8 border border-dashed rounded text-xs text-slate-400">
-                          No transactions recorded under Till No. 824 9102
+                          No transactions recorded under account 48277
                         </div>
                       ) : (
                         <div className="overflow-x-auto border border-slate-200 rounded">
@@ -707,7 +707,7 @@ export default function ReportsView({
                   <div className="px-6 py-4 bg-blue-950 border-b border-blue-800 flex items-center justify-between">
                     <div className="flex items-center space-x-2 text-white">
                       <Server className="w-4 h-4 text-blue-400" />
-                      <h3 className="text-xs font-black uppercase tracking-wider font-display">Operating Utility Till Ledger (Till No. 481 0294)</h3>
+                      <h3 className="text-xs font-black uppercase tracking-wider font-display">Member Savings Ledger (Account 871671)</h3>
                     </div>
                     <span className="text-[10px] font-mono bg-blue-500 text-blue-950 font-black px-2.5 py-0.5 rounded">Sacco Operations Drawer</span>
                   </div>
@@ -735,7 +735,7 @@ export default function ReportsView({
                       <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-3">Operating Till Dedicated Ledger Logs</h4>
                       {utilityTx.length === 0 ? (
                         <div className="text-center py-8 border border-dashed rounded text-xs text-slate-400">
-                          No operational expenses recorded under Till No. 481 0294
+                          No savings deposits recorded under account 871671
                         </div>
                       ) : (
                         <div className="overflow-x-auto border border-slate-200 rounded">
@@ -1611,8 +1611,8 @@ export default function ReportsView({
                       </p>
                       <table className="w-full text-left mt-2 border text-xs">
                         <tbody>
-                          <tr className="border-b"><td className="p-2">Vehicle Till M-Pesa Account No. 824 9102</td><td className="p-2 text-right">KES {vehicleNet.toLocaleString()}.00</td></tr>
-                          <tr className="border-b"><td className="p-2">Utility Till M-Pesa Account No. 481 0294</td><td className="p-2 text-right">KES {utilityNet.toLocaleString()}.00</td></tr>
+                          <tr className="border-b"><td className="p-2">Co-op Operations / Daily Account 48277</td><td className="p-2 text-right">KES {vehicleNet.toLocaleString()}.00</td></tr>
+                          <tr className="border-b"><td className="p-2">Co-op Member Savings Account 871671</td><td className="p-2 text-right">KES {utilityNet.toLocaleString()}.00</td></tr>
                           <tr className="border-b"><td className="p-2">Floating Cash Box / Petty drawer</td><td className="p-2 text-right font-bold">KES {cashNet.toLocaleString()}.00</td></tr>
                           <tr className="bg-slate-50 font-bold"><td className="p-2">Total cash equivalents balance in books</td><td className="p-2 text-right">KES {reportFinancials.cashAndEquiv.toLocaleString()}.00</td></tr>
                         </tbody>
@@ -1881,8 +1881,8 @@ export default function ReportsView({
                         onChange={(e) => setJournalTill(e.target.value as any)}
                         className="w-full p-2 border border-slate-200 rounded font-mono text-xs focus:ring-1 focus:ring-emerald-600 focus:outline-none bg-white"
                       >
-                        <option value="VehicleTill">Vehicle Fleet Till (No. 824 9102)</option>
-                        <option value="UtilityTill">Utility General Till (No. 481 0294)</option>
+                        <option value="VehicleTill">Operations / Daily Account 48277</option>
+                        <option value="UtilityTill">Member Savings Account 871671</option>
                         <option value="None">Floating Petty Cash Drawer</option>
                       </select>
                     </div>
@@ -1896,6 +1896,15 @@ export default function ReportsView({
                         onChange={(e) => {
                           const nextCategory = e.target.value as Transaction['category'];
                           setJournalCategory(nextCategory);
+                          if (nextCategory === 'Savings Contribution') {
+                            setJournalType('Credit');
+                            setJournalTill('UtilityTill');
+                          } else if (isExpenseTransactionCategory(nextCategory)) {
+                            setJournalType('Debit');
+                            setJournalTill('VehicleTill');
+                          } else {
+                            setJournalTill('VehicleTill');
+                          }
                           if (!requiresRegisteredMember(nextCategory)) {
                             setJournalMemberId('');
                             setJournalVehiclePlate('');
@@ -1904,6 +1913,7 @@ export default function ReportsView({
                         className="w-full p-2 border border-slate-200 rounded text-xs focus:ring-1 focus:ring-emerald-600 focus:outline-none bg-white"
                       >
                         <option value="Daily Contribution">Daily Contribution</option>
+                        <option value="Savings Contribution">Savings Contribution</option>
                         <option value="Registration Fee">Registration Fee</option>
                         <option value="Management Fee">Management Fee</option>
                         <option value="Office Expenses">Office Expenses</option>
@@ -2192,6 +2202,7 @@ export default function ReportsView({
                   >
                     <option value="All">All Categories</option>
                     <option value="Daily Contribution">Daily Contributions</option>
+                    <option value="Savings Contribution">Savings Contributions</option>
                     <option value="Registration Fee">Registration Fees</option>
                     <option value="Management Fee">Management Fees</option>
                     <option value="Office Expenses">Office Expenses</option>
@@ -2217,9 +2228,9 @@ export default function ReportsView({
                     onChange={(e) => setLedgerTillFilter(e.target.value)}
                     className="w-full p-1.5 border border-slate-200 rounded text-xs focus:ring-1 focus:ring-emerald-600 focus:outline-none bg-white"
                   >
-                    <option value="All">All Tills</option>
-                    <option value="VehicleTill">Vehicle Till</option>
-                    <option value="UtilityTill">Utility Till</option>
+                    <option value="All">All Accounts</option>
+                    <option value="VehicleTill">Operations Account 48277</option>
+                    <option value="UtilityTill">Savings Account 871671</option>
                     <option value="None">No Till</option>
                   </select>
 
@@ -2438,7 +2449,7 @@ export default function ReportsView({
                 <select value={editType} onChange={e => setEditType(e.target.value as 'Credit' | 'Debit')} className="mt-1 w-full rounded-lg border bg-white p-2 text-xs"><option value="Credit">Credit</option><option value="Debit">Debit</option></select>
               </label>
               <label className="text-[10px] font-bold uppercase text-slate-500">Till
-                <select value={editTill} onChange={e => setEditTill(e.target.value as Transaction['tillNumber'])} className="mt-1 w-full rounded-lg border bg-white p-2 text-xs"><option value="VehicleTill">Vehicle Till</option><option value="UtilityTill">Utility Till</option><option value="None">None</option></select>
+                <select value={editTill} onChange={e => setEditTill(e.target.value as Transaction['tillNumber'])} className="mt-1 w-full rounded-lg border bg-white p-2 text-xs"><option value="VehicleTill">Operations Account 48277</option><option value="UtilityTill">Savings Account 871671</option><option value="None">None</option></select>
               </label>
             </div>
             <label className="block text-[10px] font-bold uppercase text-slate-500">Category
@@ -2447,7 +2458,7 @@ export default function ReportsView({
                 setEditCategory(nextCategory);
                 if (!requiresRegisteredMember(nextCategory)) setEditVehiclePlate('');
               }} className="mt-1 w-full rounded-lg border bg-white p-2 text-xs">
-                {(['Daily Contribution','Registration Fee','Management Fee','Office Expenses','Petty Cash','Penalty','Utilities','Equipment'] as Transaction['category'][])
+                {(['Daily Contribution','Savings Contribution','Registration Fee','Management Fee','Office Expenses','Petty Cash','Penalty','Utilities','Equipment'] as Transaction['category'][])
                   .filter(category => !requiresRegisteredMember(category) || Boolean(editingTransaction.memberId))
                   .map(category => <option key={category} value={category}>{category}</option>)}
               </select>

@@ -69,8 +69,8 @@ Stores plate number, owner/member link, route link, capacity, driver details, an
 Defines known tills and their default accounting treatment:
 
 ```text
-VehicleTill  -> 8249102 -> DailyContribution
-UtilityTill  -> 4810294 -> ManagementFee
+VehicleTill  -> Paybill 400200 / Account 48277  -> DailyContribution
+UtilityTill  -> Paybill 400200 / Account 871671 -> Savings
 ```
 
 Daraja sandbox shortcode `600000` is test-only runtime config, not production reference data.

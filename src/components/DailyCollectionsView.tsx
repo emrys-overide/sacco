@@ -377,7 +377,7 @@ export default function DailyCollectionsView({
           type: 'Debit',
           category: 'Petty Cash',
           amount: expense.amount,
-          tillNumber: 'UtilityTill'
+          tillNumber: 'VehicleTill'
         });
         createdExpenseIds.set(expense.no, transaction.id);
       }

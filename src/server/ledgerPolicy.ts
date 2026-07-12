@@ -10,6 +10,7 @@ import type {
 const TRANSACTION_TYPES: readonly TransactionType[] = ['Credit', 'Debit'];
 const TRANSACTION_CATEGORIES: readonly TransactionCategory[] = [
   'Daily Contribution',
+  'Savings Contribution',
   'Registration Fee',
   'Management Fee',
   'Office Expenses',
@@ -53,7 +54,7 @@ export function normalizeTransactionInput(input: LedgerInput): Transaction {
   const amount = Number(input.amount);
   const type = (input.type || 'Credit') as TransactionType;
   const category = (input.category || 'Daily Contribution') as TransactionCategory;
-  const tillNumber = (input.tillNumber || 'UtilityTill') as TillType;
+  const tillNumber = (input.tillNumber || 'VehicleTill') as TillType;
 
   if (!description) throw new LedgerPolicyError(400, 'Transaction description is required.', 'MISSING_DESCRIPTION');
   if (!refCode) throw new LedgerPolicyError(400, 'Transaction reference code is required.', 'MISSING_REF_CODE');
@@ -61,6 +62,12 @@ export function normalizeTransactionInput(input: LedgerInput): Transaction {
   if (!TRANSACTION_TYPES.includes(type)) throw new LedgerPolicyError(400, 'Transaction type must be Credit or Debit.', 'INVALID_TRANSACTION_TYPE');
   if (!TRANSACTION_CATEGORIES.includes(category)) throw new LedgerPolicyError(400, `Unsupported transaction category: ${category}`, 'INVALID_TRANSACTION_CATEGORY');
   if (!TILL_TYPES.includes(tillNumber)) throw new LedgerPolicyError(400, `Unsupported till number: ${tillNumber}`, 'INVALID_TILL');
+  if (category === 'Savings Contribution' && tillNumber !== 'UtilityTill') {
+    throw new LedgerPolicyError(400, 'Savings contributions must be posted to Co-op account 871671.', 'SAVINGS_ACCOUNT_REQUIRED');
+  }
+  if (tillNumber === 'UtilityTill' && category !== 'Savings Contribution') {
+    throw new LedgerPolicyError(400, 'Co-op account 871671 accepts savings contributions only.', 'INVALID_SAVINGS_ACCOUNT_ENTRY');
+  }
 
   return {
     id: input.id || 't-' + Date.now(),
@@ -91,9 +98,13 @@ export function normalizeTransactionInput(input: LedgerInput): Transaction {
 }
 
 export function getDailyContributionBalanceDelta(tx: Transaction): { shares: number; savings: number; loan: number } {
-  if (!tx.memberId || tx.category !== 'Daily Contribution') return { shares: 0, savings: 0, loan: 0 };
+  if (!tx.memberId) return { shares: 0, savings: 0, loan: 0 };
 
   const direction = tx.type === 'Credit' ? 1 : -1;
+  if (tx.category === 'Savings Contribution') {
+    return { shares: 0, savings: direction * tx.amount, loan: 0 };
+  }
+  if (tx.category !== 'Daily Contribution') return { shares: 0, savings: 0, loan: 0 };
   const loanRepay = Number(tx.loanRepay || 0);
   if (tx.savingsContribution !== undefined) {
     return {

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import type { Member, PaymentRecord, Transaction, Vehicle } from '../types';
 import { getSaccoAccessToken } from '../lib/api';
 import { sanitizeDecimalInput, sanitizeIntegerInput, sanitizePhoneNumber, sanitizeReferenceCode } from '../lib/inputValidation';
+import { COOP_PAYBILL_NUMBER, getCollectionAccountByTill } from '../lib/collectionAccounts';
 import { 
   Smartphone, 
   CheckCircle2, 
@@ -65,7 +66,7 @@ export default function PaybillView({
   const [selectedVehiclePlate, setSelectedVehiclePlate] = useState('');
   const [amount, setAmount] = useState('');
   const [refCode, setRefCode] = useState('');
-  const [category, setCategory] = useState<'Daily Contribution' | 'Registration Fee' | 'Management Fee' | 'Penalty'>('Daily Contribution');
+  const [category, setCategory] = useState<'Daily Contribution' | 'Savings Contribution' | 'Registration Fee' | 'Management Fee' | 'Penalty'>('Daily Contribution');
   const [phoneNumber, setPhoneNumber] = useState('');
   
   // Tab State
@@ -106,6 +107,12 @@ export default function PaybillView({
   const eligibleMemberVehicles = activePaymentVehicles.filter(vehicle => vehicle.ownerId === selectedMemberId);
   const callbackUrlError = getPublicCallbackUrlError(callbackBaseUrl);
   const canRunSandboxCallbackTest = Boolean(darajaConfig?.credentialsConfigured) && !callbackUrlError;
+
+  const selectCollectionAccount = (till: 'VehicleTill' | 'UtilityTill') => {
+    setTargetTill(till);
+    setCategory(getCollectionAccountByTill(till).defaultCategory as typeof category);
+    if (till === 'UtilityTill') setSelectedVehiclePlate('');
+  };
 
   // Security headers helper
   const getSaccoSecurityHeaders = async () => {
@@ -459,10 +466,10 @@ export default function PaybillView({
         <div className="space-y-1">
           <div className="flex items-center space-x-2">
             <span className="text-[10px] font-bold uppercase tracking-widest bg-emerald-500 text-slate-950 px-2.5 py-0.5 rounded font-mono border border-emerald-600">
-              Sowetamu Sacco Tills
+              Co-op Paybill {COOP_PAYBILL_NUMBER}
             </span>
             <span className="text-[10px] font-bold uppercase tracking-widest bg-indigo-500 text-white px-2.5 py-0.5 rounded font-mono">
-              Cashless Dual-Till System
+              Dual-Account Reconciliation
             </span>
           </div>
           <h2 className="text-xl font-bold font-display text-slate-100 mt-1.5 flex items-center">
@@ -470,7 +477,7 @@ export default function PaybillView({
             Cashless Paybill Gateway
           </h2>
           <p className="text-xs text-slate-400 max-w-2xl leading-normal">
-            Sowetamu Sacco processes cashless mobile payments using two segregated M-Pesa tills. Live Daraja callbacks create payment records automatically and post matched payments into the ledger.
+            Account 48277 routes to operations and daily collections; account 871671 routes directly to member savings.
           </p>
         </div>
 
@@ -480,7 +487,7 @@ export default function PaybillView({
           className="px-4 py-2 bg-slate-800 hover:bg-slate-750 disabled:opacity-50 text-white font-bold text-xs uppercase tracking-wider rounded border border-slate-700 flex items-center space-x-2 transition-all shadow-sm shrink-0 self-start md:self-center"
         >
           <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${isDataLoading ? 'animate-spin' : ''}`} />
-          <span>Sync Tills Data</span>
+          <span>Refresh Collections</span>
         </button>
       </div>
 
@@ -514,18 +521,18 @@ export default function PaybillView({
           <div>
             <div className="flex justify-between items-start">
               <span className="text-[10px] font-mono font-bold uppercase tracking-wider bg-emerald-50 text-emerald-800 px-2 py-0.5 rounded border border-emerald-200">
-                Till No. 824 9102
+                Account 48277
               </span>
               <Smartphone className="w-5 h-5 text-emerald-500" />
             </div>
-            <h3 className="text-sm font-black text-slate-900 mt-3">Vehicle Fleet Till</h3>
+            <h3 className="text-sm font-black text-slate-900 mt-3">Operations / Daily Collection</h3>
             <p className="text-xs text-slate-500 mt-1 leading-normal">
-              Used strictly for matatu transit daily contributions, driver subscriptions, vehicle registration fees, and driver licensing dues. Reconciles with the fleet fleet-tracking logs.
+              Receives operational and daily collection deposits. Daily contributions follow the existing member allocation policy.
             </p>
           </div>
           <div className="border-t border-slate-100 mt-4 pt-3 flex justify-between items-center text-[11px]">
-            <span className="text-slate-400 font-mono">Ledger Code: VehicleTill</span>
-            <span className="text-emerald-700 font-bold font-mono">100% Cashless Sync</span>
+            <span className="text-slate-400 font-mono">Paybill 400200</span>
+            <span className="text-emerald-700 font-bold font-mono">Daily Collection Logic</span>
           </div>
         </div>
 
@@ -535,18 +542,18 @@ export default function PaybillView({
           <div>
             <div className="flex justify-between items-start">
               <span className="text-[10px] font-mono font-bold uppercase tracking-wider bg-indigo-50 text-indigo-800 px-2 py-0.5 rounded border border-indigo-200">
-                Till No. 481 0294
+                Account 871671
               </span>
               <Smartphone className="w-5 h-5 text-indigo-500" />
             </div>
-            <h3 className="text-sm font-black text-slate-900 mt-3">Operating Utility Till</h3>
+            <h3 className="text-sm font-black text-slate-900 mt-3">Member Savings</h3>
             <p className="text-xs text-slate-500 mt-1 leading-normal">
-              Used for general Sacco management fees, office expenses, route penalties, licensing dues, equipment acquisitions, and non-member direct service deposits.
+              Receives savings deposits only. Every reconciled credit is posted 100% to the selected member's savings balance.
             </p>
           </div>
           <div className="border-t border-slate-100 mt-4 pt-3 flex justify-between items-center text-[11px]">
-            <span className="text-slate-400 font-mono">Ledger Code: UtilityTill</span>
-            <span className="text-indigo-700 font-bold font-mono">Central Operating Sync</span>
+            <span className="text-slate-400 font-mono">Paybill 400200</span>
+            <span className="text-indigo-700 font-bold font-mono">100% Savings Logic</span>
           </div>
         </div>
 
@@ -593,15 +600,12 @@ export default function PaybillView({
             </button>
             <button
               type="button"
-              onClick={() => setActiveFormTab('webhook')}
-              className={`py-2 px-3 rounded-lg transition-all text-center flex items-center justify-center space-x-1.5 ${
-                activeFormTab === 'webhook'
-                  ? 'bg-emerald-600 text-white shadow-sm'
-                  : 'text-slate-600 hover:text-slate-800 hover:bg-white/50'
-              }`}
+              disabled
+              title="Enable this after Co-op supplies the Instant Transaction Notification contract and sandbox credentials."
+              className="py-2 px-3 rounded-lg text-center flex items-center justify-center space-x-1.5 text-slate-500 bg-slate-100 cursor-not-allowed"
             >
               <Smartphone className="w-3.5 h-3.5" />
-              <span>Daraja Webhook</span>
+              <span>Co-op API Pending</span>
             </button>
           </div>
 
@@ -621,32 +625,32 @@ export default function PaybillView({
                 {/* TILL SELECTOR */}
                 <div>
                   <label className="block text-[10px] font-black uppercase text-slate-600 tracking-wider mb-1.5 font-mono">
-                    Select Destination Till / Paybill
+                    Select Co-op Destination Account
                   </label>
                   <div className="grid grid-cols-2 gap-3">
                     <button
                       type="button"
-                      onClick={() => setTargetTill('VehicleTill')}
+                      onClick={() => selectCollectionAccount('VehicleTill')}
                       className={`py-2 px-3 rounded-lg border-2 text-left transition-all flex flex-col justify-between ${
                         targetTill === 'VehicleTill' 
                           ? 'border-emerald-600 bg-emerald-50/50 text-emerald-950' 
                           : 'border-slate-200 hover:border-slate-350 bg-slate-50 text-slate-700'
                       }`}
                     >
-                      <span className="font-bold text-[11px]">Vehicle Till</span>
-                      <span className="text-[9px] font-mono mt-0.5 opacity-80">No. 824 9102</span>
+                      <span className="font-bold text-[11px]">Operations / Daily</span>
+                      <span className="text-[9px] font-mono mt-0.5 opacity-80">Account 48277</span>
                     </button>
                     <button
                       type="button"
-                      onClick={() => setTargetTill('UtilityTill')}
+                      onClick={() => selectCollectionAccount('UtilityTill')}
                       className={`py-2 px-3 rounded-lg border-2 text-left transition-all flex flex-col justify-between ${
                         targetTill === 'UtilityTill' 
                           ? 'border-indigo-600 bg-indigo-50/50 text-indigo-950' 
                           : 'border-slate-200 hover:border-slate-350 bg-slate-50 text-slate-700'
                       }`}
                     >
-                      <span className="font-bold text-[11px]">Utility Till</span>
-                      <span className="text-[9px] font-mono mt-0.5 opacity-80">No. 481 0294</span>
+                      <span className="font-bold text-[11px]">Member Savings</span>
+                      <span className="text-[9px] font-mono mt-0.5 opacity-80">Account 871671</span>
                     </button>
                   </div>
                 </div>
@@ -738,9 +742,11 @@ export default function PaybillView({
                     <select
                       value={category}
                       onChange={(e) => setCategory(e.target.value as any)}
+                      disabled={targetTill === 'UtilityTill'}
                       className="w-full px-2.5 py-2 border-2 border-slate-200 bg-white rounded-lg focus:outline-none focus:border-slate-900"
                     >
                       <option value="Daily Contribution">Daily Contribution</option>
+                      <option value="Savings Contribution">Savings Contribution</option>
                       <option value="Registration Fee">Registration Fee</option>
                       <option value="Management Fee">Management Fee</option>
                       <option value="Penalty">Sacco Penalty</option>
@@ -773,6 +779,16 @@ export default function PaybillView({
                       <li>30% credited to member's Shares Account (+KES {amount ? Math.round(Number(amount) * 0.3).toLocaleString() : '0'})</li>
                       <li>70% credited to member's Savings Account (+KES {amount ? Math.round(Number(amount) * 0.7).toLocaleString() : '0'})</li>
                     </ul>
+                  </div>
+                )}
+
+                {category === 'Savings Contribution' && selectedMemberId && (
+                  <div className="bg-indigo-50 border border-indigo-200 p-2.5 rounded-lg text-[10px] text-indigo-950 leading-normal">
+                    <p className="font-bold flex items-center mb-0.5">
+                      <Sparkles className="w-3.5 h-3.5 text-indigo-600 mr-1 shrink-0" />
+                      Savings Allocation Active
+                    </p>
+                    100% of this deposit (+KES {amount ? Number(amount).toLocaleString() : '0'}) will be credited to the selected member's savings balance.
                   </div>
                 )}
 
@@ -963,8 +979,8 @@ export default function PaybillView({
                     className="w-full px-2.5 py-2 border-2 border-slate-200 bg-white rounded-lg focus:outline-none focus:border-slate-900 font-bold"
                   >
                     <option value="600000">Sandbox Paybill 600000</option>
-                    <option value="8249102">Vehicle Fleet Till No. 824 9102</option>
-                    <option value="4810294">Operating Utility Till No. 481 0294</option>
+                    <option value="48277">Operations / Daily Account 48277</option>
+                    <option value="871671">Member Savings Account 871671</option>
                   </select>
                 </div>
 
@@ -1200,7 +1216,7 @@ export default function PaybillView({
                             <span className={`text-[9px] font-mono font-bold uppercase px-2 py-0.5 rounded ${
                               tx.tillNumber === 'VehicleTill' ? 'bg-emerald-100 text-emerald-800' : 'bg-indigo-100 text-indigo-800'
                             }`}>
-                              {tx.tillNumber === 'VehicleTill' ? 'Till: 8249102' : 'Till: 4810294'}
+                              {tx.tillNumber === 'VehicleTill' ? 'Account: 48277 Operations' : 'Account: 871671 Savings'}
                             </span>
                           </td>
                           <td className="py-2.5 text-right font-mono font-black text-emerald-600">

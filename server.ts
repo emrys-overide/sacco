@@ -41,6 +41,12 @@ import {
   sanitizeVehiclePlate
 } from './src/lib/inputValidation';
 import { requiresRegisteredMember } from './src/lib/transactionPolicy';
+import {
+  COOP_PAYBILL_NUMBER,
+  findCollectionAccount,
+  getCollectionAccountByTill,
+  type CollectionAccountConfig
+} from './src/lib/collectionAccounts';
 import type {
   Member,
   PaymentRecord,
@@ -76,6 +82,7 @@ type IncomingPaymentInput = {
   category?: TransactionCategory;
   rawPayload?: unknown;
   recorderName: string;
+  destinationAccountNumber?: string;
 };
 
 type AuthorizedUser = {
@@ -762,20 +769,8 @@ function sendApiError(res: express.Response, error: any) {
   return res.status(500).json({ error: error.message || 'Unexpected server error.' });
 }
 
-function getTillFromShortcode(shortcode: unknown): { tillNumber: 'VehicleTill' | 'UtilityTill'; category: TransactionCategory; paybillName: string } {
-  if (String(shortcode) === '4810294') {
-    return {
-      tillNumber: 'UtilityTill',
-      category: 'Management Fee',
-      paybillName: 'Operating Utility Till (No. 481 0294)'
-    };
-  }
-
-  return {
-    tillNumber: 'VehicleTill',
-    category: 'Daily Contribution',
-    paybillName: 'Vehicle Fleet Till (No. 824 9102)'
-  };
+function getCollectionDestination(value: unknown): CollectionAccountConfig {
+  return findCollectionAccount(value) || getCollectionAccountByTill('VehicleTill');
 }
 
 async function listPaymentRecords(): Promise<PaymentRecord[]> {
@@ -962,8 +957,11 @@ async function processIncomingPayment(input: IncomingPaymentInput): Promise<Paym
     };
   }
 
-  const tillConfig = getTillFromShortcode(input.shortcode);
-  const category = input.category || tillConfig.category;
+  const tillConfig = getCollectionDestination(input.destinationAccountNumber || input.shortcode);
+  const category = input.category || tillConfig.defaultCategory;
+  if (tillConfig.allocation === 'savings' && category !== 'Savings Contribution') {
+    throw new HttpError(400, `Account ${tillConfig.accountNumber} accepts savings contributions only.`, 'INVALID_COLLECTION_ALLOCATION');
+  }
   const [allMembers, allVehicles] = await Promise.all([getAllMembers(), getAllVehicles()]);
   const accountReference = String(input.accountReference || '').trim();
   const payerPhone = String(input.payerPhone || '').trim();
@@ -1007,6 +1005,7 @@ async function processIncomingPayment(input: IncomingPaymentInput): Promise<Paym
     tillNumber: tillConfig.tillNumber,
     category,
     accountReference,
+    destinationAccount: tillConfig.accountNumber,
     payerName,
     payerPhone,
     memberId: member?.id,
@@ -1031,13 +1030,14 @@ async function processIncomingPayment(input: IncomingPaymentInput): Promise<Paym
     memberId: member.id,
     memberName: member.name,
     vehiclePlate: matchedVehicle?.plateNumber || '',
-    description: `M-Pesa ${input.source.toLowerCase()} payment of KES ${amount.toLocaleString()} received on ${tillConfig.paybillName} (Account Ref: ${accountReference || 'N/A'}). Reconciled automatically.`,
+    description: `Co-op Paybill ${COOP_PAYBILL_NUMBER} ${input.source.toLowerCase()} deposit of KES ${amount.toLocaleString()} received for ${tillConfig.displayName} ${tillConfig.accountNumber} (Payer Ref: ${accountReference || 'N/A'}). Reconciled automatically.`,
     refCode,
     type: 'Credit',
     category,
     amount,
     recorderName: input.recorderName,
-    tillNumber: tillConfig.tillNumber
+    tillNumber: tillConfig.tillNumber,
+    ...(tillConfig.allocation === 'savings' ? { savingsContribution: amount } : {})
   });
   await validateLedgerRegistration(transactionInput);
 
@@ -1089,13 +1089,14 @@ async function reconcilePaymentRecord(paymentId: string, memberId: string, recor
     memberId: member.id,
     memberName: member.name,
     vehiclePlate: memberVehicle?.plateNumber || '',
-    description: `M-Pesa unmatched payment of KES ${payment.amount.toLocaleString()} assigned to ${member.name}. Original Account Ref: ${payment.accountReference || 'N/A'}.`,
+    description: `Co-op Paybill ${COOP_PAYBILL_NUMBER} unmatched deposit of KES ${payment.amount.toLocaleString()} assigned to ${member.name}. Original Payer Ref: ${payment.accountReference || 'N/A'}.`,
     refCode: payment.refCode,
     type: 'Credit',
     category: payment.category,
     amount: payment.amount,
     recorderName,
-    tillNumber: payment.tillNumber
+    tillNumber: payment.tillNumber,
+    ...(payment.category === 'Savings Contribution' ? { savingsContribution: payment.amount } : {})
   });
   await validateLedgerRegistration(transactionInput);
 
@@ -1972,7 +1973,7 @@ async function startServer() {
       }
 
       if (tillNumber !== 'VehicleTill' && tillNumber !== 'UtilityTill') {
-        return res.status(400).json({ error: 'Invalid paybill selection. Must be VehicleTill (824 9102) or UtilityTill (481 0294).' });
+        return res.status(400).json({ error: 'Invalid collection account. Select Operations 48277 or Savings 871671.' });
       }
       if (normalizedPayerPhone && !isValidPhoneNumber(normalizedPayerPhone)) {
         return res.status(400).json({ error: 'Payer phone number must contain 9 to 15 digits.' });
@@ -1982,12 +1983,13 @@ async function startServer() {
         source: 'Manual',
         refCode,
         amount,
-        shortcode: tillNumber === 'UtilityTill' ? '4810294' : '8249102',
+        shortcode: COOP_PAYBILL_NUMBER,
+        destinationAccountNumber: getCollectionAccountByTill(tillNumber).accountNumber,
         memberId,
         accountReference: String(accountReference || '').trim(),
         payerPhone: normalizedPayerPhone,
         category,
-        recorderName: `M-Pesa Gateway (${(req as any).user?.role || 'System'})`
+        recorderName: `Co-op Paybill Logger (${(req as any).user?.role || 'System'})`
       });
 
       res.status(200).json({

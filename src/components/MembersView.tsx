@@ -91,7 +91,7 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
   const totalDeposited = memberTransactions.filter(t => t.type === 'Credit').reduce((acc, t) => acc + t.amount, 0);
   const totalLevies = memberTransactions.filter(t => t.type === 'Debit').reduce((acc, t) => acc + t.amount, 0);
   const totalFleetTill = memberTransactions.filter(t => t.tillNumber === 'VehicleTill' && t.type === 'Credit').reduce((acc, t) => acc + t.amount, 0);
-  const totalUtilityTill = memberTransactions.filter(t => t.tillNumber === 'UtilityTill').reduce((acc, t) => acc + t.amount, 0);
+  const totalUtilityTill = memberTransactions.filter(t => t.tillNumber === 'UtilityTill' && t.type === 'Credit').reduce((acc, t) => acc + t.amount, 0);
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -165,15 +165,15 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
 
     content += `TILL SEGREGATION ACTIVITY LOG:\n`;
     content += `------------------------------------------------------\n`;
-    content += `Vehicle Till No. 8249102 Deposits : KES ${totalFleetTill.toLocaleString()}.00\n`;
-    content += `Utility Till No. 4810294 Payments : KES ${totalUtilityTill.toLocaleString()}.00\n\n`;
+    content += `Operations / Daily Account 48277 Deposits : KES ${totalFleetTill.toLocaleString()}.00\n`;
+    content += `Member Savings Account 871671 Deposits : KES ${totalUtilityTill.toLocaleString()}.00\n\n`;
 
     content += `DETAILED PERSONAL AUDIT TRAIL:\n`;
     content += `------------------------------------------------------\n`;
     content += `Date       Till Type       Ref Code      Type    Category             Amount\n`;
     txs.forEach(t => {
       const dateStr = t.timestamp.substring(0, 10);
-      const tillStr = (t.tillNumber === 'VehicleTill' ? 'Till 8249102' : t.tillNumber === 'UtilityTill' ? 'Till 4810294' : 'Cash Drawer').padEnd(15);
+      const tillStr = (t.tillNumber === 'VehicleTill' ? 'Acct 48277' : t.tillNumber === 'UtilityTill' ? 'Acct 871671' : 'Cash Drawer').padEnd(15);
       const refCode = t.refCode.padEnd(13);
       const typeStr = t.type.padEnd(7);
       const catStr = t.category.padEnd(20);
@@ -503,7 +503,7 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                     {/* Till 1 */}
                     <div className="bg-white border border-slate-200 p-3.5 rounded flex items-center justify-between">
                       <div>
-                        <span className="text-[9px] font-bold text-slate-400 block font-mono">VEHICLE FLEET TILL (824 9102)</span>
+                        <span className="text-[9px] font-bold text-slate-400 block font-mono">OPERATIONS / DAILY ACCOUNT (48277)</span>
                         <span className="text-xs text-slate-600 mt-1 block">Contributions &amp; fees</span>
                       </div>
                       <div className="text-right">
@@ -517,7 +517,7 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                     {/* Till 2 */}
                     <div className="bg-white border border-slate-200 p-3.5 rounded flex items-center justify-between">
                       <div>
-                        <span className="text-[9px] font-bold text-slate-400 block font-mono">UTILITY TILL (481 0294) / PETTY CASH</span>
+                        <span className="text-[9px] font-bold text-slate-400 block font-mono">MEMBER SAVINGS ACCOUNT (871671)</span>
                         <span className="text-xs text-slate-600 mt-1 block">Charges, offices &amp; debits</span>
                       </div>
                       <div className="text-right">
@@ -588,7 +588,7 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                                     ? 'bg-blue-50 text-blue-800 border-blue-200' 
                                     : 'bg-slate-100 text-slate-700 border-slate-200'
                                 }`}>
-                                  {t.tillNumber === 'VehicleTill' ? 'Till: 8249102' : t.tillNumber === 'UtilityTill' ? 'Till: 4810294' : 'Cash Drawer'}
+                                  {t.tillNumber === 'VehicleTill' ? 'Account: 48277' : t.tillNumber === 'UtilityTill' ? 'Account: 871671' : 'Cash Drawer'}
                                 </span>
                               </td>
                               <td className="px-4 py-3 text-slate-700 font-medium">

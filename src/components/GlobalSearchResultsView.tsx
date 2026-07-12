@@ -379,7 +379,7 @@ export default function GlobalSearchResultsView({
                               {highlightText(tx.recorderName, query)}
                             </span>
                             <span className="text-[8px] font-mono text-slate-400 uppercase tracking-widest block font-bold">
-                              {tx.tillNumber === 'VehicleTill' ? '🚜 VEHICLE TILL' : tx.tillNumber === 'UtilityTill' ? '🏢 CENTRAL UTILITY' : '💼 CASH TILL'}
+                              {tx.tillNumber === 'VehicleTill' ? '🏦 OPERATIONS 48277' : tx.tillNumber === 'UtilityTill' ? '💰 SAVINGS 871671' : '💼 CASH DRAWER'}
                             </span>
                           </td>
                           <td className="p-4 text-right">

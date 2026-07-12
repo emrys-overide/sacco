@@ -100,7 +100,7 @@ CREATE TABLE financial_ledger (
     member_id UUID REFERENCES sacco_members(id) ON DELETE RESTRICT,
     vehicle_id UUID REFERENCES sacco_vehicles(id) ON DELETE RESTRICT,
     type VARCHAR(10) NOT NULL CHECK (type IN ('Credit', 'Debit')),
-    category VARCHAR(50) NOT NULL CHECK (category IN ('Daily Contribution', 'Registration Fee', 'Management Fee', 'Office Expenses', 'Petty Cash', 'Penalty')),
+    category VARCHAR(50) NOT NULL CHECK (category IN ('Daily Contribution', 'Savings Contribution', 'Registration Fee', 'Management Fee', 'Office Expenses', 'Petty Cash', 'Penalty')),
     amount NUMERIC(12, 2) NOT NULL CHECK (amount > 0),
     description TEXT,
     recorded_by UUID NOT NULL REFERENCES sacco_users(id),

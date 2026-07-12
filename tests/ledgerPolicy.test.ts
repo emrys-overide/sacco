@@ -71,6 +71,40 @@ test('uses explicit savings and loan repayment fields when supplied', () => {
   assert.deepEqual(getDailyContributionBalanceDelta(transaction), { shares: 0, savings: 250, loan: -100 });
 });
 
+test('routes a dedicated savings-account credit entirely to member savings', () => {
+  const transaction = normalizeTransactionInput({
+    memberId: 'member-1',
+    memberName: 'Member One',
+    description: 'Co-op savings deposit',
+    refCode: 'SAVINGS-001',
+    type: 'Credit',
+    category: 'Savings Contribution',
+    amount: 1250,
+    tillNumber: 'UtilityTill'
+  });
+
+  assert.deepEqual(getDailyContributionBalanceDelta(transaction), {
+    shares: 0,
+    savings: 1250,
+    loan: 0
+  });
+});
+
+test('rejects savings entries routed to the operations account', () => {
+  assert.throws(
+    () => normalizeTransactionInput({
+      memberId: 'member-1',
+      description: 'Misrouted savings deposit',
+      refCode: 'SAVINGS-WRONG',
+      type: 'Credit',
+      category: 'Savings Contribution',
+      amount: 500,
+      tillNumber: 'VehicleTill'
+    }),
+    /account 871671/
+  );
+});
+
 test('matches payments by explicit assignment, plate, phone, then leaves them unmatched', () => {
   assert.equal(matchPaymentMember([member], '', '', member.id).matchMethod, 'Manual Assignment');
   assert.equal(matchPaymentMember([member], 'kcj402x', '').matchMethod, 'Vehicle Plate');

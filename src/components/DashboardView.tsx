@@ -236,7 +236,7 @@ export default function DashboardView({
   const [memberId, setMemberId] = useState('');
   const [personName, setPersonName] = useState('');
   const [vehiclePlate, setVehiclePlate] = useState('');
-  const [category, setCategory] = useState<'Daily Contribution' | 'Registration Fee' | 'Management Fee' | 'Office Expenses' | 'Petty Cash' | 'Penalty' | 'Utilities' | 'Equipment'>('Daily Contribution');
+  const [category, setCategory] = useState<'Daily Contribution' | 'Savings Contribution' | 'Registration Fee' | 'Management Fee' | 'Office Expenses' | 'Petty Cash' | 'Penalty' | 'Utilities' | 'Equipment'>('Daily Contribution');
   const [type, setType] = useState<'Credit' | 'Debit'>('Credit');
   const [amount, setAmount] = useState('');
   const [description, setDescription] = useState('');
@@ -270,14 +270,14 @@ export default function DashboardView({
 
   const fleetSparkData = getRecentDailySeries(transactions, transaction => transaction.type === 'Credit' && transaction.tillNumber === 'VehicleTill', 6)
     .map(day => day.amount);
-  const utilitySparkData = getRecentDailySeries(transactions, transaction => transaction.type === 'Debit' && transaction.tillNumber === 'UtilityTill', 6)
+  const utilitySparkData = getRecentDailySeries(transactions, transaction => transaction.type === 'Credit' && transaction.tillNumber === 'UtilityTill', 6)
     .map(day => day.amount);
   const recentWeekDates = new Set(getRecentDailySeries(transactions, () => true, 7).map(day => day.dateString));
   const weeklyCreditTotal = getRecentDailySeries(transactions, transaction => transaction.type === 'Credit', 7).reduce((sum, day) => sum + day.amount, 0);
   const weeklySavings = transactions
-    .filter(transaction => transaction.type === 'Credit' && transaction.savingsContribution !== undefined)
+    .filter(transaction => transaction.type === 'Credit' && (transaction.savingsContribution !== undefined || transaction.category === 'Savings Contribution'))
     .filter(transaction => recentWeekDates.has(transaction.timestamp.slice(0, 10)))
-    .reduce((sum, transaction) => sum + Number(transaction.savingsContribution || 0), 0);
+    .reduce((sum, transaction) => sum + (transaction.category === 'Savings Contribution' ? transaction.amount : Number(transaction.savingsContribution || 0)), 0);
   const weeklyLoanRepayments = transactions
     .filter(transaction => transaction.type === 'Credit' && transaction.loanRepay !== undefined)
     .filter(transaction => recentWeekDates.has(transaction.timestamp.slice(0, 10)))
@@ -291,9 +291,12 @@ export default function DashboardView({
     setCategory(cat);
     if (isExpenseTransactionCategory(cat)) {
       setType('Debit');
-      setTillNumber('UtilityTill');
+      setTillNumber('VehicleTill');
       setMemberId('');
       setVehiclePlate('');
+    } else if (cat === 'Savings Contribution') {
+      setType('Credit');
+      setTillNumber('UtilityTill');
     } else {
       setType('Credit');
       setTillNumber('VehicleTill');
@@ -623,7 +626,7 @@ export default function DashboardView({
         >
           <div>
             <div className="flex items-center justify-between">
-              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest font-mono">Fleet Till: 824 9102</span>
+              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest font-mono">Operations Account: 48277</span>
               <div className="w-8 h-8 rounded-full bg-emerald-50 flex items-center justify-center group-hover:scale-110 transition-transform duration-300">
                 <Activity className="w-4 h-4 text-emerald-600" />
               </div>
@@ -634,13 +637,13 @@ export default function DashboardView({
           </div>
           <div className="flex items-end justify-between mt-4 pt-4 border-t border-slate-50">
             <p className="text-[10px] text-slate-400 font-medium">
-              Collects daily fleet quota
+              Daily collections and operations
             </p>
             <Sparkline data={fleetSparkData} color="#10b981" />
           </div>
         </motion.div>
 
-        {/* Card 3: Utility Till */}
+        {/* Card 3: Savings account */}
         <motion.div 
           initial={{ opacity: 0, y: 15 }}
           animate={{ opacity: 1, y: 0 }}
@@ -649,18 +652,18 @@ export default function DashboardView({
         >
           <div>
             <div className="flex items-center justify-between">
-              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest font-mono">Utility Till: 481 0294</span>
+              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest font-mono">Savings Account: 871671</span>
               <div className="w-8 h-8 rounded-full bg-rose-50 flex items-center justify-center group-hover:scale-110 transition-transform duration-300">
                 <AlertCircle className="w-4 h-4 text-rose-500" />
               </div>
             </div>
             <p className="text-2xl font-black text-slate-800 mt-3 font-mono tracking-tight">
-              KES {transactions.filter(t => t.tillNumber === 'UtilityTill' && t.type === 'Debit').reduce((acc, t) => acc + t.amount, 0).toLocaleString()}
+              KES {transactions.filter(t => t.tillNumber === 'UtilityTill' && t.type === 'Credit').reduce((acc, t) => acc + t.amount, 0).toLocaleString()}
             </p>
           </div>
           <div className="flex items-end justify-between mt-4 pt-4 border-t border-slate-50">
             <div className="text-[10px] text-rose-600 font-bold flex items-center bg-rose-50/70 px-2 py-0.5 rounded border border-rose-100">
-              Operations debits
+              Dedicated savings deposits
             </div>
             <Sparkline data={utilitySparkData} color="#ef4444" />
           </div>
@@ -814,7 +817,7 @@ export default function DashboardView({
                               ? 'bg-blue-50 text-blue-700 border border-blue-100'
                               : 'bg-slate-100 text-slate-600 border border-slate-200'
                           }`}>
-                            {tx.tillNumber === 'VehicleTill' ? 'Till: 8249102 (Fleet)' : tx.tillNumber === 'UtilityTill' ? 'Till: 4810294 (Admin)' : 'Cash Drawer'}
+                            {tx.tillNumber === 'VehicleTill' ? 'Account: 48277 (Operations)' : tx.tillNumber === 'UtilityTill' ? 'Account: 871671 (Savings)' : 'Cash Drawer'}
                           </span>
                         </div>
                       </div>
@@ -856,6 +859,7 @@ export default function DashboardView({
                     className="w-full p-2.5 border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 bg-white"
                   >
                     <option value="Daily Contribution">Daily Contribution</option>
+                    <option value="Savings Contribution">Savings Contribution</option>
                     <option value="Registration Fee">Registration Fee</option>
                     <option value="Management Fee">Management Fee</option>
                     <option value="Office Expenses">Office Expenses</option>
@@ -924,15 +928,15 @@ export default function DashboardView({
 
               <div>
                 <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
-                  Active Till Account Assignment *
+                  Co-op Account Assignment *
                 </label>
                 <select
                   value={tillNumber}
                   onChange={(e) => setTillNumber(e.target.value as any)}
                   className="w-full p-2.5 border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 bg-white font-mono"
                 >
-                  <option value="VehicleTill">Till No: 824 9102 (Sacco Vehicle Fleet Account)</option>
-                  <option value="UtilityTill">Till No: 481 0294 (Sacco Administrative Utility Account)</option>
+                  <option value="VehicleTill">Account 48277 (Operations / Daily Collection)</option>
+                  <option value="UtilityTill">Account 871671 (Member Savings)</option>
                   <option value="None">None (Direct Petty Cash Voucher Draw)</option>
                 </select>
               </div>

@@ -4,6 +4,7 @@ import { normalizeTransactionInput, type LedgerInput } from './ledgerPolicy';
 
 const CATEGORY_TO_ACCOUNT: Record<TransactionCategory, string> = {
   'Daily Contribution': 'DailyContribution',
+  'Savings Contribution': 'Savings',
   'Registration Fee': 'RegistrationFee',
   'Management Fee': 'ManagementFee',
   'Office Expenses': 'OfficeExpenses',
@@ -131,6 +132,7 @@ function mapPayment(row: QueryResultRow): PaymentRecord {
     tillNumber: row.till_type,
     category: ACCOUNT_TO_CATEGORY[metadata.accountType] || metadata.category || 'Daily Contribution',
     accountReference: row.bill_ref_number || '',
+    destinationAccount: row.destination_account_number || metadata.destinationAccount,
     payerName: row.payer_name || '',
     payerPhone: row.msisdn || '',
     memberId: row.matched_member_id ? String(row.matched_member_id) : undefined,
@@ -180,11 +182,14 @@ export async function listPostgresMembers(pool: Pool): Promise<Member[]> {
            (CASE WHEN le.transaction_type = 'Credit' THEN 1 ELSE -1 END) *
            (CASE WHEN le.metadata ? 'savingsContribution' THEN 0 ELSE le.amount * 0.30 END)
            ELSE 0 END) AS shares_amount,
-         SUM(CASE WHEN le.account_type = 'DailyContribution' THEN
-           (CASE WHEN le.transaction_type = 'Credit' THEN 1 ELSE -1 END) *
-           (CASE WHEN le.metadata ? 'savingsContribution'
-             THEN COALESCE((le.metadata->>'savingsContribution')::numeric, 0)
-             ELSE le.amount * 0.70 END)
+         SUM(CASE
+           WHEN le.account_type = 'Savings' THEN
+             (CASE WHEN le.transaction_type = 'Credit' THEN 1 ELSE -1 END) * le.amount
+           WHEN le.account_type = 'DailyContribution' THEN
+             (CASE WHEN le.transaction_type = 'Credit' THEN 1 ELSE -1 END) *
+             (CASE WHEN le.metadata ? 'savingsContribution'
+               THEN COALESCE((le.metadata->>'savingsContribution')::numeric, 0)
+               ELSE le.amount * 0.70 END)
            ELSE 0 END) AS savings_amount,
          SUM((CASE WHEN le.transaction_type = 'Credit' THEN 1 ELSE -1 END) *
            COALESCE((le.metadata->>'loanRepay')::numeric, 0)) AS loan_repaid
@@ -425,31 +430,33 @@ export async function savePostgresPayment(pool: Pool | PoolClient, payment: Paym
     accountType: CATEGORY_TO_ACCOUNT[payment.category],
     memberName: payment.memberName,
     vehiclePlate: payment.vehiclePlate,
-    note: payment.note
+    note: payment.note,
+    destinationAccount: payment.destinationAccount
   };
   try {
     const result = await pool.query(
       `INSERT INTO mpesa_payments (
          trans_id, bill_ref_number, business_short_code, msisdn, payer_name, till_type,
-         amount, transaction_time, status, match_method, matched_member_id,
+         amount, transaction_time, status, match_method, matched_member_id, destination_account_number,
          matched_vehicle_id, ledger_entry_id, raw_payload, source, metadata
        ) VALUES (
-         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-         (SELECT id FROM vehicles WHERE upper(replace(plate_number, ' ', '')) = upper(replace($12, ' ', '')) LIMIT 1),
-         $13, $14::jsonb, $15, $16::jsonb
+         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+         (SELECT id FROM vehicles WHERE upper(replace(plate_number, ' ', '')) = upper(replace($13, ' ', '')) LIMIT 1),
+         $14, $15::jsonb, $16, $17::jsonb
        )
        ON CONFLICT (trans_id) DO UPDATE SET
          status = EXCLUDED.status, match_method = EXCLUDED.match_method,
          matched_member_id = EXCLUDED.matched_member_id,
+         destination_account_number = EXCLUDED.destination_account_number,
          matched_vehicle_id = EXCLUDED.matched_vehicle_id,
          ledger_entry_id = EXCLUDED.ledger_entry_id,
          metadata = EXCLUDED.metadata,
          reconciled_at = CASE WHEN EXCLUDED.status = 'Reconciled' THEN now() ELSE mpesa_payments.reconciled_at END
        RETURNING *`,
       [
-        payment.refCode, payment.accountReference, payment.tillNumber === 'VehicleTill' ? '8249102' : '4810294',
+        payment.refCode, payment.accountReference, '400200',
         payment.payerPhone, payment.payerName, payment.tillNumber, payment.amount, payment.timestamp,
-        payment.status, MATCH_TO_DB[payment.matchMethod], payment.memberId || null, payment.vehiclePlate || '',
+        payment.status, MATCH_TO_DB[payment.matchMethod], payment.memberId || null, payment.destinationAccount || null, payment.vehiclePlate || '',
         payment.transactionId || null, JSON.stringify(payment.rawPayload || {}),
         payment.source === 'Webhook' ? 'DarajaWebhook' : 'Manual', JSON.stringify(metadata)
       ]

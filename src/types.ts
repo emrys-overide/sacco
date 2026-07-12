@@ -41,7 +41,7 @@ export interface Vehicle {
 export type TillType = 'VehicleTill' | 'UtilityTill' | 'None';
 export type VehicleClass = 'Nissan' | 'Sienta' | 'Member Contribution';
 export type TransactionType = 'Credit' | 'Debit';
-export type TransactionCategory = 'Daily Contribution' | 'Registration Fee' | 'Management Fee' | 'Office Expenses' | 'Petty Cash' | 'Penalty' | 'Utilities' | 'Equipment';
+export type TransactionCategory = 'Daily Contribution' | 'Savings Contribution' | 'Registration Fee' | 'Management Fee' | 'Office Expenses' | 'Petty Cash' | 'Penalty' | 'Utilities' | 'Equipment';
 
 export interface Transaction {
   id: string;
@@ -84,6 +84,7 @@ export interface PaymentRecord {
   tillNumber: Exclude<TillType, 'None'>;
   category: TransactionCategory;
   accountReference: string;
+  destinationAccount?: string;
   payerName: string;
   payerPhone: string;
   memberId?: string;

@@ -216,7 +216,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       type: 'Debit',
       category: 'Office Expenses',
       amount: 200,
-      tillNumber: 'UtilityTill'
+      tillNumber: 'VehicleTill'
     }
   });
   const daily = await request('/api/transactions', 201, {
@@ -266,6 +266,36 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
   assert.equal(manualPayment.payment.status, 'Reconciled');
   assert.equal(manualPayment.payment.payerPhone, firstMember.phoneNumber);
   assert.equal(manualPayment.payment.vehiclePlate, vehicle.plateNumber);
+  assert.equal(manualPayment.payment.destinationAccount, '48277');
+
+  const savingsPayment = await request('/api/mpesa/log-payment', 200, {
+    method: 'POST',
+    token,
+    body: {
+      memberId: firstMember.id,
+      accountReference: '',
+      payerPhone: firstMember.phoneNumber,
+      amount: 400,
+      category: 'Savings Contribution',
+      refCode: 'E2E-COOP-SAVINGS-1',
+      tillNumber: 'UtilityTill'
+    }
+  });
+  assert.equal(savingsPayment.payment.status, 'Reconciled');
+  assert.equal(savingsPayment.payment.destinationAccount, '871671');
+
+  await request('/api/mpesa/log-payment', 400, {
+    method: 'POST',
+    token,
+    body: {
+      memberId: firstMember.id,
+      payerPhone: firstMember.phoneNumber,
+      amount: 100,
+      category: 'Daily Contribution',
+      refCode: 'E2E-COOP-WRONG-ROUTE',
+      tillNumber: 'UtilityTill'
+    }
+  });
 
   await request('/api/mpesa/log-payment', 400, {
     method: 'POST',
@@ -361,7 +391,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
   const memberTwo = finalMembers.find(member => member.id === secondMember.id);
   assert.deepEqual(
     { shares: memberOne.sharesAmount, savings: memberOne.savingsAmount },
-    { shares: 450, savings: 1050 }
+    { shares: 450, savings: 1450 }
   );
   assert.deepEqual(
     { shares: memberTwo.sharesAmount, savings: memberTwo.savingsAmount },
@@ -369,10 +399,10 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
   );
 
   const status = await request('/api/system/status', 200, { token });
-  assert.equal(status.totalTransactionsCount, databaseUrl ? 7 : 5);
+  assert.equal(status.totalTransactionsCount, databaseUrl ? 8 : 6);
   assert.equal(status.totalMembersCount, 2);
   assert.equal(status.totalFleetCount, 1);
-  assert.equal(status.netCashFlow, 2050);
+  assert.equal(status.netCashFlow, 2450);
   assert.equal(status.totalCapitalReserve, 675);
-  assert.equal(status.totalMemberSavings, 1575);
+  assert.equal(status.totalMemberSavings, 1975);
 });
