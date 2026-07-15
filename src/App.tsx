@@ -1,10 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { signOut } from 'firebase/auth';
-import type { User, Member, Vehicle, Transaction, UserRole } from './types';
+import type { MemberPortalData, User, Member, Vehicle, Transaction, UserRole } from './types';
 import { Menu, ShieldAlert, Search, X } from 'lucide-react';
 import { canRole, STORAGE_KEYS } from './lib/auth';
 import { fetchSaccoJson, postSaccoJson } from './lib/api';
-import { firebaseAuth, onIdTokenChanged } from './lib/firebase';
 
 // Subcomponents
 import LoginModal from './components/LoginModal';
@@ -18,6 +16,7 @@ import DailyCollectionsView from './components/DailyCollectionsView';
 import BlueprintView from './components/BlueprintView';
 import ExpensesView from './components/ExpensesView';
 import PaybillView from './components/PaybillView';
+import MemberPortal from './components/MemberPortal';
 
 const MEMBER_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary', 'Treasurer'];
 const VEHICLE_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary'];
@@ -42,7 +41,7 @@ export default function App() {
   // Authentication State
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [authToken, setAuthToken] = useState('');
-  const [isAuthInitializing, setIsAuthInitializing] = useState(Boolean(firebaseAuth));
+  const [isAuthInitializing] = useState(false);
 
   // Security Alert State
   const [securityAlert, setSecurityAlert] = useState<{ title: string; message: string } | null>(null);
@@ -74,44 +73,9 @@ export default function App() {
   const [members, setMembers] = useState<Member[]>([]);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [memberPortal, setMemberPortal] = useState<MemberPortalData | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [refreshTrigger, setRefreshTrigger] = useState<number>(0);
-
-  useEffect(() => {
-    if (!firebaseAuth) {
-      setIsAuthInitializing(false);
-      return;
-    }
-
-    return onIdTokenChanged(firebaseAuth, async firebaseUser => {
-      if (!firebaseUser) {
-        setCurrentUser(null);
-        setAuthToken('');
-        setIsAuthInitializing(false);
-        return;
-      }
-
-      try {
-        const token = await firebaseUser.getIdToken();
-        const response = await fetch('/api/auth/session', {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        const data = await response.json();
-        if (!response.ok) {
-          throw new Error(data.error || 'Could not restore the SACCO session.');
-        }
-        setCurrentUser(data.user);
-        setAuthToken(token);
-      } catch (error: any) {
-        console.error('Could not restore authenticated session:', error);
-        setCurrentUser(null);
-        setAuthToken('');
-      } finally {
-        setIsAuthInitializing(false);
-      }
-    });
-  }, []);
 
   // Sync state from server on component mount or profile switch
   useEffect(() => {
@@ -124,6 +88,16 @@ export default function App() {
     async function loadSaccoData() {
       try {
         setIsLoading(true);
+        if (currentUser.role === 'Member') {
+          const portal = await fetchSaccoJson<MemberPortalData>('/api/member-portal', {}, authToken);
+          if (active) {
+            setMemberPortal(portal);
+            setMembers([portal.member]);
+            setVehicles(portal.vehicles);
+            setTransactions(portal.transactions);
+          }
+          return;
+        }
         const [mData, vData, tData] = await Promise.all([
           fetchSaccoJson<Member[]>('/api/members', {}, authToken),
           fetchSaccoJson<Vehicle[]>('/api/vehicles', {}, authToken),
@@ -134,6 +108,7 @@ export default function App() {
           setMembers(mData);
           setVehicles(vData);
           setTransactions(tData);
+          setMemberPortal(null);
         }
       } catch (error) {
         console.error('Critical error syncing SACCO registers:', error);
@@ -159,13 +134,11 @@ export default function App() {
 
   const handleLogin = (user: User, token: string) => {
     setCurrentUser(user);
+    setCurrentTab(user.role === 'Member' ? 'My Account' : 'Dashboard');
     setAuthToken(token);
   };
 
   const handleLogout = () => {
-    if (firebaseAuth) {
-      signOut(firebaseAuth).catch(error => console.warn('Firebase sign-out failed:', error));
-    }
     setCurrentUser(null);
     setAuthToken('');
   };
@@ -338,6 +311,12 @@ export default function App() {
       );
     }
 
+    if (currentUser.role === 'Member') {
+      return memberPortal ? <MemberPortal data={memberPortal} /> : (
+        <div className="flex-1 flex items-center justify-center bg-slate-50 text-sm text-slate-600">Loading your member account...</div>
+      );
+    }
+
     if (globalSearchQuery.trim()) {
       return (
         <GlobalSearchResultsView
@@ -503,7 +482,7 @@ export default function App() {
           <div className="hidden md:flex items-center space-x-3">
             <span className="topbar-view-orb" aria-hidden="true"></span>
             <span className="text-xs font-bold text-slate-800 uppercase tracking-widest font-display">
-              {globalSearchQuery.trim() ? 'GLOBAL SYSTEM SEARCH' : `${currentTab}`}
+              {currentUser.role === 'Member' ? 'MY MEMBER ACCOUNT' : globalSearchQuery.trim() ? 'GLOBAL SYSTEM SEARCH' : `${currentTab}`}
             </span>
             <span className="text-slate-300 font-light text-xs">|</span>
             <span className="text-[9px] bg-blue-50 text-blue-700 border border-blue-200/50 rounded-md font-mono px-2 py-0.5 font-bold uppercase tracking-wider">
@@ -514,12 +493,12 @@ export default function App() {
           {/* Mobile-only menu quick trigger indicators (if sidebar is closed or open) */}
           <div className="md:hidden flex items-center space-x-2">
             <span className="text-xs font-black text-slate-700 uppercase tracking-wider font-mono">
-              {globalSearchQuery.trim() ? 'SEARCH' : currentTab.toUpperCase()}
+              {currentUser.role === 'Member' ? 'MY ACCOUNT' : globalSearchQuery.trim() ? 'SEARCH' : currentTab.toUpperCase()}
             </span>
           </div>
 
           {/* Centered/Right: Search input with modern tailwind aesthetics */}
-          <div className="w-full max-w-[280px] sm:max-w-md relative flex items-center">
+          {currentUser.role !== 'Member' && <div className="w-full max-w-[280px] sm:max-w-md relative flex items-center">
             <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
               <Search className="h-3.5 w-3.5 text-slate-400" />
             </div>
@@ -541,7 +520,7 @@ export default function App() {
                 <X className="h-3.5 w-3.5" />
               </button>
             )}
-          </div>
+          </div>}
 
           {/* Right Side: Active role pill */}
           <div className="hidden sm:flex items-center space-x-3">

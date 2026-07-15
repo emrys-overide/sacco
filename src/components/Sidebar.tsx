@@ -46,7 +46,7 @@ export default function Sidebar({
   const [isHovered, setIsHovered] = React.useState(false);
   const displayCollapsed = isCollapsed && !isHovered;
 
-  const menuItems = [
+  const administratorMenuItems = [
     { name: 'Dashboard', icon: <LayoutDashboard className="w-4 h-4" /> },
     { name: 'Daily Collections', icon: <ClipboardList className="w-4 h-4" /> },
     { name: 'Expenses', icon: <Receipt className="w-4 h-4" /> },
@@ -56,6 +56,9 @@ export default function Sidebar({
     { name: 'Reports', icon: <FileSpreadsheet className="w-4 h-4" /> },
     { name: 'Blueprint', icon: <FileCode className="w-4 h-4" /> }
   ];
+  const menuItems = currentUser.role === 'Member'
+    ? [{ name: 'My Account', icon: <LayoutDashboard className="w-4 h-4" /> }]
+    : administratorMenuItems;
 
   return (
     <aside 
@@ -130,7 +133,7 @@ export default function Sidebar({
       {/* Nav Actions inside Scrollable Container */}
       <div className="flex-1 overflow-y-auto space-y-5 py-4 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent">
         <nav className={`p-3 space-y-1 ${displayCollapsed ? 'md:flex md:flex-col md:items-center md:px-2' : ''}`}>
-          {!displayCollapsed && (
+          {!displayCollapsed && currentUser.role !== 'Member' && (
             <p className="px-2 pb-2 text-[8px] font-bold uppercase tracking-[0.22em] text-emerald-200/45 font-mono">
               Operations workspace
             </p>
@@ -190,8 +193,8 @@ export default function Sidebar({
           })}
         </nav>
 
-        {/* Clean Database Controls */}
-        {!displayCollapsed ? (
+        {/* Local reset controls are an administrator-only convenience. */}
+        {currentUser.role !== 'Member' && (!displayCollapsed ? (
           <div className="sidebar-section-card mx-4 p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-[9px] font-mono font-bold text-slate-500 uppercase tracking-widest">
@@ -240,7 +243,7 @@ export default function Sidebar({
               </button>
             </div>
           </div>
-        )}
+        ))}
       </div>
 
       {/* Profile Selector & User Meta (Fixed Bottom) */}

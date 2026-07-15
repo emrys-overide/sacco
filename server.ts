@@ -5,20 +5,25 @@ import crypto from 'node:crypto';
 import { createServer as createViteServer } from 'vite';
 import { Firestore } from '@google-cloud/firestore';
 import { Pool } from 'pg';
-import { applicationDefault, cert, getApps, initializeApp as initializeFirebaseAdminApp } from 'firebase-admin/app';
-import { getAuth, type DecodedIdToken } from 'firebase-admin/auth';
 import {
   PersistenceError,
   correctPostgresTransaction,
+  assignPostgresDriver,
   createPostgresMember,
   createPostgresTransaction,
   createPostgresVehicle,
   findPostgresPaymentByRef,
+  getPostgresMember,
+  listPostgresDriverAssignmentsByOwner,
+  listPostgresLoansByMember,
   listPostgresMembers,
   listPostgresPayments,
+  listPostgresPaymentsByMember,
   listPostgresTransactions,
+  listPostgresTransactionsByMember,
   listPostgresUsers,
   listPostgresVehicles,
+  listPostgresVehiclesByOwner,
   reconcilePostgresPayment,
   reversePostgresTransaction,
   savePostgresPayment
@@ -42,6 +47,16 @@ import {
 } from './src/lib/inputValidation';
 import { requiresRegisteredMember } from './src/lib/transactionPolicy';
 import {
+  hasActiveAccount,
+  hasPermission,
+  isMemberUser,
+  memberOwnsId,
+  memberScopeId,
+  type AccountStatus,
+  type SaccoPermission
+} from './src/server/accessControl';
+import { createBase32Secret, createTotpUri, verifyTotpCode } from './src/server/totp';
+import {
   COOP_PAYBILL_NUMBER,
   findCollectionAccount,
   getCollectionAccountByTill,
@@ -49,6 +64,7 @@ import {
 } from './src/lib/collectionAccounts';
 import type {
   Member,
+  MemberPortalData,
   PaymentRecord,
   PaymentSource,
   PaymentStatus,
@@ -93,8 +109,19 @@ type AuthorizedUser = {
   phone: string;
   firebaseUid?: string;
   isActive?: boolean;
+  accountStatus?: AccountStatus;
+  linkedMemberId?: string;
   devPassword?: string;
+  totpSecret?: string;
+  totpEnabledAt?: string;
 };
+
+type PasswordAuthenticatedUser = AuthorizedUser & {
+  totpSecretCiphertext?: string;
+  totpEnabledAt?: string;
+};
+
+const TOTP_REQUIRED_ROLES: readonly UserRole[] = ['Chairman', 'Treasurer', 'Secretary', 'Auditor', 'Accountant'];
 
 const initialUsers: AuthorizedUser[] = [];
 const initialMembers: Member[] = [];
@@ -113,85 +140,25 @@ const postgresPool = process.env.DATABASE_URL
     })
   : null;
 
-function getFirebaseAdminAuth() {
-  const projectId = process.env.FIREBASE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT;
-  if (!getApps().length) {
-    if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-      initializeFirebaseAdminApp({
-        credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON)),
-        projectId
-      });
-    } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-      initializeFirebaseAdminApp({
-        credential: applicationDefault(),
-        projectId
-      });
-    } else if (projectId) {
-      // Verifying Firebase ID tokens only requires the project ID. The Admin
-      // SDK fetches Google's public signing certificates without a private key.
-      initializeFirebaseAdminApp({ projectId });
-    } else {
-      return null;
-    }
-  }
-
-  return getAuth();
-}
-
 function mapDbUser(row: any): AuthorizedUser {
   return {
     id: String(row.id),
     name: row.full_name,
-    email: row.email,
+    email: row.email || '',
     role: row.role as UserRole,
     phone: row.phone || '',
     firebaseUid: row.firebase_uid || undefined,
-    isActive: row.is_active !== false
+    isActive: row.is_active !== false,
+    accountStatus: (row.account_status || 'Active') as AccountStatus,
+    linkedMemberId: row.linked_member_id ? String(row.linked_member_id) : undefined
   };
 }
 
-async function findSaccoUserByFirebaseToken(decodedToken: DecodedIdToken): Promise<AuthorizedUser> {
-  const email = String(decodedToken.email || '').toLowerCase();
-  if (postgresPool) {
-    const result = await postgresPool.query(
-      `SELECT id, firebase_uid, full_name, email, phone, role, is_active
-       FROM users
-       WHERE (firebase_uid = $1 OR lower(email) = $2)
-       LIMIT 1`,
-      [decodedToken.uid, email]
-    );
-
-    if (!result.rowCount) {
-      throw new HttpError(403, 'Firebase identity is valid, but no active SACCO profile exists for this user.', 'SACCO_PROFILE_NOT_FOUND');
-    }
-
-    const user = mapDbUser(result.rows[0]);
-    if (!user.isActive) {
-      throw new HttpError(403, 'This SACCO profile has been deactivated.', 'SACCO_PROFILE_DISABLED');
-    }
-
-    if (!user.firebaseUid && user.id) {
-      await postgresPool.query(
-        'UPDATE users SET firebase_uid = $1, last_login_at = now() WHERE id = $2',
-        [decodedToken.uid, user.id]
-      );
-      user.firebaseUid = decodedToken.uid;
-    } else {
-      await postgresPool.query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
-    }
-
-    return user;
-  }
-
-  const user = localStore.users.find(item => item.email.toLowerCase() === email);
-  if (!user) {
-    throw new HttpError(403, 'Firebase identity is valid, but no local SACCO profile exists for this email.', 'SACCO_PROFILE_NOT_FOUND');
-  }
-
+function mapPasswordAuthenticatedUser(row: any): PasswordAuthenticatedUser {
   return {
-    ...user,
-    firebaseUid: decodedToken.uid,
-    isActive: true
+    ...mapDbUser(row),
+    totpSecretCiphertext: row.totp_secret_ciphertext || undefined,
+    totpEnabledAt: row.totp_enabled_at ? new Date(row.totp_enabled_at).toISOString() : undefined
   };
 }
 
@@ -225,7 +192,7 @@ async function recordAuditLog(req: express.Request, action: string, entityTable:
       ]
     );
   } catch (error: any) {
-    console.warn('[Sacco Audit] Failed to write audit log:', error.message || error);
+    console.warn('[Sacco Audit] Failed to write audit log.');
   }
 }
 
@@ -250,32 +217,31 @@ async function countSaccoUsers(): Promise<number> {
 }
 
 async function createFirstAdminProfile(input: {
-  firebaseUid?: string;
   email: string;
   fullName: string;
   phone?: string;
-  devPassword?: string;
+  password: string;
 }): Promise<AuthorizedUser> {
   const email = input.email.trim().toLowerCase();
   const fullName = input.fullName.trim();
-  if (!email || !fullName) {
-    throw new HttpError(400, 'Full name and email are required to create the first SACCO admin.', 'BOOTSTRAP_FIELDS_REQUIRED');
+  if (!email || !fullName || input.password.length < 8) {
+    throw new HttpError(400, 'Full name, email, and a password of at least 8 characters are required to create the first SACCO admin.', 'BOOTSTRAP_FIELDS_REQUIRED');
   }
 
   if (postgresPool) {
     const result = await postgresPool.query(
-      `INSERT INTO users (firebase_uid, full_name, email, phone, role, password_hash, is_active)
-       VALUES ($1, $2, $3, $4, 'Chairman', crypt(NULLIF($5, ''), gen_salt('bf')), TRUE)
+      `INSERT INTO users (full_name, email, phone, role, password_hash, is_active, account_status, approved_at)
+       VALUES ($1, $2, $3, 'Chairman', crypt($4, gen_salt('bf')), TRUE, 'Active', now())
        ON CONFLICT (email) DO UPDATE SET
-         firebase_uid = COALESCE(users.firebase_uid, EXCLUDED.firebase_uid),
          full_name = EXCLUDED.full_name,
          phone = EXCLUDED.phone,
          role = 'Chairman',
-         password_hash = COALESCE(users.password_hash, EXCLUDED.password_hash),
+         password_hash = EXCLUDED.password_hash,
          is_active = TRUE,
+         account_status = 'Active',
          updated_at = now()
-       RETURNING id, firebase_uid, full_name, email, phone, role, is_active`,
-      [input.firebaseUid || null, fullName, email, input.phone || null, input.devPassword || null]
+       RETURNING id, firebase_uid, full_name, email, phone, role, is_active, account_status, linked_member_id`,
+      [fullName, email, input.phone || null, input.password]
     );
     return mapDbUser(result.rows[0]);
   }
@@ -286,9 +252,9 @@ async function createFirstAdminProfile(input: {
     email,
     phone: input.phone || '',
     role: 'Chairman',
-    firebaseUid: input.firebaseUid,
     isActive: true,
-    devPassword: input.devPassword
+    accountStatus: 'Active',
+    devPassword: input.password
   };
 
   await safeDbOperation(
@@ -359,7 +325,7 @@ function signJwt(user: AuthorizedUser): { token: string; expiresAt: string } {
 async function findDevelopmentUserByEmail(email: string): Promise<AuthorizedUser | null> {
   if (postgresPool) {
     const result = await postgresPool.query(
-      `SELECT id, firebase_uid, full_name, email, phone, role, is_active
+      `SELECT id, firebase_uid, full_name, email, phone, role, is_active, account_status, linked_member_id
        FROM users
        WHERE lower(email) = $1
        LIMIT 1`,
@@ -374,30 +340,69 @@ async function findDevelopmentUserByEmail(email: string): Promise<AuthorizedUser
         const snap = await firestoreDb.collection('users').where('email', '==', email).limit(1).get();
         return snap.empty ? null : snap.docs[0].data() as AuthorizedUser;
       },
-      () => localStore.users.find(item => item.email.toLowerCase() === email) || null,
+      () => localStore.users.find(item => item.email && item.email.toLowerCase() === email) || null,
       'users'
     );
   }
 
-  return localStore.users.find(item => item.email.toLowerCase() === email) || null;
+  return localStore.users.find(item => item.email && item.email.toLowerCase() === email) || null;
 }
 
-async function authenticateDevelopmentUser(email: string, password: string): Promise<AuthorizedUser | null> {
+async function findSaccoUserById(id: string): Promise<AuthorizedUser | null> {
   if (postgresPool) {
     const result = await postgresPool.query(
-      `SELECT id, firebase_uid, full_name, email, phone, role, is_active
-       FROM users
-       WHERE lower(email) = $1
-         AND password_hash IS NOT NULL
-         AND password_hash = crypt($2, password_hash)
-       LIMIT 1`,
-      [email, password]
+      `SELECT id, firebase_uid, full_name, email, phone, role, is_active, account_status, linked_member_id
+       FROM users WHERE id = $1 LIMIT 1`,
+      [id]
     );
     return result.rowCount ? mapDbUser(result.rows[0]) : null;
   }
+  return localStore.users.find(item => item.id === id) || null;
+}
 
-  const user = await findDevelopmentUserByEmail(email);
-  return user?.devPassword && password === user.devPassword ? user : null;
+function normalizedPhone(value: unknown): string {
+  return sanitizePhoneNumber(value).replace(/\D/g, '');
+}
+
+async function authenticatePasswordUser(identifierValue: unknown, password: string): Promise<PasswordAuthenticatedUser | null> {
+  const identifier = String(identifierValue || '').trim();
+  const phone = normalizedPhone(identifier);
+  const email = identifier.toLowerCase();
+  if (!identifier || !password || (!phone && !email.includes('@'))) return null;
+
+  if (postgresPool) {
+    const result = await postgresPool.query(
+      `SELECT id, firebase_uid, full_name, email, phone, role, is_active, account_status, linked_member_id,
+              totp_secret_ciphertext, totp_enabled_at
+       FROM users
+       WHERE (
+         (
+           role = 'Member'
+           AND $1 <> ''
+           AND regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = $1
+         ) OR (
+           role <> 'Member'
+           AND (
+             ($1 <> '' AND regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = $1)
+             OR ($2 LIKE '%@%' AND lower(COALESCE(email, '')) = $2)
+           )
+         )
+       )
+       AND password_hash IS NOT NULL
+         AND password_hash = crypt($3, password_hash)
+       ORDER BY CASE WHEN role = 'Member' THEN 0 ELSE 1 END
+       LIMIT 1`,
+      [phone, email, password]
+    );
+    return result.rowCount ? mapPasswordAuthenticatedUser(result.rows[0]) : null;
+  }
+
+  const user = localStore.users.find(item => {
+    const itemPhone = normalizedPhone(item.phone);
+    return (item.role === 'Member' && phone && itemPhone === phone)
+      || (item.role !== 'Member' && ((phone && itemPhone === phone) || (email.includes('@') && item.email?.toLowerCase() === email)));
+  });
+  return user?.devPassword && password === user.devPassword ? { ...user, totpSecretCiphertext: user.totpSecret, totpEnabledAt: user.totpEnabledAt } : null;
 }
 
 async function verifyJwt(token: string): Promise<AuthorizedUser> {
@@ -431,15 +436,14 @@ async function verifyJwt(token: string): Promise<AuthorizedUser> {
     throw new HttpError(401, 'Authentication token is expired or not valid for this API.', 'JWT_EXPIRED');
   }
 
-  // Local fallback profiles are recreated when the development server restarts.
-  // Their temporary internal ID can change, but the signed email and role remain
-  // the stable identity. This keeps an otherwise valid browser session usable.
-  const tokenEmail = String(payload.email || '').trim().toLowerCase();
-  const user = await findDevelopmentUserByEmail(tokenEmail);
-  if (!user || user.role !== payload.role || user.isActive === false) {
+  const user = await findSaccoUserById(String(payload.sub || ''));
+  if (!user || user.role !== payload.role || !hasActiveAccount(user)) {
     throw new HttpError(401, 'Authentication token user is no longer authorized.', 'JWT_USER_REVOKED');
   }
 
+  if (isMemberUser(user) && !user.linkedMemberId) {
+    throw new HttpError(401, 'Authentication token user is no longer authorized.', 'JWT_USER_REVOKED');
+  }
   return user;
 }
 
@@ -544,7 +548,16 @@ const localStore = {
   vehicles: [...initialVehicles],
   transactions: [...initialTransactions],
   payments: [] as PaymentRecord[],
-  mpesaConfig: { ...defaultMPesaConfig }
+  mpesaConfig: { ...defaultMPesaConfig },
+  mfaChallenges: [] as Array<{
+    id: string;
+    userId: string;
+    purpose: 'TotpLogin' | 'TotpEnrollment';
+    expiresAt: string;
+    attemptCount: number;
+    maxAttempts: number;
+    usedAt?: string;
+  }>
 };
 
 // Firestore is used only when its development credentials are configured.
@@ -554,6 +567,186 @@ let useFirestore = Boolean(
   process.env.GCLOUD_PROJECT
 );
 const allowInMemoryStore = !isProduction && process.env.ALLOW_IN_MEMORY_DB === 'true';
+
+function passwordAuthenticationEnabled(): boolean {
+  return process.env.PASSWORD_AUTH_ENABLED !== 'false';
+}
+
+function requiresTotp(user: AuthorizedUser): boolean {
+  return TOTP_REQUIRED_ROLES.includes(user.role);
+}
+
+function getTotpEncryptionKey(): Buffer {
+  const configured = String(process.env.TOTP_ENCRYPTION_KEY || '').trim();
+  const key = Buffer.from(configured, 'base64');
+  if (key.length !== 32) {
+    throw new HttpError(503, 'Officer two-factor authentication is not configured.', 'TOTP_UNAVAILABLE');
+  }
+  return key;
+}
+
+function encryptTotpSecret(secret: string): string {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', getTotpEncryptionKey(), iv);
+  const encrypted = Buffer.concat([cipher.update(secret, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${iv.toString('base64')}.${tag.toString('base64')}.${encrypted.toString('base64')}`;
+}
+
+function decryptTotpSecret(ciphertext: string): string {
+  const [ivEncoded, tagEncoded, encryptedEncoded, ...extra] = ciphertext.split('.');
+  if (!ivEncoded || !tagEncoded || !encryptedEncoded || extra.length) {
+    throw new HttpError(503, 'Officer two-factor authentication needs to be reset by an administrator.', 'TOTP_SECRET_INVALID');
+  }
+  try {
+    const decipher = crypto.createDecipheriv('aes-256-gcm', getTotpEncryptionKey(), Buffer.from(ivEncoded, 'base64'));
+    decipher.setAuthTag(Buffer.from(tagEncoded, 'base64'));
+    return Buffer.concat([decipher.update(Buffer.from(encryptedEncoded, 'base64')), decipher.final()]).toString('utf8');
+  } catch {
+    throw new HttpError(503, 'Officer two-factor authentication needs to be reset by an administrator.', 'TOTP_SECRET_INVALID');
+  }
+}
+
+type TotpChallengeStart = {
+  requiresTotp: true;
+  challengeId: string;
+  expiresAt: string;
+  enrollment?: { manualKey: string; otpauthUri: string };
+};
+
+function publicUser(user: AuthorizedUser): AuthorizedUser {
+  const { devPassword: _devPassword, totpSecret: _totpSecret, ...safeUser } = user;
+  return safeUser;
+}
+
+function createTotpEnrollmentDetails(user: AuthorizedUser, secret: string) {
+  const issuer = String(process.env.TOTP_ISSUER || 'Matatu SACCO').trim() || 'Matatu SACCO';
+  return {
+    manualKey: secret,
+    otpauthUri: createTotpUri(issuer, user.email || user.phone || user.name, secret)
+  };
+}
+
+async function startOfficerTotpChallenge(user: PasswordAuthenticatedUser): Promise<TotpChallengeStart> {
+  const challengeId = crypto.randomUUID();
+  const expiresAt = new Date(Date.now() + 5 * 60_000).toISOString();
+  let secret: string;
+  let purpose: 'TotpLogin' | 'TotpEnrollment';
+
+  if (postgresPool) {
+    if (user.totpSecretCiphertext) {
+      secret = decryptTotpSecret(user.totpSecretCiphertext);
+      purpose = user.totpEnabledAt ? 'TotpLogin' : 'TotpEnrollment';
+    } else {
+      secret = createBase32Secret();
+      purpose = 'TotpEnrollment';
+      await postgresPool.query(
+        'UPDATE users SET totp_secret_ciphertext = $1, totp_enabled_at = NULL, updated_at = now() WHERE id = $2',
+        [encryptTotpSecret(secret), user.id]
+      );
+    }
+    await postgresPool.query(
+      `INSERT INTO auth_mfa_challenges (id, user_id, purpose, expires_at)
+       VALUES ($1, $2, $3, $4)`,
+      [challengeId, user.id, purpose, expiresAt]
+    );
+  } else {
+    const stored = localStore.users.find(item => item.id === user.id);
+    if (!stored) throw new HttpError(401, 'Invalid SACCO profile or password.', 'INVALID_CREDENTIALS');
+    secret = stored.totpSecret || createBase32Secret();
+    purpose = stored.totpEnabledAt ? 'TotpLogin' : 'TotpEnrollment';
+    stored.totpSecret = secret;
+    localStore.mfaChallenges.push({ id: challengeId, userId: user.id, purpose, expiresAt, attemptCount: 0, maxAttempts: 5 });
+  }
+
+  return {
+    requiresTotp: true,
+    challengeId,
+    expiresAt,
+    ...(purpose === 'TotpEnrollment' ? { enrollment: createTotpEnrollmentDetails(user, secret) } : {})
+  };
+}
+
+async function verifyOfficerTotpChallenge(challengeIdValue: unknown, codeValue: unknown): Promise<AuthorizedUser> {
+  const challengeId = String(challengeIdValue || '').trim();
+  const code = String(codeValue || '').trim();
+  if (!challengeId.match(/^[0-9a-f-]{36}$/i) || !/^\d{6}$/.test(code)) {
+    throw new HttpError(400, 'The authenticator code is invalid or has expired.', 'TOTP_CODE_INVALID');
+  }
+
+  if (!postgresPool) {
+    const challenge = localStore.mfaChallenges.find(item => item.id === challengeId);
+    const user = challenge && localStore.users.find(item => item.id === challenge.userId);
+    if (!challenge || !user || challenge.usedAt || new Date(challenge.expiresAt).getTime() <= Date.now() || challenge.attemptCount >= challenge.maxAttempts || !user.totpSecret) {
+      throw new HttpError(400, 'The authenticator code is invalid or has expired.', 'TOTP_CODE_INVALID');
+    }
+    if (!verifyTotpCode(user.totpSecret, code)) {
+      challenge.attemptCount += 1;
+      throw new HttpError(400, 'The authenticator code is invalid or has expired.', 'TOTP_CODE_INVALID');
+    }
+    challenge.usedAt = new Date().toISOString();
+    if (challenge.purpose === 'TotpEnrollment') user.totpEnabledAt = new Date().toISOString();
+    return user;
+  }
+
+  const client = await postgresPool.connect();
+  let committed = false;
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      `SELECT c.id AS challenge_id, c.purpose, c.expires_at, c.attempt_count, c.max_attempts, c.used_at,
+              u.id, u.firebase_uid, u.full_name, u.email, u.phone, u.role, u.is_active, u.account_status,
+              u.linked_member_id, u.totp_secret_ciphertext, u.totp_enabled_at
+       FROM auth_mfa_challenges c
+       JOIN users u ON u.id = c.user_id
+       WHERE c.id = $1
+       FOR UPDATE`,
+      [challengeId]
+    );
+    const row = result.rows[0];
+    if (!row || row.used_at || new Date(row.expires_at).getTime() <= Date.now() || row.attempt_count >= row.max_attempts || !row.totp_secret_ciphertext) {
+      throw new HttpError(400, 'The authenticator code is invalid or has expired.', 'TOTP_CODE_INVALID');
+    }
+    const user = mapPasswordAuthenticatedUser(row);
+    if (!hasActiveAccount(user) || !requiresTotp(user) || !verifyTotpCode(decryptTotpSecret(row.totp_secret_ciphertext), code)) {
+      await client.query('UPDATE auth_mfa_challenges SET attempt_count = attempt_count + 1 WHERE id = $1', [challengeId]);
+      await client.query('COMMIT');
+      committed = true;
+      throw new HttpError(400, 'The authenticator code is invalid or has expired.', 'TOTP_CODE_INVALID');
+    }
+    if (row.purpose === 'TotpEnrollment') {
+      await client.query('UPDATE users SET totp_enabled_at = now(), last_login_at = now() WHERE id = $1', [user.id]);
+    } else {
+      await client.query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
+    }
+    await client.query('UPDATE auth_mfa_challenges SET used_at = now() WHERE id = $1', [challengeId]);
+    await client.query('COMMIT');
+    committed = true;
+    return user;
+  } catch (error) {
+    if (!committed) await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function completePasswordAuthentication(user: PasswordAuthenticatedUser): Promise<Record<string, unknown>> {
+  requireActiveAccount(user);
+  if (isMemberUser(user)) requireLinkedMember(user);
+  if (requiresTotp(user)) {
+    return { user: publicUser(user), ...(await startOfficerTotpChallenge(user)) };
+  }
+  if (postgresPool) await postgresPool.query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
+  const signed = signJwt(user);
+  return {
+    user: publicUser(user),
+    token: signed.token,
+    expiresAt: signed.expiresAt,
+    tokenType: 'Bearer',
+    authProvider: 'password'
+  };
+}
 
 // Firestore errors fail closed; the in-memory adapter is selected only at startup.
 async function safeDbOperation<T>(
@@ -766,7 +959,8 @@ function sendApiError(res: express.Response, error: any) {
   if (error instanceof HttpError || error instanceof PersistenceError || error instanceof LedgerPolicyError) {
     return res.status(error.status).json({ error: error.message, code: error.code });
   }
-  return res.status(500).json({ error: error.message || 'Unexpected server error.' });
+  console.error('[Sacco API] Unexpected request failure.');
+  return res.status(500).json({ error: 'Unexpected server error.', code: 'INTERNAL_ERROR' });
 }
 
 function getCollectionDestination(value: unknown): CollectionAccountConfig {
@@ -856,6 +1050,95 @@ async function getAllVehicles(): Promise<Vehicle[]> {
     () => localStore.vehicles as Vehicle[],
     'vehicles'
   );
+}
+
+function maskSensitiveValue(value: string, visibleSuffix = 4): string {
+  const compact = String(value || '').trim();
+  if (!compact) return '';
+  if (compact.length <= visibleSuffix) return '••••';
+  return `${'•'.repeat(Math.max(4, compact.length - visibleSuffix))}${compact.slice(-visibleSuffix)}`;
+}
+
+function toMemberPortalProfile(member: Member): Member {
+  return {
+    ...member,
+    idNumber: maskSensitiveValue(member.idNumber),
+    // A member may confirm their registered phone, but a client response does
+    // not need to expose the full number after activation.
+    phoneNumber: maskSensitiveValue(member.phoneNumber)
+  };
+}
+
+function toMemberPortalTransaction(transaction: Transaction): Transaction {
+  return {
+    ...transaction,
+    recorderName: 'SACCO Ledger'
+  };
+}
+
+function toMemberPortalPayment(payment: PaymentRecord): PaymentRecord {
+  return {
+    ...payment,
+    payerPhone: maskSensitiveValue(payment.payerPhone),
+    rawPayload: undefined
+  };
+}
+
+async function getMemberPortalData(user: AuthorizedUser): Promise<MemberPortalData> {
+  const linkedMemberId = requireLinkedMember(user);
+  if (postgresPool) {
+    const [member, vehicles, driverAssignments, transactions, payments, loans] = await Promise.all([
+      getPostgresMember(postgresPool, linkedMemberId),
+      listPostgresVehiclesByOwner(postgresPool, linkedMemberId),
+      listPostgresDriverAssignmentsByOwner(postgresPool, linkedMemberId),
+      listPostgresTransactionsByMember(postgresPool, linkedMemberId),
+      listPostgresPaymentsByMember(postgresPool, linkedMemberId),
+      listPostgresLoansByMember(postgresPool, linkedMemberId)
+    ]);
+    if (!member) {
+      throw new HttpError(403, 'This member account is not linked to an active SACCO member record.', 'MEMBER_LINK_INVALID');
+    }
+    return {
+      member: toMemberPortalProfile(member),
+      vehicles,
+      driverAssignments,
+      transactions: transactions.map(toMemberPortalTransaction),
+      payments: payments.map(toMemberPortalPayment),
+      loans
+    };
+  }
+
+  const [members, vehicles, transactions, payments] = await Promise.all([
+    getAllMembers(),
+    getAllVehicles(),
+    listPaymentRecords()
+  ]).then(async ([allMembers, allVehicles, allPayments]) => [
+    allMembers,
+    allVehicles,
+    await safeDbOperation<Transaction[]>(
+      async firestoreDb => (await firestoreDb.collection('transactions').where('memberId', '==', linkedMemberId).get()).docs.map(doc => doc.data() as Transaction),
+      () => localStore.transactions.filter(transaction => transaction.memberId === linkedMemberId),
+      'transactions'
+    ),
+    allPayments
+  ] as const);
+  const member = members.find(item => item.id === linkedMemberId);
+  if (!member) {
+    throw new HttpError(403, 'This member account is not linked to an active SACCO member record.', 'MEMBER_LINK_INVALID');
+  }
+  const ownedVehicles = vehicles.filter(vehicle => vehicle.ownerId === linkedMemberId);
+  return {
+    member: toMemberPortalProfile(member),
+    vehicles: ownedVehicles,
+    driverAssignments: [],
+    transactions: transactions
+      .filter(transaction => transaction.memberId === linkedMemberId || ownedVehicles.some(vehicle => vehicle.plateNumber === transaction.vehiclePlate))
+      .map(toMemberPortalTransaction),
+    payments: payments
+      .filter(payment => payment.memberId === linkedMemberId || (payment.vehiclePlate && ownedVehicles.some(vehicle => vehicle.plateNumber === payment.vehiclePlate)))
+      .map(toMemberPortalPayment),
+    loans: []
+  };
 }
 
 async function validateLedgerRegistration(tx: Transaction): Promise<void> {
@@ -1118,62 +1401,33 @@ async function reconcilePaymentRecord(paymentId: string, memberId: string, recor
   return savePaymentRecord({ ...reconciledPayment, transactionId: transaction.id });
 }
 
-async function authenticateFirebaseBearer(req: express.Request): Promise<AuthorizedUser> {
-  const authHeader = req.headers.authorization || '';
-  if (!authHeader.startsWith('Bearer ')) {
-    throw new HttpError(401, 'Firebase ID token is required.', 'FIREBASE_TOKEN_MISSING');
-  }
-
-  const adminAuth = getFirebaseAdminAuth();
-  if (!adminAuth) {
-    throw new HttpError(503, 'Firebase Admin credentials are not configured on the server.', 'FIREBASE_ADMIN_NOT_CONFIGURED');
-  }
-
-  let decodedToken: DecodedIdToken;
-  try {
-    decodedToken = await adminAuth.verifyIdToken(authHeader.slice('Bearer '.length).trim());
-  } catch (error: any) {
-    const code = String(error?.code || error?.errorInfo?.code || '');
-    if (code.startsWith('auth/')) {
-      throw new HttpError(401, 'Firebase ID token is invalid, expired, or revoked.', 'FIREBASE_TOKEN_INVALID');
-    }
-    throw error;
-  }
-  const user = await findSaccoUserByFirebaseToken(decodedToken);
-  (req as any).authContext = {
-    provider: 'firebase',
-    firebaseUid: decodedToken.uid,
-    email: decodedToken.email
-  };
-  return user;
-}
-
 // Sacco Security OS Authentication Middleware
 const authenticateSaccoUser = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
   try {
     const authHeader = req.headers.authorization || '';
     if (authHeader.startsWith('Bearer ')) {
+      const token = authHeader.slice('Bearer '.length).trim();
+      const [encodedHeader] = token.split('.');
+      let isInternalJwt = false;
       try {
-        (req as any).user = await authenticateFirebaseBearer(req);
+        const header = JSON.parse(decodeBase64Url(encodedHeader || '').toString('utf8'));
+        isInternalJwt = header?.alg === 'HS256' && header?.typ === 'JWT';
+      } catch {
+        isInternalJwt = false;
+      }
+      if (isInternalJwt) {
+        (req as any).user = await verifyJwt(token);
+        requireActiveAccount((req as any).user);
+        if (isMemberUser((req as any).user)) requireLinkedMember((req as any).user);
+        (req as any).authContext = { provider: 'password-jwt', userId: (req as any).user.id };
         await recordAuditLog(req, 'API_AUTHORIZED', req.path);
         return next();
-      } catch (firebaseError: any) {
-        const allowDevJwt = !isProduction && process.env.ALLOW_DEV_JWT_AUTH === 'true';
-        if (!allowDevJwt) {
-          throw firebaseError;
-        }
-
-        (req as any).user = await verifyJwt(authHeader.slice('Bearer '.length).trim());
-        (req as any).authContext = {
-          provider: 'dev-jwt',
-          email: (req as any).user.email
-        };
-        await recordAuditLog(req, 'API_AUTHORIZED_DEV_JWT', req.path);
-        return next();
       }
+
+      throw new HttpError(401, 'A current SACCO session is required.', 'AUTHENTICATION_REQUIRED');
     }
 
-    return res.status(401).json({ error: 'Firebase Bearer token authentication is required.' });
+    return res.status(401).json({ error: 'A current SACCO session is required.', code: 'AUTHENTICATION_REQUIRED' });
   } catch (error: any) {
     if (error instanceof HttpError) {
       return res.status(error.status).json({ error: error.message, code: error.code });
@@ -1182,21 +1436,349 @@ const authenticateSaccoUser = async (req: express.Request, res: express.Response
   }
 };
 
-const requireRoles = (allowedRoles: string[]) => {
+function requireAuthenticatedUser(req: express.Request): AuthorizedUser {
+  const user = (req as any).user as AuthorizedUser | undefined;
+  if (!user) {
+    throw new HttpError(401, 'Authentication is required.', 'AUTHENTICATION_REQUIRED');
+  }
+  return user;
+}
+
+function requireActiveAccount(user: AuthorizedUser): AuthorizedUser {
+  if (!hasActiveAccount(user)) {
+    throw new HttpError(403, 'This account is not active.', 'ACCOUNT_INACTIVE');
+  }
+  return user;
+}
+
+function requireLinkedMember(user: AuthorizedUser): string {
+  const linkedMemberId = memberScopeId(user);
+  if (!linkedMemberId) {
+    throw new HttpError(403, 'This member account is not linked to an approved SACCO member record.', 'MEMBER_LINK_REQUIRED');
+  }
+  return linkedMemberId;
+}
+
+function assertMemberOwnsRecord(user: AuthorizedUser, memberId: string | null | undefined): void {
+  if (isMemberUser(user) && !memberOwnsId(user, memberId)) {
+    throw new HttpError(404, 'Requested record was not found.', 'RECORD_NOT_FOUND');
+  }
+}
+
+async function assertMemberOwnsVehicle(user: AuthorizedUser, vehicleId: string): Promise<void> {
+  if (!isMemberUser(user)) return;
+  const linkedMemberId = requireLinkedMember(user);
+  if (postgresPool) {
+    const vehicle = await postgresPool.query('SELECT member_id FROM vehicles WHERE id = $1 LIMIT 1', [vehicleId]);
+    if (!vehicle.rowCount || !memberOwnsId(user, vehicle.rows[0].member_id ? String(vehicle.rows[0].member_id) : null)) {
+      throw new HttpError(404, 'Requested vehicle was not found.', 'VEHICLE_NOT_FOUND');
+    }
+    return;
+  }
+  const vehicle = (await getAllVehicles()).find(item => item.id === vehicleId);
+  if (!vehicle || vehicle.ownerId !== linkedMemberId) {
+    throw new HttpError(404, 'Requested vehicle was not found.', 'VEHICLE_NOT_FOUND');
+  }
+}
+
+const requirePermission = (permission: SaccoPermission) => {
   return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    const user = (req as any).user;
-    if (!user || !allowedRoles.includes(user.role)) {
+    const user = (req as any).user as AuthorizedUser | undefined;
+    if (!user || !hasPermission(user.role, permission)) {
       await recordAuditLog(req, 'API_AUTHORIZATION_DENIED', req.path, undefined, undefined, {
-        requiredRoles: allowedRoles,
+        requiredPermission: permission,
         actualRole: user?.role || 'Unknown'
       });
       return res.status(403).json({ 
-        error: `Sacco Access Control Breach Blocked: Role [${user?.role || 'Unknown'}] is restricted from this operational directory.` 
+        error: 'Access denied.'
       });
     }
     next();
   };
 };
+
+function getActivationOtpPepper(): string {
+  const pepper = String(process.env.MEMBER_OTP_PEPPER || '');
+  if (pepper.length < 32) {
+    throw new HttpError(503, 'Member account activation is not configured.', 'MEMBER_ACTIVATION_UNAVAILABLE');
+  }
+  return pepper;
+}
+
+function hashActivationOtp(challengeId: string, otp: string): string {
+  return crypto
+    .createHmac('sha256', getActivationOtpPepper())
+    .update(`${challengeId}:${otp}`)
+    .digest('hex');
+}
+
+function isPublicHttpsUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && Boolean(url.hostname) && url.hostname !== 'localhost' && !url.hostname.endsWith('.localhost');
+  } catch {
+    return false;
+  }
+}
+
+async function deliverMemberOtp(phone: string, otp: string, purpose: 'Activation' | 'PasswordReset'): Promise<void> {
+  const deliveryUrl = String(process.env.MEMBER_OTP_DELIVERY_WEBHOOK_URL || '').trim();
+  if (!isPublicHttpsUrl(deliveryUrl)) {
+    throw new HttpError(503, 'Member account activation is not configured.', 'MEMBER_ACTIVATION_UNAVAILABLE');
+  }
+  const authorization = String(process.env.MEMBER_OTP_DELIVERY_AUTHORIZATION || '').trim();
+  const response = await fetch(deliveryUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(authorization ? { Authorization: authorization } : {})
+    },
+    body: JSON.stringify({
+      to: phone,
+      code: otp,
+      expiresInSeconds: 600,
+      purpose: purpose === 'Activation' ? 'member-account-activation' : 'member-password-reset'
+    }),
+    signal: AbortSignal.timeout(10_000)
+  });
+  if (!response.ok) {
+    throw new HttpError(503, 'Member account activation is temporarily unavailable.', 'MEMBER_OTP_DELIVERY_FAILED');
+  }
+}
+
+function genericMemberOtpResponse(requestId = crypto.randomUUID()) {
+  return {
+    requestId,
+    message: 'If the submitted details match an eligible SACCO member, a verification code has been sent to the registered phone number.'
+  };
+}
+
+async function requestMemberActivation(identifierValue: unknown, requestIp?: string): Promise<{ requestId: string; message: string }> {
+  const requestId = crypto.randomUUID();
+  if (!postgresPool) return genericMemberOtpResponse(requestId);
+
+  const phone = normalizedPhone(identifierValue);
+  if (!phone) return genericMemberOtpResponse(requestId);
+
+  try {
+    getActivationOtpPepper();
+    const candidate = await postgresPool.query(
+      `SELECT m.id, m.phone
+       FROM members m
+       LEFT JOIN users u ON u.linked_member_id = m.id
+       WHERE m.status = 'Active'
+         AND u.id IS NULL
+         AND (
+         AND regexp_replace(COALESCE(m.phone, ''), '\\D', '', 'g') = $1
+       LIMIT 1`,
+      [phone]
+    );
+    if (!candidate.rowCount || !candidate.rows[0].phone) return genericMemberOtpResponse(requestId);
+
+    const memberId = String(candidate.rows[0].id);
+    const rateLimit = await postgresPool.query(
+      `SELECT COUNT(*)::int AS count
+       FROM member_activation_challenges
+       WHERE created_at > now() - interval '15 minutes'
+         AND purpose = 'Activation'
+         AND (member_id = $1 OR ($2 <> '' AND requested_ip = $2))`,
+      [memberId, requestIp || '']
+    );
+    if (Number(rateLimit.rows[0]?.count || 0) >= 3) return genericMemberOtpResponse(requestId);
+
+    const otp = String(crypto.randomInt(100000, 1_000_000));
+    await postgresPool.query(
+      `INSERT INTO member_activation_challenges (id, member_id, otp_hash, expires_at, requested_ip, purpose)
+       VALUES ($1, $2, $3, now() + interval '10 minutes', NULLIF($4, ''), 'Activation')`,
+      [requestId, memberId, hashActivationOtp(requestId, otp), requestIp || '']
+    );
+
+    try {
+      await deliverMemberOtp(String(candidate.rows[0].phone), otp, 'Activation');
+    } catch {
+      // Do not leave a code that was never delivered usable. No code, phone,
+      // or provider response is logged.
+      await postgresPool.query('DELETE FROM member_activation_challenges WHERE id = $1', [requestId]);
+      return genericMemberOtpResponse(requestId);
+    }
+  } catch {
+    // The response intentionally stays identical for unknown, ineligible, and
+    // temporarily unavailable records to prevent account enumeration.
+  }
+  return genericMemberOtpResponse(requestId);
+}
+
+async function verifyMemberActivation(req: express.Request, requestIdValue: unknown, otpValue: unknown, passwordValue: unknown): Promise<AuthorizedUser> {
+  if (!postgresPool) {
+    throw new HttpError(503, 'Member account activation requires the PostgreSQL SACCO database.', 'MEMBER_ACTIVATION_UNAVAILABLE');
+  }
+  const requestId = String(requestIdValue || '').trim();
+  const otp = String(otpValue || '').trim();
+  const password = String(passwordValue || '');
+  if (!requestId.match(/^[0-9a-f-]{36}$/i) || !otp.match(/^\d{6}$/) || password.length < 8) {
+    throw new HttpError(400, 'The verification code is invalid or has expired.', 'ACTIVATION_CODE_INVALID');
+  }
+
+  const client = await postgresPool.connect();
+  let committed = false;
+  try {
+    await client.query('BEGIN');
+    const challengeResult = await client.query(
+      `SELECT c.*, m.full_name, m.phone
+       FROM member_activation_challenges c
+       JOIN members m ON m.id = c.member_id
+       WHERE c.id = $1 AND c.purpose = 'Activation'
+       FOR UPDATE`,
+      [requestId]
+    );
+    const challenge = challengeResult.rows[0];
+    if (!challenge || challenge.used_at || new Date(challenge.expires_at).getTime() <= Date.now() || challenge.attempt_count >= challenge.max_attempts) {
+      throw new HttpError(400, 'The verification code is invalid or has expired.', 'ACTIVATION_CODE_INVALID');
+    }
+
+    const expected = Buffer.from(String(challenge.otp_hash), 'hex');
+    const supplied = Buffer.from(hashActivationOtp(requestId, otp), 'hex');
+    if (expected.length !== supplied.length || !crypto.timingSafeEqual(expected, supplied)) {
+      await client.query(
+        `UPDATE member_activation_challenges
+         SET attempt_count = attempt_count + 1
+         WHERE id = $1`,
+        [requestId]
+      );
+      await client.query('COMMIT');
+      committed = true;
+      throw new HttpError(400, 'The verification code is invalid or has expired.', 'ACTIVATION_CODE_INVALID');
+    }
+
+    const conflicts = await client.query(
+      `SELECT id FROM users
+       WHERE linked_member_id = $1
+       LIMIT 1`,
+      [challenge.member_id]
+    );
+    if (conflicts.rowCount) {
+      // A correctly proven code is still one-time when a conflicting record
+      // requires an administrator to complete the link manually.
+      await client.query('UPDATE member_activation_challenges SET used_at = now() WHERE id = $1', [requestId]);
+      await client.query('COMMIT');
+      committed = true;
+      throw new HttpError(409, 'This account cannot be linked automatically. Ask a SACCO administrator to review the record.', 'MEMBER_LINK_CONFLICT');
+    }
+    const userResult = await client.query(
+      `INSERT INTO users (
+         full_name, email, phone, role, password_hash, is_active,
+         linked_member_id, account_status, approved_at
+       ) VALUES ($1, NULL, $2, 'Member', crypt($3, gen_salt('bf')), TRUE, $4, 'Active', now())
+       RETURNING id, firebase_uid, full_name, email, phone, role, is_active, account_status, linked_member_id`,
+      [challenge.full_name, challenge.phone || null, password, challenge.member_id]
+    );
+    await client.query('UPDATE member_activation_challenges SET used_at = now() WHERE id = $1', [requestId]);
+    await client.query('COMMIT');
+    committed = true;
+    const user = mapDbUser(userResult.rows[0]);
+    (req as any).user = user;
+    (req as any).authContext = { provider: 'member-sms-activation', phone: user.phone };
+    await recordAuditLog(req, 'MEMBER_ACCOUNT_ACTIVATED', 'users', user.id, undefined, { linkedMemberId: user.linkedMemberId, role: user.role });
+    return user;
+  } catch (error) {
+    if (!committed) await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function requestMemberPasswordReset(phoneValue: unknown, requestIp?: string): Promise<{ requestId: string; message: string }> {
+  const requestId = crypto.randomUUID();
+  if (!postgresPool) return genericMemberOtpResponse(requestId);
+  const phone = normalizedPhone(phoneValue);
+  if (!phone) return genericMemberOtpResponse(requestId);
+  try {
+    getActivationOtpPepper();
+    const candidate = await postgresPool.query(
+      `SELECT u.linked_member_id AS member_id, m.phone
+       FROM users u
+       JOIN members m ON m.id = u.linked_member_id
+       WHERE u.role = 'Member' AND u.is_active = TRUE AND u.account_status = 'Active'
+         AND regexp_replace(COALESCE(NULLIF(u.phone, ''), m.phone, ''), '\\D', '', 'g') = $1
+       LIMIT 1`,
+      [phone]
+    );
+    if (!candidate.rowCount || !candidate.rows[0].phone) return genericMemberOtpResponse(requestId);
+    const memberId = String(candidate.rows[0].member_id);
+    const rateLimit = await postgresPool.query(
+      `SELECT COUNT(*)::int AS count
+       FROM member_activation_challenges
+       WHERE created_at > now() - interval '15 minutes'
+         AND purpose = 'PasswordReset'
+         AND (member_id = $1 OR ($2 <> '' AND requested_ip = $2))`,
+      [memberId, requestIp || '']
+    );
+    if (Number(rateLimit.rows[0]?.count || 0) >= 3) return genericMemberOtpResponse(requestId);
+    const otp = String(crypto.randomInt(100000, 1_000_000));
+    await postgresPool.query(
+      `INSERT INTO member_activation_challenges (id, member_id, otp_hash, expires_at, requested_ip, purpose)
+       VALUES ($1, $2, $3, now() + interval '10 minutes', NULLIF($4, ''), 'PasswordReset')`,
+      [requestId, memberId, hashActivationOtp(requestId, otp), requestIp || '']
+    );
+    try {
+      await deliverMemberOtp(String(candidate.rows[0].phone), otp, 'PasswordReset');
+    } catch {
+      await postgresPool.query('DELETE FROM member_activation_challenges WHERE id = $1', [requestId]);
+    }
+  } catch {
+    // Keep the response generic for all failure and eligibility states.
+  }
+  return genericMemberOtpResponse(requestId);
+}
+
+async function verifyMemberPasswordReset(requestIdValue: unknown, otpValue: unknown, passwordValue: unknown): Promise<void> {
+  if (!postgresPool) throw new HttpError(503, 'Member password reset requires the PostgreSQL SACCO database.', 'MEMBER_PASSWORD_RESET_UNAVAILABLE');
+  const requestId = String(requestIdValue || '').trim();
+  const otp = String(otpValue || '').trim();
+  const password = String(passwordValue || '');
+  if (!requestId.match(/^[0-9a-f-]{36}$/i) || !otp.match(/^\d{6}$/) || password.length < 8) {
+    throw new HttpError(400, 'The verification code is invalid or has expired.', 'PASSWORD_RESET_CODE_INVALID');
+  }
+  const client = await postgresPool.connect();
+  let committed = false;
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      `SELECT * FROM member_activation_challenges
+       WHERE id = $1 AND purpose = 'PasswordReset'
+       FOR UPDATE`,
+      [requestId]
+    );
+    const challenge = result.rows[0];
+    if (!challenge || challenge.used_at || new Date(challenge.expires_at).getTime() <= Date.now() || challenge.attempt_count >= challenge.max_attempts) {
+      throw new HttpError(400, 'The verification code is invalid or has expired.', 'PASSWORD_RESET_CODE_INVALID');
+    }
+    const expected = Buffer.from(String(challenge.otp_hash), 'hex');
+    const supplied = Buffer.from(hashActivationOtp(requestId, otp), 'hex');
+    if (expected.length !== supplied.length || !crypto.timingSafeEqual(expected, supplied)) {
+      await client.query('UPDATE member_activation_challenges SET attempt_count = attempt_count + 1 WHERE id = $1', [requestId]);
+      await client.query('COMMIT');
+      committed = true;
+      throw new HttpError(400, 'The verification code is invalid or has expired.', 'PASSWORD_RESET_CODE_INVALID');
+    }
+    const updated = await client.query(
+      `UPDATE users
+       SET password_hash = crypt($1, gen_salt('bf')), updated_at = now()
+       WHERE linked_member_id = $2 AND role = 'Member' AND is_active = TRUE AND account_status = 'Active'`,
+      [password, challenge.member_id]
+    );
+    if (!updated.rowCount) throw new HttpError(400, 'The verification code is invalid or has expired.', 'PASSWORD_RESET_CODE_INVALID');
+    await client.query('UPDATE member_activation_challenges SET used_at = now() WHERE id = $1', [requestId]);
+    await client.query('COMMIT');
+    committed = true;
+  } catch (error) {
+    if (!committed) await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
 
 // Verify the selected persistence adapter before accepting requests.
 async function seedDatabaseIfEmpty() {
@@ -1242,21 +1824,14 @@ async function startServer() {
     res.json({
       status: 'ok',
       database: postgresPool ? 'postgres_configured' : (useFirestore ? 'firestore_connected' : 'local_fallback'),
-      auth: getFirebaseAdminAuth() ? 'firebase_admin_configured' : 'firebase_admin_missing',
+      auth: 'password_and_totp',
       timestamp: new Date().toISOString()
     });
   });
 
   app.post('/api/auth/session', async (req, res) => {
     try {
-      const user = await authenticateFirebaseBearer(req);
-      (req as any).user = user;
-      await recordAuditLog(req, 'USER_LOGIN', 'users', user.id, undefined, { email: user.email, role: user.role });
-      res.json({
-        user,
-        tokenType: 'FirebaseIdToken',
-        authProvider: 'firebase'
-      });
+      throw new HttpError(410, 'Firebase sign-in is disabled. Use the SACCO password sign-in flow.', 'LEGACY_AUTH_DISABLED');
     } catch (error: any) {
       sendApiError(res, error);
     }
@@ -1269,49 +1844,21 @@ async function startServer() {
         return res.status(409).json({ error: 'SACCO onboarding is already complete. Ask an existing admin to create your profile.' });
       }
 
-      const authHeader = req.headers.authorization || '';
-      const adminAuth = getFirebaseAdminAuth();
-      let firebaseUid: string | undefined;
-      let email = String(req.body?.email || '').trim().toLowerCase();
-      let fullName = String(req.body?.fullName || '').trim();
-
-      if (authHeader.startsWith('Bearer ') && adminAuth) {
-        const decoded = await adminAuth.verifyIdToken(authHeader.slice('Bearer '.length).trim());
-        firebaseUid = decoded.uid;
-        email = String(decoded.email || email).trim().toLowerCase();
-        fullName = fullName || String(decoded.name || '').trim();
-      } else {
-        const allowDevBootstrap = !isProduction && process.env.ALLOW_DEV_AUTH_FALLBACK === 'true';
-        if (!allowDevBootstrap) {
-          return res.status(401).json({ error: 'Firebase ID token is required to bootstrap the first admin.' });
-        }
-        if (String(req.body?.password || '').length < 8) {
-          return res.status(400).json({ error: 'Create a password with at least 8 characters.', code: 'BOOTSTRAP_PASSWORD_REQUIRED' });
-        }
-      }
+      if (!passwordAuthenticationEnabled()) throw new HttpError(503, 'Password authentication is not enabled.', 'PASSWORD_AUTH_DISABLED');
 
       const user = await createFirstAdminProfile({
-        firebaseUid,
-        email,
-        fullName,
+        email: String(req.body?.email || '').trim().toLowerCase(),
+        fullName: String(req.body?.fullName || '').trim(),
         phone: String(req.body?.phone || '').trim(),
-        devPassword: firebaseUid ? undefined : String(req.body?.password || '')
+        password: String(req.body?.password || '')
       });
       (req as any).user = user;
       (req as any).authContext = {
-        provider: firebaseUid ? 'firebase-bootstrap' : 'dev-bootstrap',
-        firebaseUid,
-        email
+        provider: 'password-bootstrap',
+        email: user.email
       };
       await recordAuditLog(req, 'FIRST_ADMIN_BOOTSTRAPPED', 'users', user.id, undefined, { email: user.email, role: user.role });
-
-      const devToken = firebaseUid ? undefined : signJwt(user);
-      return res.status(201).json({
-        user,
-        token: devToken?.token,
-        tokenType: firebaseUid ? 'FirebaseIdToken' : 'DevJwt',
-        authProvider: firebaseUid ? 'firebase' : 'dev'
-      });
+      return res.status(201).json(await completePasswordAuthentication(user));
     } catch (error: any) {
       sendApiError(res, error);
     }
@@ -1319,31 +1866,103 @@ async function startServer() {
 
   app.post('/api/auth/login', async (req, res) => {
     try {
-      const allowDevLogin = !isProduction && process.env.ALLOW_DEV_AUTH_FALLBACK === 'true';
-      if (!allowDevLogin) {
-        return res.status(404).json({ error: 'Password login is disabled. Use Firebase Auth.' });
-      }
-
-      const { email, password } = req.body || {};
-      const user = await authenticateDevelopmentUser(
-        String(email || '').trim().toLowerCase(),
-        String(password || '')
-      );
-      if (!user || user.isActive === false) {
+      if (!passwordAuthenticationEnabled()) throw new HttpError(503, 'Password authentication is not enabled.', 'PASSWORD_AUTH_DISABLED');
+      const user = await authenticatePasswordUser(req.body?.identifier ?? req.body?.email, String(req.body?.password || ''));
+      if (!user || !hasActiveAccount(user) || (isMemberUser(user) && !user.linkedMemberId)) {
         return res.status(401).json({ error: 'Invalid Sacco profile or password.' });
       }
-
-      const signed = signJwt(user);
-      res.json({
-        user,
-        token: signed.token,
-        expiresAt: signed.expiresAt,
-        tokenType: 'Bearer'
-      });
+      res.json(await completePasswordAuthentication(user));
     } catch (error: any) {
       sendApiError(res, error);
     }
   });
+
+  app.post('/api/auth/totp/verify', async (req, res) => {
+    try {
+      const user = await verifyOfficerTotpChallenge(req.body?.challengeId, req.body?.code);
+      (req as any).user = user;
+      (req as any).authContext = { provider: 'password-totp', userId: user.id };
+      await recordAuditLog(req, 'USER_LOGIN_TOTP', 'users', user.id, undefined, { role: user.role });
+      const signed = signJwt(user);
+      res.json({ user: publicUser(user), token: signed.token, expiresAt: signed.expiresAt, tokenType: 'Bearer', authProvider: 'password-totp' });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  // Member activation does not reveal whether an identifier belongs to a
+  // SACCO record. The code is delivered only to the phone already held in the
+  // trusted member register and is never returned or logged by this API.
+  app.post('/api/member-activation/request', async (req, res) => {
+    try {
+      res.status(202).json(await requestMemberActivation(req.body?.phone ?? req.body?.identifier, req.ip));
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.post('/api/member-activation/verify', async (req, res) => {
+    try {
+      const user = await verifyMemberActivation(req, req.body?.requestId, req.body?.code, req.body?.password);
+      const signed = signJwt(user);
+      res.status(201).json({ user, token: signed.token, expiresAt: signed.expiresAt, tokenType: 'Bearer', authProvider: 'member-sms-activation' });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.post('/api/auth/member-password-reset/request', async (req, res) => {
+    try {
+      res.status(202).json(await requestMemberPasswordReset(req.body?.phone, req.ip));
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.post('/api/auth/member-password-reset/verify', async (req, res) => {
+    try {
+      await verifyMemberPasswordReset(req.body?.requestId, req.body?.code, req.body?.password);
+      res.status(204).end();
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  // Test-only fixture endpoint. It is not registered unless the integration
+  // test process explicitly opts in, and is unavailable in every normal or
+  // production runtime. It lets the HTTP authorization tests exercise the
+  // same linked-member checks used by real Firebase-activated accounts.
+  if (!isProduction && process.env.SACCO_TEST_MODE === 'true') {
+    app.post('/api/testing/member-profile', authenticateSaccoUser, requirePermission('members.write'), async (req, res) => {
+      try {
+        if (postgresPool || !allowInMemoryStore) {
+          throw new HttpError(404, 'Not found.', 'NOT_FOUND');
+        }
+        const memberId = String(req.body?.memberId || '');
+        const email = String(req.body?.email || '').trim().toLowerCase();
+        const password = String(req.body?.password || '');
+        const member = localStore.members.find(item => item.id === memberId);
+        if (!member || !email || password.length < 8 || localStore.users.some(user => user.email === email || user.linkedMemberId === memberId)) {
+          throw new HttpError(400, 'Invalid test member profile request.', 'INVALID_TEST_FIXTURE');
+        }
+        const user: AuthorizedUser = {
+          id: `test-member-${localStore.users.length + 1}`,
+          name: member.name,
+          email,
+          phone: member.phoneNumber,
+          role: 'Member',
+          isActive: true,
+          accountStatus: 'Active',
+          linkedMemberId: member.id,
+          devPassword: password
+        };
+        localStore.users.push(user);
+        res.status(201).json({ id: user.id });
+      } catch (error: any) {
+        sendApiError(res, error);
+      }
+    });
+  }
 
   // Protect all functional API endpoints with Sacco Zero-Trust validation
   app.use('/api/users', authenticateSaccoUser);
@@ -1352,9 +1971,10 @@ async function startServer() {
   app.use('/api/transactions', authenticateSaccoUser);
   app.use('/api/payments', authenticateSaccoUser);
   app.use('/api/system', authenticateSaccoUser);
+  app.use('/api/member-portal', authenticateSaccoUser);
 
   // API 2: Get Users
-  app.get('/api/users', requireRoles(['Chairman', 'Secretary', 'Auditor']), async (req, res) => {
+  app.get('/api/users', requirePermission('users.read'), async (req, res) => {
     try {
       if (postgresPool) {
         return res.json(await listPostgresUsers(postgresPool));
@@ -1373,9 +1993,70 @@ async function startServer() {
     }
   });
 
+  // Officer credentials are provisioned by the Chairman. Member accounts are
+  // created only through the phone/SMS activation flow and are never accepted
+  // by this endpoint.
+  app.post('/api/users', requirePermission('users.write'), async (req, res) => {
+    try {
+      const fullName = sanitizePersonName(req.body?.fullName).trim();
+      const email = String(req.body?.email || '').trim().toLowerCase();
+      const phone = sanitizePhoneNumber(req.body?.phone).trim();
+      const password = String(req.body?.password || '');
+      const role = String(req.body?.role || '') as UserRole;
+      const officerRoles: readonly UserRole[] = ['Chairman', 'Secretary', 'Treasurer', 'Auditor', 'Accountant'];
+      if (!isValidPersonName(fullName) || !email.includes('@') || (phone && !isValidPhoneNumber(phone)) || password.length < 8 || !officerRoles.includes(role)) {
+        throw new HttpError(400, 'Provide an officer name, email, optional valid phone, approved officer role, and password of at least 8 characters.', 'OFFICER_PROVISIONING_INVALID');
+      }
+
+      let created: AuthorizedUser;
+      if (postgresPool) {
+        const existing = await postgresPool.query('SELECT 1 FROM users WHERE lower(email) = $1 LIMIT 1', [email]);
+        if (existing.rowCount) throw new HttpError(409, 'An account already uses this email.', 'OFFICER_EMAIL_EXISTS');
+        const result = await postgresPool.query(
+          `INSERT INTO users (full_name, email, phone, role, password_hash, is_active, account_status, approved_at, approved_by)
+           VALUES ($1, $2, NULLIF($3, ''), $4, crypt($5, gen_salt('bf')), TRUE, 'Active', now(), $6)
+           RETURNING id, firebase_uid, full_name, email, phone, role, is_active, account_status, linked_member_id`,
+          [fullName, email, phone, role, password, requireAuthenticatedUser(req).id]
+        );
+        created = mapDbUser(result.rows[0]);
+      } else {
+        if (localStore.users.some(user => user.email?.toLowerCase() === email)) {
+          throw new HttpError(409, 'An account already uses this email.', 'OFFICER_EMAIL_EXISTS');
+        }
+        created = {
+          id: `officer-${crypto.randomUUID()}`,
+          name: fullName,
+          email,
+          phone,
+          role,
+          isActive: true,
+          accountStatus: 'Active',
+          devPassword: password
+        };
+        await safeDbOperation(
+          async firestoreDb => { await firestoreDb.collection('users').doc(created.id).set(created); },
+          () => { localStore.users.push(created); },
+          'users'
+        );
+      }
+      await recordAuditLog(req, 'OFFICER_ACCOUNT_PROVISIONED', 'users', created.id, undefined, { role: created.role, email: created.email });
+      res.status(201).json({ user: publicUser(created), requiresTotpEnrollment: true });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
   // API 3: Get Sacco Members
   app.get('/api/members', async (req, res) => {
     try {
+      const user = requireAuthenticatedUser(req);
+      if (isMemberUser(user)) {
+        const portal = await getMemberPortalData(user);
+        return res.json([portal.member]);
+      }
+      if (!hasPermission(user.role, 'members.read.all')) {
+        throw new HttpError(403, 'Access denied.', 'ACCESS_DENIED');
+      }
       if (postgresPool) {
         return res.json(await listPostgresMembers(postgresPool));
       }
@@ -1394,7 +2075,7 @@ async function startServer() {
   });
 
   // API 4: Register Sacco Member (Authorized roles: Chairman, Secretary, Treasurer)
-  app.post('/api/members', requireRoles(['Chairman', 'Secretary', 'Treasurer']), async (req, res) => {
+  app.post('/api/members', requirePermission('members.write'), async (req, res) => {
     try {
       const memberData = req.body;
       if (!memberData.name || !memberData.idNumber) {
@@ -1469,6 +2150,14 @@ async function startServer() {
   // API 5: Get Fleet Vehicles
   app.get('/api/vehicles', async (req, res) => {
     try {
+      const user = requireAuthenticatedUser(req);
+      if (isMemberUser(user)) {
+        const portal = await getMemberPortalData(user);
+        return res.json(portal.vehicles);
+      }
+      if (!hasPermission(user.role, 'vehicles.read.all')) {
+        throw new HttpError(403, 'Access denied.', 'ACCESS_DENIED');
+      }
       if (postgresPool) {
         return res.json(await listPostgresVehicles(postgresPool));
       }
@@ -1487,7 +2176,7 @@ async function startServer() {
   });
 
   // API 6: Register Matatu Vehicle (Authorized roles: Chairman, Secretary)
-  app.post('/api/vehicles', requireRoles(['Chairman', 'Secretary']), async (req, res) => {
+  app.post('/api/vehicles', requirePermission('vehicles.write'), async (req, res) => {
     try {
       const vehicleData = req.body;
       if (!vehicleData.plateNumber || !vehicleData.ownerId) {
@@ -1532,7 +2221,7 @@ async function startServer() {
       };
 
       if (postgresPool) {
-        const created = await createPostgresVehicle(postgresPool, newVehicle);
+        const created = await createPostgresVehicle(postgresPool, newVehicle, requireAuthenticatedUser(req).id);
         await recordAuditLog(req, 'VEHICLE_CREATED', 'vehicles', created.id, undefined, created);
         return res.status(201).json(created);
       }
@@ -1566,9 +2255,43 @@ async function startServer() {
     }
   });
 
+  // Close the previous driver assignment and create a new one. Historical
+  // assignments are never overwritten.
+  app.put('/api/vehicles/:id/driver', requirePermission('drivers.assign'), async (req, res) => {
+    try {
+      if (!postgresPool) {
+        throw new HttpError(503, 'Driver assignment history requires the PostgreSQL SACCO database.', 'DRIVER_HISTORY_UNAVAILABLE');
+      }
+      const driverName = sanitizePersonName(req.body?.driverName).trim();
+      const driverPhone = sanitizePhoneNumber(req.body?.driverPhone);
+      const reason = String(req.body?.reason || '').trim().slice(0, 500);
+      if (!isValidPersonName(driverName) || !isValidPhoneNumber(driverPhone)) {
+        throw new HttpError(400, 'A valid driver name and phone number are required.', 'INVALID_DRIVER_ASSIGNMENT');
+      }
+      const assignment = await assignPostgresDriver(
+        postgresPool,
+        req.params.id,
+        { driverName, driverPhone, reason },
+        requireAuthenticatedUser(req).id
+      );
+      await recordAuditLog(req, 'DRIVER_ASSIGNMENT_CHANGED', 'driver_assignments', assignment.id, undefined, assignment);
+      res.status(201).json(assignment);
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
   // API 7: Get Ledger Transactions
   app.get('/api/transactions', async (req, res) => {
     try {
+      const user = requireAuthenticatedUser(req);
+      if (isMemberUser(user)) {
+        const portal = await getMemberPortalData(user);
+        return res.json(portal.transactions);
+      }
+      if (!hasPermission(user.role, 'ledger.read.all')) {
+        throw new HttpError(403, 'Access denied.', 'ACCESS_DENIED');
+      }
       if (postgresPool) {
         return res.json(await listPostgresTransactions(postgresPool));
       }
@@ -1589,7 +2312,7 @@ async function startServer() {
   });
 
   // API 8: Book a transaction (Authorized roles: Chairman, Treasurer, Accountant)
-  app.post('/api/transactions', requireRoles(['Chairman', 'Treasurer', 'Accountant']), async (req, res) => {
+  app.post('/api/transactions', requirePermission('ledger.write'), async (req, res) => {
     try {
       const newTx = await createLedgerTransaction(req.body);
       await recordAuditLog(req, 'LEDGER_ENTRY_POSTED', 'ledger_entries', newTx.id, undefined, newTx);
@@ -1599,7 +2322,7 @@ async function startServer() {
     }
   });
 
-  app.put('/api/transactions/:id', requireRoles(['Chairman', 'Treasurer', 'Accountant']), async (req, res) => {
+  app.put('/api/transactions/:id', requirePermission('ledger.write'), async (req, res) => {
     try {
       const updated = await updateLedgerTransaction(req.params.id, req.body);
       await recordAuditLog(req, 'LEDGER_ENTRY_CORRECTED', 'ledger_entries', updated.id, undefined, {
@@ -1613,7 +2336,7 @@ async function startServer() {
   });
 
   // API 8B: Reverse a transaction without deleting immutable ledger history
-  app.post('/api/transactions/:id/reverse', requireRoles(['Chairman', 'Treasurer', 'Accountant']), async (req, res) => {
+  app.post('/api/transactions/:id/reverse', requirePermission('ledger.write'), async (req, res) => {
     try {
       const user = (req as any).user;
       const reversal = await reverseLedgerTransaction(req.params.id, user?.name || 'Sacco Ledger OS');
@@ -1627,13 +2350,21 @@ async function startServer() {
   // API 8C: Payment reconciliation register
   app.get('/api/payments', async (req, res) => {
     try {
+      const user = requireAuthenticatedUser(req);
+      if (isMemberUser(user)) {
+        const portal = await getMemberPortalData(user);
+        return res.json(portal.payments);
+      }
+      if (!hasPermission(user.role, 'payments.read.all')) {
+        throw new HttpError(403, 'Access denied.', 'ACCESS_DENIED');
+      }
       res.json(await listPaymentRecords());
     } catch (error: any) {
       sendApiError(res, error);
     }
   });
 
-  app.post('/api/payments/:id/reconcile', requireRoles(['Chairman', 'Treasurer', 'Accountant']), async (req, res) => {
+  app.post('/api/payments/:id/reconcile', requirePermission('payments.reconcile'), async (req, res) => {
     try {
       const user = (req as any).user;
       const payment = await reconcilePaymentRecord(req.params.id, req.body.memberId, user?.name || 'Sacco Ledger OS');
@@ -1646,6 +2377,25 @@ async function startServer() {
   // API 9: Sacco Dynamic Ledger Status (computed on server side)
   app.get('/api/system/status', async (req, res) => {
     try {
+      const user = requireAuthenticatedUser(req);
+      if (isMemberUser(user)) {
+        const portal = await getMemberPortalData(user);
+        const totalCredits = portal.transactions.filter(transaction => transaction.type === 'Credit').reduce((total, transaction) => total + transaction.amount, 0);
+        const totalDebits = portal.transactions.filter(transaction => transaction.type === 'Debit').reduce((total, transaction) => total + transaction.amount, 0);
+        return res.json({
+          totalTransactionsCount: portal.transactions.length,
+          totalMembersCount: 1,
+          totalFleetCount: portal.vehicles.length,
+          netCashFlow: totalCredits - totalDebits,
+          totalCapitalReserve: portal.member.sharesAmount,
+          totalMemberSavings: portal.member.savingsAmount,
+          systemHealth: 'member-scope',
+          auditTimestamp: new Date().toISOString()
+        });
+      }
+      if (!hasPermission(user.role, 'system.read.all')) {
+        throw new HttpError(403, 'Access denied.', 'ACCESS_DENIED');
+      }
       if (postgresPool) {
         const [transactions, members, vehicles] = await Promise.all([
           listPostgresTransactions(postgresPool),
@@ -1739,17 +2489,28 @@ async function startServer() {
     }
   });
 
+  // A Member never selects a record ID for this view. The server resolves the
+  // member identity from the authenticated SACCO profile and queries only that
+  // member's records.
+  app.get('/api/member-portal', requirePermission('member.portal.read'), async (req, res) => {
+    try {
+      res.json(await getMemberPortalData(requireAuthenticatedUser(req)));
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
   // =========================================================================
   // M-PESA PAYBILL & DARJA API INTEGRATION GATEWAY
   // =========================================================================
 
   // API 14: Get active M-Pesa configuration
-  app.get('/api/mpesa/config', authenticateSaccoUser, async (req, res) => {
+  app.get('/api/mpesa/config', authenticateSaccoUser, requirePermission('mpesa.manage'), async (req, res) => {
     res.json(getDarajaSafeConfig());
   });
 
   // API 15: Save/Update non-secret M-Pesa configuration (Admin/Treasurer)
-  app.post('/api/mpesa/config', authenticateSaccoUser, requireRoles(['Chairman', 'Treasurer']), async (req, res) => {
+  app.post('/api/mpesa/config', authenticateSaccoUser, requirePermission('mpesa.manage'), async (req, res) => {
     try {
       const newConfig = req.body;
       const updated = {
@@ -1778,7 +2539,7 @@ async function startServer() {
   });
 
   // API 15C: Safaricom C2B register URL using server-side Daraja credentials
-  app.post('/api/mpesa/register-url', authenticateSaccoUser, requireRoles(['Chairman', 'Treasurer']), async (req, res) => {
+  app.post('/api/mpesa/register-url', authenticateSaccoUser, requirePermission('mpesa.manage'), async (req, res) => {
     try {
       const { shortcode, mode, confirmationUrl, validationUrl } = req.body;
       const darajaConfig = getDarajaSafeConfig({ shortcode, mode });
@@ -1846,7 +2607,7 @@ async function startServer() {
   });
 
   // API 15D: Safaricom C2B sandbox simulation trigger
-  app.post('/api/mpesa/simulate-c2b', authenticateSaccoUser, requireRoles(['Chairman', 'Treasurer']), async (req, res) => {
+  app.post('/api/mpesa/simulate-c2b', authenticateSaccoUser, requirePermission('mpesa.manage'), async (req, res) => {
     try {
       const { shortcode, mode, amount, msisdn, billRefNumber } = req.body;
       const darajaConfig = getDarajaSafeConfig({ shortcode, mode });
@@ -1954,8 +2715,8 @@ async function startServer() {
       });
 
     } catch (error: any) {
-      console.error('M-Pesa Confirmation Webhook Error:', error);
-      return res.status(500).json({ error: error.message });
+      console.error('M-Pesa Confirmation Webhook Error.');
+      return res.status(500).json({ error: 'Confirmation could not be processed.' });
     }
   };
 
@@ -1963,7 +2724,7 @@ async function startServer() {
   app.post('/api/daraja/c2b-confirmation', handleC2BConfirmation);
 
   // API 16: Log direct M-Pesa cashless payment for both paybills
-  app.post('/api/mpesa/log-payment', authenticateSaccoUser, requireRoles(['Chairman', 'Treasurer', 'Accountant']), async (req, res) => {
+  app.post('/api/mpesa/log-payment', authenticateSaccoUser, requirePermission('payments.reconcile'), async (req, res) => {
     try {
       const { memberId, accountReference, payerPhone, amount, category, refCode, tillNumber } = req.body;
       const normalizedPayerPhone = sanitizePhoneNumber(payerPhone);

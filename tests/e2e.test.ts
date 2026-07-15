@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import test from 'node:test';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createTotpCode } from '../src/server/totp';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -52,6 +53,8 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       ALLOW_DEV_AUTH_FALLBACK: 'true',
       ALLOW_DEV_JWT_AUTH: 'true',
       JWT_SECRET: 'isolated-e2e-secret',
+      TOTP_ENCRYPTION_KEY: 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=',
+      SACCO_TEST_MODE: databaseUrl ? 'false' : 'true',
       VITE_FIREBASE_AUTH_ENABLED: 'false',
       DISABLE_HMR: 'true'
     },
@@ -98,7 +101,15 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
     }
   });
   assert.equal(bootstrap.user.role, 'Chairman');
-  assert.ok(bootstrap.token);
+  assert.equal(bootstrap.requiresTotp, true);
+  assert.ok(bootstrap.challengeId);
+  assert.ok(bootstrap.enrollment?.manualKey);
+  const bootstrapTotp = await request('/api/auth/totp/verify', 200, {
+    method: 'POST',
+    body: { challengeId: bootstrap.challengeId, code: createTotpCode(bootstrap.enrollment.manualKey) }
+  });
+  const token = bootstrapTotp.token as string;
+  assert.ok(token);
 
   await request('/api/auth/bootstrap', 409, {
     method: 'POST',
@@ -116,12 +127,41 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
     method: 'POST',
     body: { email: 'chairman.e2e@example.com', password: 'test-password' }
   });
-  const token = login.token as string;
+  assert.equal(login.requiresTotp, true);
+  const loginTotp = await request('/api/auth/totp/verify', 200, {
+    method: 'POST',
+    body: { challengeId: login.challengeId, code: createTotpCode(bootstrap.enrollment.manualKey) }
+  });
+  const loginToken = loginTotp.token as string;
+  const treasurer = await request('/api/users', 201, {
+    method: 'POST',
+    token,
+    body: {
+      fullName: 'E Two E Treasurer',
+      email: 'treasurer.e2e@example.com',
+      phone: '0700000001',
+      role: 'Treasurer',
+      password: 'treasurer-password'
+    }
+  });
+  assert.equal(treasurer.user.role, 'Treasurer');
+  const treasurerLogin = await request('/api/auth/login', 200, {
+    method: 'POST',
+    body: { identifier: 'treasurer.e2e@example.com', password: 'treasurer-password' }
+  });
+  assert.equal(treasurerLogin.requiresTotp, true);
+  assert.ok(treasurerLogin.enrollment?.manualKey);
+  const treasurerTotp = await request('/api/auth/totp/verify', 200, {
+    method: 'POST',
+    body: { challengeId: treasurerLogin.challengeId, code: createTotpCode(treasurerLogin.enrollment.manualKey) }
+  });
+  assert.equal(treasurerTotp.user.role, 'Treasurer');
+  assert.ok(treasurerTotp.token);
   await request('/api/members', 401);
 
   const firstMember = await request('/api/members', 201, {
     method: 'POST',
-    token,
+    token: loginToken,
     body: {
       id: 'member-e2e-one',
       name: 'Alice Kamau',
@@ -132,7 +172,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
   });
   const secondMember = await request('/api/members', 201, {
     method: 'POST',
-    token,
+    token: loginToken,
     body: {
       id: 'member-e2e-two',
       name: 'Brian Otieno',
@@ -143,7 +183,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
   });
   await request('/api/members', 409, {
     method: 'POST',
-    token,
+    token: loginToken,
     body: {
       id: 'member-e2e-duplicate',
       name: 'Duplicate Member',
@@ -155,7 +195,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
 
   await request('/api/vehicles', 400, {
     method: 'POST',
-    token,
+    token: loginToken,
     body: {
       plateNumber: 'KDA 123A',
       ownerId: 'missing-member',
@@ -168,7 +208,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
   });
   const vehicle = await request('/api/vehicles', 201, {
     method: 'POST',
-    token,
+    token: loginToken,
     body: {
       id: 'vehicle-e2e-one',
       plateNumber: 'KDA 123A',
@@ -183,7 +223,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
   assert.equal(vehicle.ownerName, firstMember.name);
   await request('/api/vehicles', 409, {
     method: 'POST',
-    token,
+    token: loginToken,
     body: {
       plateNumber: 'KDA123A',
       ownerId: firstMember.id,
@@ -197,7 +237,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
 
   await request('/api/transactions', 400, {
     method: 'POST',
-    token,
+    token: loginToken,
     body: {
       description: 'Unregistered contribution',
       refCode: 'E2E-MISSING-MEMBER',
@@ -405,4 +445,59 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
   assert.equal(status.netCashFlow, 2450);
   assert.equal(status.totalCapitalReserve, 675);
   assert.equal(status.totalMemberSavings, 1975);
+
+  if (!databaseUrl) {
+    await request('/api/testing/member-profile', 201, {
+      method: 'POST',
+      token,
+      body: {
+        memberId: firstMember.id,
+        email: 'alice.member@example.com',
+        password: 'member-password'
+      }
+    });
+    const memberLogin = await request('/api/auth/login', 200, {
+      method: 'POST',
+      body: { identifier: firstMember.phoneNumber, password: 'member-password' }
+    });
+    const memberToken = memberLogin.token as string;
+
+    const ownMembers = await request<any[]>('/api/members', 200, { token: memberToken });
+    assert.equal(ownMembers.length, 1);
+    assert.equal(ownMembers[0].id, firstMember.id);
+    assert.notEqual(ownMembers[0].idNumber, firstMember.idNumber);
+
+    const ownVehicles = await request<any[]>('/api/vehicles', 200, { token: memberToken });
+    assert.deepEqual(ownVehicles.map(vehicleItem => vehicleItem.id), [vehicle.id]);
+
+    const ownTransactions = await request<any[]>('/api/transactions?memberId=' + secondMember.id, 200, { token: memberToken });
+    assert.ok(ownTransactions.length > 0);
+    assert.ok(ownTransactions.every(transaction => transaction.memberId === firstMember.id || transaction.vehiclePlate === vehicle.plateNumber));
+
+    const ownPayments = await request<any[]>('/api/payments?memberId=' + secondMember.id, 200, { token: memberToken });
+    assert.ok(ownPayments.every(payment => payment.memberId === firstMember.id || payment.vehiclePlate === vehicle.plateNumber));
+    assert.ok(ownPayments.every(payment => payment.rawPayload === undefined));
+
+    const portal = await request('/api/member-portal', 200, { token: memberToken });
+    assert.equal(portal.member.id, firstMember.id);
+    assert.equal(portal.transactions.some((transaction: any) => transaction.memberId === secondMember.id), false);
+
+    const memberStatus = await request('/api/system/status', 200, { token: memberToken });
+    assert.equal(memberStatus.totalMembersCount, 1);
+    assert.equal(memberStatus.totalFleetCount, 1);
+
+    await request('/api/users', 403, { token: memberToken });
+    await request('/api/transactions', 403, {
+      method: 'POST', token: memberToken,
+      body: { description: 'Unauthorized', refCode: 'MEMBER-BLOCKED', type: 'Credit', category: 'Daily Contribution', amount: 1, tillNumber: 'VehicleTill' }
+    });
+    await request(`/api/vehicles/${vehicle.id}/driver`, 403, {
+      method: 'PUT', token: memberToken,
+      body: { driverName: 'Blocked Driver', driverPhone: '0712345678' }
+    });
+    await request('/api/mpesa/log-payment', 403, {
+      method: 'POST', token: memberToken,
+      body: { memberId: secondMember.id, amount: 1, category: 'Daily Contribution', refCode: 'MEMBER-PAYMENT', tillNumber: 'VehicleTill' }
+    });
+  }
 });

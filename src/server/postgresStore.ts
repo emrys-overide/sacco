@@ -1,5 +1,13 @@
 import type { Pool, PoolClient, QueryResultRow } from 'pg';
-import type { Member, PaymentRecord, Transaction, TransactionCategory, Vehicle } from '../types';
+import type {
+  DriverAssignment,
+  Member,
+  MemberLoanSummary,
+  PaymentRecord,
+  Transaction,
+  TransactionCategory,
+  Vehicle
+} from '../types';
 import { normalizeTransactionInput, type LedgerInput } from './ledgerPolicy';
 
 const CATEGORY_TO_ACCOUNT: Record<TransactionCategory, string> = {
@@ -64,6 +72,7 @@ function mapMember(row: QueryResultRow): Member {
   return {
     id: String(row.id),
     name: row.full_name,
+    membershipNumber: row.member_number || undefined,
     idNumber: row.national_id || '',
     phoneNumber: row.phone || '',
     status: row.status,
@@ -73,6 +82,20 @@ function mapMember(row: QueryResultRow): Member {
     savingsAmount: toNumber(row.savings_amount),
     initialLoanAmount: toNumber(row.initial_loan_amount),
     loanBalance: toNumber(row.derived_loan_balance)
+  };
+}
+
+function mapDriverAssignment(row: QueryResultRow): DriverAssignment {
+  return {
+    id: String(row.id),
+    vehicleId: String(row.vehicle_id),
+    vehiclePlate: row.plate_number || undefined,
+    driverName: row.driver_name,
+    driverPhone: row.driver_phone || undefined,
+    startDateTime: new Date(row.start_date_time).toISOString(),
+    endDateTime: row.end_date_time ? new Date(row.end_date_time).toISOString() : undefined,
+    status: row.status,
+    reason: row.reason || undefined
   };
 }
 
@@ -201,6 +224,45 @@ export async function listPostgresMembers(pool: Pool): Promise<Member[]> {
   return result.rows.map(mapMember);
 }
 
+export async function getPostgresMember(pool: Pool, memberId: string): Promise<Member | null> {
+  const result = await pool.query(
+    `SELECT m.*,
+       assigned_vehicle.plate_number AS vehicle_assigned,
+       COALESCE(fin.shares_amount, 0) AS shares_amount,
+       COALESCE(fin.savings_amount, 0) AS savings_amount,
+       GREATEST(0, m.initial_loan_amount - COALESCE(fin.loan_repaid, 0)) AS derived_loan_balance
+     FROM members m
+     LEFT JOIN LATERAL (
+       SELECT v.plate_number FROM vehicles v
+       WHERE v.member_id = m.id ORDER BY v.created_at LIMIT 1
+     ) assigned_vehicle ON TRUE
+     LEFT JOIN LATERAL (
+       SELECT
+         SUM(CASE WHEN le.account_type = 'DailyContribution' THEN
+           (CASE WHEN le.transaction_type = 'Credit' THEN 1 ELSE -1 END) *
+           (CASE WHEN le.metadata ? 'savingsContribution' THEN 0 ELSE le.amount * 0.30 END)
+           ELSE 0 END) AS shares_amount,
+         SUM(CASE
+           WHEN le.account_type = 'Savings' THEN
+             (CASE WHEN le.transaction_type = 'Credit' THEN 1 ELSE -1 END) * le.amount
+           WHEN le.account_type = 'DailyContribution' THEN
+             (CASE WHEN le.transaction_type = 'Credit' THEN 1 ELSE -1 END) *
+             (CASE WHEN le.metadata ? 'savingsContribution'
+               THEN COALESCE((le.metadata->>'savingsContribution')::numeric, 0)
+               ELSE le.amount * 0.70 END)
+           ELSE 0 END) AS savings_amount,
+         SUM((CASE WHEN le.transaction_type = 'Credit' THEN 1 ELSE -1 END) *
+           COALESCE((le.metadata->>'loanRepay')::numeric, 0)) AS loan_repaid
+       FROM ledger_entries le
+       WHERE le.member_id = m.id AND le.status IN ('Posted', 'Reversed')
+     ) fin ON TRUE
+     WHERE m.id = $1
+     LIMIT 1`,
+    [memberId]
+  );
+  return result.rowCount ? mapMember(result.rows[0]) : null;
+}
+
 export async function createPostgresMember(pool: Pool, member: Omit<Member, 'id'>): Promise<Member> {
   try {
     const result = await pool.query(
@@ -226,7 +288,24 @@ export async function listPostgresVehicles(pool: Pool): Promise<Vehicle[]> {
   return result.rows.map(mapVehicle);
 }
 
-export async function createPostgresVehicle(pool: Pool, vehicle: Omit<Vehicle, 'id'>): Promise<Vehicle> {
+export async function listPostgresVehiclesByOwner(pool: Pool, memberId: string): Promise<Vehicle[]> {
+  const result = await pool.query(
+    `SELECT v.*, m.full_name AS owner_name, r.route_name
+     FROM vehicles v
+     JOIN members m ON m.id = v.member_id
+     LEFT JOIN routes r ON r.id = v.route_id
+     WHERE v.member_id = $1
+     ORDER BY v.created_at DESC`,
+    [memberId]
+  );
+  return result.rows.map(mapVehicle);
+}
+
+export async function createPostgresVehicle(
+  pool: Pool,
+  vehicle: Omit<Vehicle, 'id'>,
+  assignedByUserId?: string
+): Promise<Vehicle> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -242,6 +321,27 @@ export async function createPostgresVehicle(pool: Pool, vehicle: Omit<Vehicle, '
        RETURNING *`,
       [vehicle.plateNumber, vehicle.ownerId, routeResult.rows[0].id, vehicle.capacity, vehicle.driverName, vehicle.driverPhone, vehicle.status]
     );
+    const driverResult = await client.query(
+      `SELECT id FROM drivers
+       WHERE ($1 <> '' AND phone = $1) OR ($1 = '' AND full_name = $2)
+       ORDER BY created_at
+       LIMIT 1`,
+      [vehicle.driverPhone || '', vehicle.driverName]
+    );
+    const driverId = driverResult.rowCount
+      ? driverResult.rows[0].id
+      : (await client.query(
+          `INSERT INTO drivers (full_name, phone)
+           VALUES ($1, NULLIF($2, ''))
+           RETURNING id`,
+          [vehicle.driverName, vehicle.driverPhone || '']
+        )).rows[0].id;
+    await client.query(
+      `INSERT INTO driver_assignments (
+         vehicle_id, driver_id, owner_member_id, start_date_time, status, assigned_by, reason
+       ) VALUES ($1, $2, $3, now(), 'Active', $4, 'Initial vehicle onboarding')`,
+      [result.rows[0].id, driverId, vehicle.ownerId, assignedByUserId || null]
+    );
     await client.query('COMMIT');
     return mapVehicle({ ...result.rows[0], owner_name: vehicle.ownerName, route_name: vehicle.route });
   } catch (error) {
@@ -250,6 +350,87 @@ export async function createPostgresVehicle(pool: Pool, vehicle: Omit<Vehicle, '
   } finally {
     client.release();
   }
+}
+
+export async function assignPostgresDriver(
+  pool: Pool,
+  vehicleId: string,
+  input: { driverName: string; driverPhone: string; reason?: string },
+  assignedByUserId?: string
+): Promise<DriverAssignment> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const vehicleResult = await client.query(
+      'SELECT id, member_id, plate_number FROM vehicles WHERE id = $1 FOR UPDATE',
+      [vehicleId]
+    );
+    if (!vehicleResult.rowCount || !vehicleResult.rows[0].member_id) {
+      throw new PersistenceError(404, 'Vehicle to assign a driver was not found.', 'VEHICLE_NOT_FOUND');
+    }
+
+    const vehicle = vehicleResult.rows[0];
+    await client.query(
+      `UPDATE driver_assignments
+       SET status = 'Closed', end_date_time = now(), reason = COALESCE(NULLIF($2, ''), reason)
+       WHERE vehicle_id = $1 AND status = 'Active'`,
+      [vehicleId, input.reason || 'Driver reassigned']
+    );
+    const existingDriver = await client.query(
+      `SELECT id FROM drivers
+       WHERE ($1 <> '' AND phone = $1) OR ($1 = '' AND full_name = $2)
+       ORDER BY created_at
+       LIMIT 1`,
+      [input.driverPhone || '', input.driverName]
+    );
+    const driverId = existingDriver.rowCount
+      ? existingDriver.rows[0].id
+      : (await client.query(
+          `INSERT INTO drivers (full_name, phone)
+           VALUES ($1, NULLIF($2, ''))
+           RETURNING id`,
+          [input.driverName, input.driverPhone || '']
+        )).rows[0].id;
+    const assignment = await client.query(
+      `INSERT INTO driver_assignments (
+         vehicle_id, driver_id, owner_member_id, start_date_time, status, assigned_by, reason
+       ) VALUES ($1, $2, $3, now(), 'Active', $4, $5)
+       RETURNING *`,
+      [vehicle.id, driverId, vehicle.member_id, assignedByUserId || null, input.reason || null]
+    );
+    await client.query(
+      `UPDATE vehicles
+       SET driver_name = $2, driver_phone = $3
+       WHERE id = $1`,
+      [vehicle.id, input.driverName, input.driverPhone || null]
+    );
+    await client.query('COMMIT');
+    return mapDriverAssignment({
+      ...assignment.rows[0],
+      plate_number: vehicle.plate_number,
+      driver_name: input.driverName,
+      driver_phone: input.driverPhone
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (error instanceof PersistenceError) throw error;
+    return translatePgError(error);
+  } finally {
+    client.release();
+  }
+}
+
+export async function listPostgresDriverAssignmentsByOwner(pool: Pool, memberId: string): Promise<DriverAssignment[]> {
+  const result = await pool.query(
+    `SELECT da.*, v.plate_number, d.full_name AS driver_name, d.phone AS driver_phone
+     FROM driver_assignments da
+     JOIN vehicles v ON v.id = da.vehicle_id
+     JOIN drivers d ON d.id = da.driver_id
+     WHERE da.owner_member_id = $1
+     ORDER BY da.start_date_time DESC`,
+    [memberId]
+  );
+  return result.rows.map(mapDriverAssignment);
 }
 
 const TRANSACTION_SELECT = `
@@ -261,6 +442,20 @@ const TRANSACTION_SELECT = `
 
 export async function listPostgresTransactions(pool: Pool): Promise<Transaction[]> {
   const result = await pool.query(`${TRANSACTION_SELECT} ORDER BY le.entry_time DESC`);
+  return result.rows.map(mapTransaction);
+}
+
+export async function listPostgresTransactionsByMember(pool: Pool, memberId: string): Promise<Transaction[]> {
+  const result = await pool.query(
+    `${TRANSACTION_SELECT}
+     WHERE le.member_id = $1
+        OR EXISTS (
+          SELECT 1 FROM vehicles owned_vehicle
+          WHERE owned_vehicle.id = le.vehicle_id AND owned_vehicle.member_id = $1
+        )
+     ORDER BY le.entry_time DESC`,
+    [memberId]
+  );
   return result.rows.map(mapTransaction);
 }
 
@@ -401,15 +596,62 @@ export async function correctPostgresTransaction(
   }
 }
 
+const PAYMENT_SELECT = `
+  SELECT p.*, m.full_name AS member_name, v.plate_number
+  FROM mpesa_payments p
+  LEFT JOIN members m ON m.id = p.matched_member_id
+  LEFT JOIN vehicles v ON v.id = p.matched_vehicle_id`;
+
 export async function listPostgresPayments(pool: Pool): Promise<PaymentRecord[]> {
+  const result = await pool.query(`${PAYMENT_SELECT} ORDER BY p.transaction_time DESC`);
+  return result.rows.map(mapPayment);
+}
+
+export async function listPostgresPaymentsByMember(pool: Pool, memberId: string): Promise<PaymentRecord[]> {
   const result = await pool.query(
-    `SELECT p.*, m.full_name AS member_name, v.plate_number
-     FROM mpesa_payments p
-     LEFT JOIN members m ON m.id = p.matched_member_id
-     LEFT JOIN vehicles v ON v.id = p.matched_vehicle_id
-     ORDER BY p.transaction_time DESC`
+    `${PAYMENT_SELECT}
+     WHERE p.matched_member_id = $1
+        OR EXISTS (
+          SELECT 1 FROM vehicles owned_vehicle
+          WHERE owned_vehicle.id = p.matched_vehicle_id AND owned_vehicle.member_id = $1
+        )
+     ORDER BY p.transaction_time DESC`,
+    [memberId]
   );
   return result.rows.map(mapPayment);
+}
+
+export async function listPostgresLoansByMember(pool: Pool, memberId: string): Promise<MemberLoanSummary[]> {
+  const result = await pool.query(
+    `SELECT l.id, l.principal_amount, l.issue_date, l.due_date, l.status,
+       COALESCE(SUM(lr.amount), 0) AS repaid_amount,
+       COALESCE(
+         json_agg(
+           json_build_object('id', lr.id, 'repaymentDate', lr.repayment_date, 'amount', lr.amount)
+           ORDER BY lr.repayment_date DESC
+         ) FILTER (WHERE lr.id IS NOT NULL),
+         '[]'::json
+       ) AS repayments
+     FROM loans l
+     LEFT JOIN loan_repayments lr ON lr.loan_id = l.id
+     WHERE l.member_id = $1
+     GROUP BY l.id
+     ORDER BY l.issue_date DESC`,
+    [memberId]
+  );
+  return result.rows.map(row => ({
+    id: String(row.id),
+    principalAmount: toNumber(row.principal_amount),
+    outstandingBalance: Math.max(0, toNumber(row.principal_amount) - toNumber(row.repaid_amount)),
+    issueDate: String(row.issue_date).slice(0, 10),
+    dueDate: row.due_date ? String(row.due_date).slice(0, 10) : undefined,
+    status: row.status,
+    repayments: row.repayments.map((repayment: any) => ({
+      id: String(repayment.id),
+      repaymentDate: String(repayment.repaymentDate).slice(0, 10),
+      amount: toNumber(repayment.amount)
+    }))
+  }));
 }
 
 export async function findPostgresPaymentByRef(pool: Pool, refCode: string): Promise<PaymentRecord | null> {

@@ -4,17 +4,22 @@
 
 export type UserRole = 'Chairman' | 'Secretary' | 'Treasurer' | 'Auditor' | 'Member' | 'Accountant';
 
+export type AccountStatus = 'PendingActivation' | 'Active' | 'Suspended' | 'Disabled' | 'Rejected' | 'Locked';
+
 export interface User {
   id: string;
   name: string;
   email: string;
   role: UserRole;
   phone: string;
+  accountStatus?: AccountStatus;
+  linkedMemberId?: string;
 }
 
 export interface Member {
   id: string;
   name: string;
+  membershipNumber?: string;
   idNumber: string;
   phoneNumber: string;
   status: 'Active' | 'Inactive' | 'Pending';
@@ -24,6 +29,28 @@ export interface Member {
   savingsAmount: number;    // Future capability prepared
   loanBalance?: number;     // Outstanding member loan, reduced by daily loan repayments
   initialLoanAmount?: number;
+}
+
+export interface DriverAssignment {
+  id: string;
+  vehicleId: string;
+  vehiclePlate?: string;
+  driverName: string;
+  driverPhone?: string;
+  startDateTime: string;
+  endDateTime?: string;
+  status: 'Active' | 'Closed';
+  reason?: string;
+}
+
+export interface MemberLoanSummary {
+  id: string;
+  principalAmount: number;
+  outstandingBalance: number;
+  issueDate: string;
+  dueDate?: string;
+  status: string;
+  repayments: Array<{ id: string; repaymentDate: string; amount: number }>;
 }
 
 export interface Vehicle {
@@ -94,6 +121,15 @@ export interface PaymentRecord {
   transactionId?: string;
   note?: string;
   rawPayload?: unknown;
+}
+
+export interface MemberPortalData {
+  member: Member;
+  vehicles: Vehicle[];
+  driverAssignments: DriverAssignment[];
+  transactions: Transaction[];
+  payments: PaymentRecord[];
+  loans: MemberLoanSummary[];
 }
 
 export interface TargetCollection {

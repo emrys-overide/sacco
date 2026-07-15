@@ -1,5 +1,4 @@
 import { buildSaccoAuthHeaders } from './auth';
-import { getFirebaseIdToken } from './firebase';
 
 export class ApiError extends Error {
   status: number;
@@ -14,7 +13,7 @@ export class ApiError extends Error {
 }
 
 export async function getSaccoAccessToken(fallbackToken = ''): Promise<string> {
-  return (await getFirebaseIdToken()) || fallbackToken;
+  return fallbackToken;
 }
 
 export async function fetchSaccoJson<T>(url: string, init: RequestInit = {}, fallbackToken = ''): Promise<T> {
