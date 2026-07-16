@@ -1,126 +1,64 @@
-# No-Card Pilot Hosting Plan
+# Co-op Bank B2B Hosting Plan
 
-## Summary
+## Objective
 
-Deploy the Vite frontend and API on Cloudflare Workers with Static Assets, retain Firebase Authentication,
-and move PostgreSQL to Supabase Free. This avoids container cold starts and preserves the existing
-PostgreSQL service code through Cloudflare Hyperdrive.
+Deploy a durable HTTPS endpoint for Co-operative Bank Core Banking B2B Event Notifications without reintroducing Safaricom Daraja. The bank sends account credit/debit events to the application; the application stores each event once and exposes it to authorised SACCO staff for review.
 
-Use a durable M-Pesa ingestion path:
+```
+Co-op Bank B2B notification → HTTPS application endpoint → PostgreSQL durable inbox → staff review/reconciliation
+```
 
-Safaricom callback → Cloudflare Worker → D1 inbox + Queue → Supabase ledger
+The B2B endpoint is not a member SMS service and it does not automatically post money to a member ledger. In particular, debit events must never become income automatically, and a credit must be reviewed before it is reconciled with a member or transaction.
 
-The browser being offline will not affect payment capture. When Supabase is unavailable, callbacks remain in
-D1 and are retried automatically; opening the app can also trigger an immediate retry.
+## Production Requirements
 
-## Free-Tier Requirements
+- A stable public HTTPS URL registered with Co-op Bank:
+  `https://your-domain.example/api/webhooks/coop-bank/b2b-ipn`
+- PostgreSQL with migration `008_coop_bank_b2b_ipn.sql` applied before the bank enables notifications.
+- A long random shared Bearer token, or Basic credentials if Co-op Bank requires that method. Store all values in the host secret manager, never in the frontend.
+- `COOP_B2B_ALLOWED_ACCOUNT_NUMBERS` set to the full authorised Co-op account number(s), comma separated.
+- `COOP_B2B_IPN_CURRENCY=KES` unless Co-op Bank explicitly agrees otherwise.
+- Monitoring for endpoint errors, duplicate-event rates, unreconciled-event age, and database availability.
 
-- Cloudflare account:
-  - Workers: 100,000 requests/day and 10 ms CPU/request.
-  - Static assets: free and unlimited requests.
-  - Hyperdrive: 100,000 database queries/day.
-  - D1: 5 million rows read/day, 100,000 rows written/day, 5 GB storage.
-  - Queues: 10,000 operations/day with 24-hour message retention. (Workers
-    (https://developers.cloudflare.com/workers/platform/pricing/), D1
-    (https://developers.cloudflare.com/d1/platform/pricing/), Queues
-    (https://developers.cloudflare.com/queues/platform/pricing/))
+Co-op Bank treats a `200` or `201` response as successful delivery. The app responds `201` when a new transaction ID is persisted and `200` when a repeated notification is safely deduplicated. Authentication, validation, and configuration failures deliberately return a non-success response so the bank’s retry/operations process can be used.
 
-- Supabase Free account:
-  - Two active projects, 500 MB database limit, 5 GB egress.
-  - Free projects may pause after roughly one week of insufficient activity.
-  - No production SLA or managed backup guarantee. (Supabase billing
-    (https://supabase.com/docs/guides/platform/billing-on-supabase), project pausing
-    (https://supabase.com/docs/guides/platform/free-project-pausing))
+## Required Secrets
 
-- Existing Firebase Spark project:
-  - Enable Email/Password Authentication.
-  - Add the deployed Cloudflare domain to Authorized Domains.
-  - Spark supports approximately 3,000 daily active users for common providers; email limits include 150
-    password resets/day and 1,000 verification emails/day. (Firebase Auth limits
-    (https://firebase.google.com/docs/auth/limits))
+```dotenv
+APP_URL="https://your-domain.example"
+DATABASE_URL="postgresql://..."
+JWT_SECRET="..."
+TOTP_ENCRYPTION_KEY="..."
+COOP_B2B_IPN_AUTH_MODE="token"
+COOP_B2B_IPN_TOKEN="long-random-shared-secret"
+COOP_B2B_ALLOWED_ACCOUNT_NUMBERS="your-full-authorised-account-number"
+COOP_B2B_IPN_CURRENCY="KES"
+```
 
-- Safaricom Daraja sandbox or production credentials and permission to register public HTTPS callback URLs.
-- Node.js 22+, npm, Wrangler CLI, GitHub repository, and a stable workers.dev hostname. A custom domain is
-  optional.
+For a Basic-auth integration, set `COOP_B2B_IPN_AUTH_MODE="basic"` and supply the two `COOP_B2B_IPN_BASIC_*` secrets instead of the token. Confirm the exact authentication method with Co-op Bank during onboarding.
 
-## Implementation Changes
+## Deployment Sequence
 
-- Replace the Express-only routing layer with a Worker-compatible Hono router while preserving current /api/
-  * request and response contracts.
+1. Host the Node application and PostgreSQL on infrastructure that remains reachable continuously; do not use a sleep-to-zero free tier for the bank callback.
+2. Deploy the application and run `npm run db:migrate`.
+3. Configure the secrets and restart the application.
+4. Confirm the authenticated staff page, **Banking**, reports that webhook authentication and at least one allowed account are configured.
+5. Give Co-op Bank the production HTTPS callback URL and the agreed authentication details through their approved onboarding process.
+6. Ask the bank to send a controlled test notification. Verify the event appears once as `PendingReview`, has the correct transaction ID, amount, account number, and event type, and that no ledger entry was created automatically.
+7. Establish the SACCO’s written process for matching a reviewed credit to a member contribution and handling debit/reversal events.
 
-- Keep the Node Express entry point for local Docker development, sharing authentication, ledger, payment,
-  and PostgreSQL services between both runtimes.
+## Acceptance Tests
 
-- Use pg through a Hyperdrive binding connected to Supabase’s session pooler on port 5432; retain atomic
-  PostgreSQL transactions, unique references, reversals, and reconciliation safeguards.
+- A request without valid endpoint credentials is rejected.
+- A valid credit event for an allowed account returns `201` and is visible only to staff with payment-reading permission.
+- Repeating the same `TransactionId` returns `200` and leaves one durable inbox record.
+- An event for an unlisted account is rejected and creates no inbox record.
+- A member session cannot read the Banking configuration or B2B events.
+- A database migration and application restart preserve all received events.
 
-- Replace Firebase Admin middleware in the Worker with Firebase ID-token verification using Google’s public
-  Secure Token keys, validating issuer, audience, expiry, UID, active SACCO profile, and database role.
+## Operational Notes
 
-- Add Worker bindings:
-  - HYPERDRIVE for Supabase PostgreSQL.
-  - MPESA_INBOX D1 database.
-  - MPESA_QUEUE and MPESA_DLQ.
-  - Secrets for Daraja credentials; Firebase client values remain build-time public configuration.
-
-- Add D1 mpesa_callback_inbox with unique trans_id, raw payload, received time, status, attempts, last
-  error, and synchronization timestamps.
-
-- On each M-Pesa callback:
-  - Validate required fields and amount.
-  - Insert idempotently into D1 before acknowledging Safaricom.
-  - Enqueue the transaction ID.
-  - Return the same success response for duplicate callbacks.
-
-- Queue consumers process callbacks into Supabase using the existing atomic payment-and-ledger operation.
-  Failed messages use exponential retry and a dead-letter queue.
-
-- Add a scheduled Worker that scans unsynchronized D1 records and requeues them. Queue expiry must never
-  lose a payment because D1 remains the durable inbox.
-
-- Add authenticated endpoints:
-  - GET /api/system/sync-status for pending, failed, and last-synchronized callback counts.
-  - POST /api/payments/sync for Chairman, Treasurer, and Accountant roles to request immediate requeueing.
-
-- Retain unsynchronized D1 records indefinitely and synchronized receipts for 90 days; Supabase remains the
-  authoritative permanent ledger and raw callback archive.
-
-- Build the Vite application as Worker static assets with SPA fallback and API-first routing. Add
-  dev:worker, build:worker, deploy:worker, and remote migration commands.
-
-- Configure workers.dev as the initial public hostname, update APP_URL and Daraja callback URLs, then
-  register:
-  - /api/daraja/c2b-validation
-  - /api/daraja/c2b-confirmation
-
-- Add a documented encrypted pg_dump command. For the pilot, run it daily and before every migration because
-  Supabase Free is not an adequate sole backup for financial records.
-
-## Test And Acceptance Plan
-
-- Run typecheck, unit tests, Worker build, and existing Node build.
-- Verify Firebase sign-in, token expiry, disabled profiles, and every backend role restriction.
-- Apply migrations to an empty Supabase project and verify members, vehicles, ledger entries, reversals,
-  derived balances, and reports.
-
-- Submit duplicate M-Pesa callbacks and confirm one payment record and one ledger posting.
-- Simulate Supabase failure, confirm the callback is acknowledged and retained in D1, restore Supabase,
-  trigger scheduled/manual sync, and confirm exactly-once financial posting.
-
-- Verify pending/dead-letter visibility and retry controls.
-  registration.
-
-- Monitor Worker, Queue, D1, Hyperdrive, Supabase storage, and egress quotas during the pilot.
-
-## Assumptions
-
-- The current local PostgreSQL database is empty, so only schema and seed migrations are required; no
-  operational data import is needed.
-
-- The deployment is a small pilot, not the final system of record.
-- Free tiers provide no uptime SLA. If the pilot becomes operationally dependent on live M-Pesa and official
-  accounting, move Supabase and Workers to paid plans with automated backups and alerting.
-
-- Cloudflare is the application host; Firebase is retained for authentication rather than Firebase Hosting
-  because backend hosting on Firebase requires Blaze billing. (Firebase Cloud Run integration
-  (https://firebase.google.com/docs/hosting/cloud-run))
+- Keep raw bank payloads server-side for audit evidence; never return them to the browser.
+- Rotate the webhook secret through an agreed change window with Co-op Bank; support the old and new credential only if a deliberate transition plan is implemented.
+- Back up PostgreSQL before migrations and monitor pending events daily.
+- Historical `mpesa_*` tables remain only for existing data compatibility. No Daraja route, credential, registration, simulation, or automatic payment-posting path is active.

@@ -150,7 +150,7 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
     content += `------------------------------------------------------\n`;
     content += `Full Name              : ${member.name}\n`;
     content += `National ID Number     : ${member.idNumber}\n`;
-    content += `Phone Number (M-Pesa)  : ${member.phoneNumber}\n`;
+    content += `Phone Number            : ${member.phoneNumber}\n`;
     content += `Sacco Registration Date: ${member.dateRegistered || 'N/A'}\n`;
     content += `Membership Status      : ${member.status}\n`;
     content += `Assigned Vehicle Plate : ${member.vehicleAssigned || 'No vehicle currently assigned'}\n\n`;
@@ -439,7 +439,7 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                     <div className="w-full bg-slate-200 h-1 rounded-full mt-3 overflow-hidden">
                       <div className="bg-emerald-600 h-full rounded-full" style={{ width: '65%' }}></div>
                     </div>
-                    <p className="text-[9px] text-slate-400 mt-1.5 font-medium">Reconciled daily M-Pesa ledger</p>
+                    <p className="text-[9px] text-slate-400 mt-1.5 font-medium">Reconciled daily bank ledger</p>
                   </div>
 
                   {/* Card 2: Shares Capital */}
@@ -668,7 +668,7 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
 
                 <div>
                   <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
-                    Phone Number (M-Pesa linked) *
+                    Phone Number *
                   </label>
                   <input
                   type="tel"

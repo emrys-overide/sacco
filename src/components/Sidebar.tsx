@@ -15,7 +15,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Database,
-  Smartphone
+  Building2
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -52,7 +52,7 @@ export default function Sidebar({
     { name: 'Expenses', icon: <Receipt className="w-4 h-4" /> },
     { name: 'Members', icon: <Users className="w-4 h-4" /> },
     { name: 'Fleet', icon: <Bus className="w-4 h-4" /> },
-    { name: 'Paybill Link', icon: <Smartphone className="w-4 h-4" /> },
+    { name: 'Banking', icon: <Building2 className="w-4 h-4" /> },
     { name: 'Reports', icon: <FileSpreadsheet className="w-4 h-4" /> },
     { name: 'Blueprint', icon: <FileCode className="w-4 h-4" /> }
   ];

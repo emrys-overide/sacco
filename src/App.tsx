@@ -15,7 +15,7 @@ import ReportsView from './components/ReportsView';
 import DailyCollectionsView from './components/DailyCollectionsView';
 import BlueprintView from './components/BlueprintView';
 import ExpensesView from './components/ExpensesView';
-import PaybillView from './components/PaybillView';
+import CoopBankView from './components/CoopBankView';
 import MemberPortal from './components/MemberPortal';
 
 const MEMBER_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary', 'Treasurer'];
@@ -405,15 +405,9 @@ export default function App() {
             signerName={signerName}
           />
         );
-      case 'Paybill Link':
+      case 'Banking':
         return (
-          <PaybillView
-            members={members}
-            vehicles={vehicles}
-            currentUserRole={currentUser?.role || 'Member'}
-            fallbackAuthToken={authToken}
-            onRefreshData={handleRefreshData}
-          />
+          <CoopBankView fallbackAuthToken={authToken} />
         );
       default:
         return <div className="p-8">View not found</div>;

@@ -1,6 +1,6 @@
 import type { TransactionCategory, TillType } from '../types';
 
-export const COOP_PAYBILL_NUMBER = '400200';
+export const COOP_BANK_NAME = 'Co-operative Bank of Kenya';
 
 export type CollectionTill = Exclude<TillType, 'None'>;
 
@@ -44,4 +44,3 @@ export function findCollectionAccount(value: unknown): CollectionAccountConfig |
     account.accountNumber === normalized
   ) || null;
 }
-

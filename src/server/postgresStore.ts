@@ -148,7 +148,9 @@ function mapPayment(row: QueryResultRow): PaymentRecord {
   return {
     id: String(row.id),
     timestamp: new Date(row.transaction_time).toISOString(),
-    source: row.source === 'DarajaWebhook' ? 'Webhook' : 'Manual',
+    // Historical webhook rows are exposed generically; new bank events use
+    // coop_bank_ipn_events and never pass through this legacy table.
+    source: row.source === 'Manual' ? 'Manual' : 'Webhook',
     status: row.status,
     refCode: row.trans_id,
     amount: toNumber(row.amount),
@@ -476,7 +478,7 @@ async function insertTransaction(client: Pool | PoolClient, transaction: Transac
         transaction.timestamp.slice(0, 10), transaction.timestamp, transaction.type,
         CATEGORY_TO_ACCOUNT[transaction.category], transaction.tillNumber, transaction.amount,
         transaction.memberId || null, transaction.vehiclePlate || '', transaction.refCode,
-        transaction.description, transaction.refCode.startsWith('Q') ? 'DarajaWebhook' : 'Manual',
+        transaction.description, 'Manual',
         transaction.reversalOf || null, JSON.stringify(transactionMetadata(transaction))
       ]
     );
@@ -700,7 +702,7 @@ export async function savePostgresPayment(pool: Pool | PoolClient, payment: Paym
         payment.payerPhone, payment.payerName, payment.tillNumber, payment.amount, payment.timestamp,
         payment.status, MATCH_TO_DB[payment.matchMethod], payment.memberId || null, payment.destinationAccount || null, payment.vehiclePlate || '',
         payment.transactionId || null, JSON.stringify(payment.rawPayload || {}),
-        payment.source === 'Webhook' ? 'DarajaWebhook' : 'Manual', JSON.stringify(metadata)
+        'Manual', JSON.stringify(metadata)
       ]
     );
     return mapPayment(result.rows[0]);

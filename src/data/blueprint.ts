@@ -37,14 +37,14 @@ The Sacco Management System is built using a modern, scalable multi-tier archite
 *   **Frontend (React + Vite + Tailwind CSS):** A lightweight, responsive Single Page Application (SPA) optimized for low-bandwidth mobile networks in Kenya (Edge/3G). It uses aggressive client-side caching via LocalStorage and IndexedDB.
 *   **Backend (Python Django + DRF):** A secure, robust, enterprise-grade REST API utilizing Python 3.12 and Django. Handles complex business logic, transactional consistency, PDF generation, and external integration hooks.
 *   **Database (PostgreSQL 16):** Houses relational models including complex constraint checks for member accounts, shares, loans, and transaction history.
-*   **Caching & Queue Layer (Redis + Celery):** Offloads long-running tasks like M-Pesa IPN validation and daily financial report generation.`
+*   **Caching & Queue Layer (Redis + Celery):** Offloads long-running tasks like Co-op Bank B2B event review and daily financial report generation.`
   },
   {
     id: 'database',
     title: '2. Database Schema',
     subtitle: 'PostgreSQL Relational schema optimized for audit trails',
     content: `### 2.1 Database Naming Conventions
-*   **Tables:** Lowercase snake_case pluralized (e.g., \`sacco_members\`, \`mpesa_transactions\`).
+*   **Tables:** Lowercase snake_case pluralized (e.g., \`sacco_members\`, \`coop_bank_ipn_events\`).
 *   **Columns:** Lowercase snake_case singular (e.g., \`id\`, \`plate_number\`, \`created_at\`).
 *   **Primary Keys:** Named exactly \`id\` as a UUIDv4 to prevent sequential ID guessing.
 *   **Foreign Keys:** Suffix with \`_id\` referencing parent table (e.g., \`owner_id\` references \`sacco_members(id)\`).
@@ -96,7 +96,7 @@ CREATE TABLE sacco_vehicles (
 -- Financial Transactions (Immutable Double-Entry Ledger)
 CREATE TABLE financial_ledger (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    ref_code VARCHAR(50) UNIQUE NOT NULL, -- M-Pesa Transaction ID (e.g. QE93FD82H1) or Voucher Code
+    ref_code VARCHAR(50) UNIQUE NOT NULL, -- Co-op Bank transaction ID, bank reference, or voucher code
     member_id UUID REFERENCES sacco_members(id) ON DELETE RESTRICT,
     vehicle_id UUID REFERENCES sacco_vehicles(id) ON DELETE RESTRICT,
     type VARCHAR(10) NOT NULL CHECK (type IN ('Credit', 'Debit')),
@@ -147,12 +147,12 @@ All endpoints are strictly versioned: \`/api/v1/\`.
 | \`/vehicles/\` | GET | All staff | List and search Matatus |
 | \`/vehicles/\` | POST | Chairman, Secretary | Register a new vehicle |
 | \`/transactions/\` | GET | All staff | Browse immutable transaction ledger |
-| \`/transactions/\` | POST | Treasurer | Record daily contribution / M-Pesa code |
+| \`/transactions/\` | POST | Treasurer | Record daily contribution / bank reference |
 | \`/reports/summary/\` | GET | All staff | Get summary stats, targets |
 | \`/reports/pdf/\` | GET | Chairman, Treasurer | Generate signed PDF financial ledger export |
 
 ### 3.3 Role-Based Permissions matrix
-*   **Treasurer:** Full control over financial accounting, M-Pesa reconciliation, and daily cash logging.
+*   **Treasurer:** Full control over financial accounting, Co-op Bank event review, and daily cash logging.
 *   **Secretary:** Owns registrations, contact details updating, minutes writing, and agenda creation.
 *   **Chairman:** Ultimate Sacco supervisor, approves loans, reads audited statements, updates platform settings.
 *   **Auditor:** Read-only access to all ledgers, reporting metrics, and validation logs.`
@@ -160,7 +160,7 @@ All endpoints are strictly versioned: \`/api/v1/\`.
   {
     id: 'security',
     title: '4. Security & Compliance Plan',
-    subtitle: 'Fulfilling strict CBK Sacco guidelines and M-Pesa API safety',
+    subtitle: 'Fulfilling strict CBK Sacco guidelines and Co-op Bank B2B safety',
     content: `### 4.1 Data Security & Privacy
 Matatu Saccos process sensitive financial information. Compliance with the Central Bank of Kenya (CBK) and the Kenya Data Protection Act (ODPC) is native:
 
@@ -169,11 +169,12 @@ Matatu Saccos process sensitive financial information. Compliance with the Centr
 *   **Audit Logging:** Every user action (logins, exports, registrations) logged into an immutable database journal with IP address, user agent, and timestamp.
 *   **Input Sanitization:** All forms enforce strict type checks, custom XSS protection middleware, and SQL injection prevention via Django ORM parameterized queries.
 
-### 4.2 M-Pesa IPN Gateway Integration Security
-When integrating the Safaricom M-Pesa Daraja API (C2B or STK Push):
-1.  **IP Whitelisting:** Sacco endpoints only accept callback payloads from verified Safaricom IP ranges.
-2.  **Signature Matching:** Secure signatures inside Safaricom headers verified using public certificates.
-3.  **Ref Code Idempotency:** Financial Ledger enforces a strict unique constraint on \`ref_code\`. Safaricom callback attempts with repeated Transaction IDs are processed exactly once.`
+### 4.2 Co-op Bank B2B Event Integration Security
+When integrating Co-op Bank Core Banking Event Notifications:
+1.  **HTTPS and authentication:** The registered endpoint accepts only the configured Bearer token or Basic credentials; secrets are stored only on the server.
+2.  **Account allow-list:** Events are accepted only for authorised full Co-op account numbers and expected currency.
+3.  **Transaction ID idempotency:** The durable inbox has a unique \`transaction_id\`; repeated bank notifications receive a successful response without creating a duplicate record.
+4.  **Review before posting:** Credit and debit events are recorded as pending review. A bank event is never automatically treated as member income or posted to the ledger.`
   },
   {
     id: 'scaling',
@@ -224,7 +225,7 @@ services:
     title: '6. Implementation Roadmap',
     subtitle: 'Agile phases moving from foundation to full financial OS',
     content: `### 6.1 Phase Breakdown
-*   **Phase 1 (Current Core):** Role-based Authentication, Members Registry, Vehicle Fleets, M-Pesa transactions recording, Daily aggregates, PDF summaries.
+*   **Phase 1 (Current Core):** Role-based Authentication, Members Registry, Vehicle Fleets, Co-op Bank event recording, Daily aggregates, PDF summaries.
 *   **Phase 2 (Savings & Shares):** Integration of shares ledger, interest calculators, and custom withdraw vouchers.
 *   **Phase 3 (Mobile Loan Matrix):** Loan application pipelines, automated credit scoring based on historic daily contributions, guarantor lockups, and auto-disbursal API.
 *   **Phase 4 (Reporting Automation):** Month-end close workflow, automated dashboard forecasting, Excel/PDF exports, and management review approvals.

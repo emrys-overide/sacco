@@ -7,15 +7,16 @@ The executable migrations live in:
 ```text
 database/migrations/001_initial_schema.sql
 database/migrations/002_seed_reference_data.sql
+database/migrations/008_coop_bank_b2b_ipn.sql
 ```
 
 ## Design Principles
 
 - `ledger_entries` is the financial source of truth.
-- M-Pesa callbacks first land in `mpesa_payments`; they become ledger entries only after validation or reconciliation.
+- Co-op Bank B2B events first land in `coop_bank_ipn_events`; they remain pending review until an authorised officer reconciles them.
 - Posted ledger entries are never edited silently. Corrections use reversal entries.
 - Money is stored as `NUMERIC(14,2)`, never floating point.
-- Raw Daraja payloads are retained as `JSONB` for traceability.
+- Raw bank event payloads are retained as `JSONB` for traceability and are never returned to the browser.
 - Summary tables and views are derived from ledger history or locked month-end snapshots.
 - Production secrets stay outside the database and codebase.
 
@@ -32,8 +33,7 @@ members ──1 share_accounts
 routes ──< vehicles
 vehicles ──< ledger_entries
 vehicles ──< daily_vehicle_records
-mpesa_tills ──< mpesa_payments
-mpesa_payments ──0..1 ledger_entries
+coop_bank_ipn_events ──0..1 ledger_entries
 loans ──< loan_repayments
 monthly_closings ──< monthly_closing_lines
 ```
@@ -64,17 +64,6 @@ Stores route metadata that can be shared across many vehicles.
 
 Stores plate number, owner/member link, route link, capacity, driver details, and fleet status.
 
-`mpesa_tills`
-
-Defines known tills and their default accounting treatment:
-
-```text
-VehicleTill  -> Paybill 400200 / Account 48277  -> DailyContribution
-UtilityTill  -> Paybill 400200 / Account 871671 -> Savings
-```
-
-Daraja sandbox shortcode `600000` is test-only runtime config, not production reference data.
-
 ## Ledger And Payments
 
 `ledger_entries`
@@ -89,9 +78,13 @@ The source table for all official financial movement. Important controls:
 - `status`: `Posted`, `Reversed`, `Void`, or `PendingReview`.
 - `reversal_of`: points to the original entry when correcting a posted transaction.
 
-`mpesa_payments`
+`coop_bank_ipn_events`
 
-Stores every Daraja C2B payment callback with raw payload and reconciliation state. `trans_id` is unique to prevent duplicate posting. A payment can link to one ledger entry once reconciled.
+Stores every authenticated Co-op Bank B2B account event with its raw payload and reconciliation state. `transaction_id` is unique to prevent duplicate receipt. Events are not automatically posted: an authorised officer must explicitly reconcile a reviewed event before it can link to a ledger entry. Credit and debit events are both retained for review.
+
+`mpesa_payments` and `mpesa_tills`
+
+Legacy compatibility tables for prior records only. No live Daraja endpoint writes to them.
 
 `daily_vehicle_records`
 
@@ -145,8 +138,8 @@ MEMBER_CREATED
 VEHICLE_CREATED
 LEDGER_ENTRY_POSTED
 LEDGER_ENTRY_REVERSED
-MPESA_CALLBACK_RECEIVED
-MPESA_PAYMENT_RECONCILED
+COOP_BANK_EVENT_RECEIVED
+COOP_BANK_EVENT_RECONCILED
 MONTH_CLOSED
 CONFIG_UPDATED
 ```
@@ -161,16 +154,16 @@ Computes member shares, savings, credits, and debits from posted ledger rows.
 
 Computes daily totals by till and account type.
 
-`v_unreconciled_mpesa_payments`
+`coop_bank_ipn_events` filtered by `status = 'PendingReview'`
 
-Lists pending and unmatched M-Pesa payments for the reconciliation queue.
+Lists bank events awaiting reconciliation review.
 
 ## Indexing Strategy
 
 The initial migration indexes:
 
 - Ledger date, member, vehicle, account type, till type, status, reference code.
-- M-Pesa status, bill reference, transaction time, till type.
+- Bank event status, transaction ID, account number, event type, and received time.
 - Daily vehicle date.
 - Loans by member.
 - Audit logs by actor and entity.
@@ -186,6 +179,7 @@ Add more indexes only after slow-query evidence.
 004_add_reporting_functions.sql
 005_backfill_legacy_data.sql
 006_enforce_not_null_after_backfill.sql
+008_coop_bank_b2b_ipn.sql
 ```
 
 ## Production Safety Rules
@@ -196,6 +190,6 @@ Add more indexes only after slow-query evidence.
 - Backfill in batches for large tables.
 - Add `NOT NULL` and stricter constraints only after validation.
 - Use reversals for posted money movement.
-- Never store Daraja consumer secrets, JWT secrets, or service account JSON in tables.
+- Never store Co-op Bank webhook credentials, JWT secrets, or service account JSON in tables.
 - Never store Firebase passwords or refresh tokens in tables.
 - Keep `.env`, deployment secrets, and CI secrets outside git.

@@ -77,7 +77,7 @@ export interface Transaction {
   memberName?: string;
   vehiclePlate?: string;
   description: string;
-  refCode: string; // M-Pesa or Cash voucher code
+  refCode: string; // Bank reference or cash voucher code
   type: TransactionType;
   category: TransactionCategory;
   amount: number;
@@ -100,6 +100,32 @@ export interface Transaction {
 export type PaymentStatus = 'Pending' | 'Reconciled' | 'Unmatched' | 'Rejected' | 'Duplicate';
 export type PaymentSource = 'Manual' | 'Webhook';
 export type PaymentMatchMethod = 'Member ID' | 'Vehicle Plate' | 'Phone Number' | 'Manual Assignment' | 'None';
+
+export type CoopBankEventType = 'CREDIT' | 'DEBIT';
+export type CoopBankEventStatus = 'PendingReview' | 'Reconciled' | 'Ignored';
+
+/** A durable Co-operative Bank B2B/IPN event. Raw bank payloads remain server-only. */
+export interface CoopBankEvent {
+  id: string;
+  transactionId: string;
+  paymentRef?: string;
+  accountNumber: string;
+  amount: number;
+  currency: string;
+  eventType: CoopBankEventType;
+  narration: string;
+  customerMemoLine1?: string;
+  customerMemoLine2?: string;
+  customerMemoLine3?: string;
+  bookedBalance?: number;
+  clearedBalance?: number;
+  exchangeRate?: number;
+  postingDate?: string;
+  valueDate?: string;
+  transactionDate?: string;
+  status: CoopBankEventStatus;
+  receivedAt: string;
+}
 
 export interface PaymentRecord {
   id: string;
@@ -137,14 +163,4 @@ export interface TargetCollection {
   current: number;
   target: number;
   unit: string;
-}
-
-export interface MPesaConfig {
-  shortcode: string;
-  callbackUrl: string;
-  mode: 'sandbox' | 'production';
-  stkPushEnabled: boolean;
-  hasConsumerKey?: boolean;
-  hasConsumerSecret?: boolean;
-  credentialsConfigured?: boolean;
 }

@@ -75,7 +75,7 @@ password/TOTP or SMS proof -> users.id -> users.role + users.linked_member_id
 | --- | --- |
 | Chairman | SACCO-wide administration and finance. |
 | Secretary | Member/fleet administration and reports. |
-| Treasurer | Financial operations, reconciliation, M-Pesa configuration, reports. |
+| Treasurer | Financial operations, Co-op Bank B2B event review, reconciliation, reports. |
 | Accountant | Financial records and reconciliation. |
 | Auditor | Read/report-only access. |
 | Member | Read-only personal portal and owned vehicle financial records only. |

@@ -1368,7 +1368,7 @@ export default function ReportsView({
                         <tbody className="divide-y">
                           <tr><td className="p-2">Liquidity Ratio (Assets/Liabilities)</td><td className="p-2 text-right font-bold text-emerald-800">2.5 : 1</td></tr>
                           <tr><td className="p-2">Expense / Revenue Percentage</td><td className="p-2 text-right font-bold text-rose-700">100.80%</td></tr>
-                          <tr><td className="p-2">Cashless M-Pesa Till Segregation</td><td className="p-2 text-right font-bold text-emerald-600">100.00% Verified</td></tr>
+                          <tr><td className="p-2">Bank Collection Account Segregation</td><td className="p-2 text-right font-bold text-emerald-600">100.00% Verified</td></tr>
                         </tbody>
                       </table>
                     </div>
@@ -1607,7 +1607,7 @@ export default function ReportsView({
                     <div>
                       <h4 className="font-bold uppercase text-slate-900 underline text-xs">Note 6: Cash and Cash Equivalents</h4>
                       <p className="mt-1">
-                        Consists of cashless M-Pesa custody tills and floating reserve account balances merged for immediate operations clearance:
+                        Consists of bank collection accounts and floating reserve account balances merged for immediate operations clearance:
                       </p>
                       <table className="w-full text-left mt-2 border text-xs">
                         <tbody>
@@ -1758,7 +1758,7 @@ export default function ReportsView({
                     return;
                   }
                   if (!journalRefCode.trim()) {
-                    setJournalError("An M-Pesa ref or cash voucher code is required.");
+                    setJournalError("A bank reference or cash voucher code is required.");
                     return;
                   }
                   if (journalRequiresRegistration) {
@@ -2063,7 +2063,7 @@ export default function ReportsView({
                       <tbody className="divide-y divide-slate-100 text-slate-700">
                         {/* 1. Cash and bank equivalents */}
                         <tr>
-                          <td className="p-2.5 font-bold">Cash at Bank &amp; M-Pesa Tills</td>
+                          <td className="p-2.5 font-bold">Cash at Bank &amp; Collection Accounts</td>
                           <td className="p-2.5 text-right text-emerald-800">
                             {reportFinancials.cashAndEquiv >= 0 ? reportFinancials.cashAndEquiv.toLocaleString() + '.00' : '-'}
                           </td>

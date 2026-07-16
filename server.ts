@@ -12,7 +12,6 @@ import {
   createPostgresMember,
   createPostgresTransaction,
   createPostgresVehicle,
-  findPostgresPaymentByRef,
   getPostgresMember,
   listPostgresDriverAssignmentsByOwner,
   listPostgresLoansByMember,
@@ -31,7 +30,6 @@ import {
 import {
   LedgerPolicyError,
   getDailyContributionBalanceDelta,
-  matchPaymentMember,
   normalizeRefCode,
   normalizeTransactionInput,
   type LedgerInput
@@ -56,20 +54,15 @@ import {
   type SaccoPermission
 } from './src/server/accessControl';
 import { createBase32Secret, createTotpUri, verifyTotpCode } from './src/server/totp';
-import {
-  COOP_PAYBILL_NUMBER,
-  findCollectionAccount,
-  getCollectionAccountByTill,
-  type CollectionAccountConfig
-} from './src/lib/collectionAccounts';
+import { COOP_BANK_NAME } from './src/lib/collectionAccounts';
 import type {
+  CoopBankEvent,
+  CoopBankEventStatus,
+  CoopBankEventType,
   Member,
   MemberPortalData,
   PaymentRecord,
-  PaymentSource,
-  PaymentStatus,
   Transaction,
-  TransactionCategory,
   UserRole,
   Vehicle
 } from './src/types';
@@ -85,21 +78,6 @@ class HttpError extends Error {
     this.code = code;
   }
 }
-
-type IncomingPaymentInput = {
-  source: PaymentSource;
-  refCode: string;
-  amount: number | string;
-  shortcode: string;
-  accountReference?: string;
-  payerPhone?: string;
-  payerName?: string;
-  memberId?: string;
-  category?: TransactionCategory;
-  rawPayload?: unknown;
-  recorderName: string;
-  destinationAccountNumber?: string;
-};
 
 type AuthorizedUser = {
   id: string;
@@ -127,7 +105,6 @@ const initialUsers: AuthorizedUser[] = [];
 const initialMembers: Member[] = [];
 const initialVehicles: any[] = [];
 const initialTransactions: Transaction[] = [];
-type DarajaMode = 'sandbox' | 'production';
 
 const JWT_ISSUER = 'matatu-sacco-management-system';
 const JWT_AUDIENCE = 'sacco-api';
@@ -447,89 +424,6 @@ async function verifyJwt(token: string): Promise<AuthorizedUser> {
   return user;
 }
 
-function getDarajaMode(value: unknown = process.env.DARAJA_MODE): DarajaMode {
-  return value === 'production' ? 'production' : 'sandbox';
-}
-
-function getDarajaBaseUrl(mode: DarajaMode): string {
-  return mode === 'production' ? 'https://api.safaricom.co.ke' : 'https://sandbox.safaricom.co.ke';
-}
-
-function parsePublicDarajaCallbackUrl(value: unknown, fieldName: string): URL {
-  let callbackUrl: URL;
-  try {
-    callbackUrl = new URL(String(value || '').trim());
-  } catch {
-    throw new HttpError(400, `${fieldName} must be a valid public HTTPS URL.`, 'INVALID_CALLBACK_URL');
-  }
-
-  const host = callbackUrl.hostname.toLowerCase();
-  const isPrivateIpv4 = /^(127\.|10\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(host);
-  const isLocalHost = host === 'localhost' || host.endsWith('.localhost') || host === '::1' || host === '[::1]';
-  if (callbackUrl.protocol !== 'https:' || !host || isPrivateIpv4 || isLocalHost) {
-    throw new HttpError(400, `${fieldName} must use a publicly reachable HTTPS domain, not localhost or a private address.`, 'INVALID_CALLBACK_URL');
-  }
-
-  return callbackUrl;
-}
-
-function getDarajaSafeConfig(overrides: { shortcode?: unknown; mode?: unknown } = {}) {
-  const mode = getDarajaMode(overrides.mode);
-  const shortcode = String(overrides.shortcode || process.env.DARAJA_SHORTCODE || '').trim();
-  const callbackBaseUrl = String(process.env.DARAJA_CALLBACK_BASE_URL || process.env.APP_URL || '').replace(/\/+$/, '');
-  const consumerKey = process.env.DARAJA_CONSUMER_KEY || '';
-  const consumerSecret = process.env.DARAJA_CONSUMER_SECRET || '';
-
-  return {
-    mode,
-    shortcode,
-    callbackBaseUrl,
-    hasConsumerKey: Boolean(consumerKey),
-    hasConsumerSecret: Boolean(consumerSecret),
-    credentialsConfigured: Boolean(consumerKey && consumerSecret),
-    stkPushEnabled: process.env.DARAJA_STK_PUSH_ENABLED !== 'false'
-  };
-}
-
-function getDarajaCredentials() {
-  const consumerKey = process.env.DARAJA_CONSUMER_KEY || '';
-  const consumerSecret = process.env.DARAJA_CONSUMER_SECRET || '';
-  if (!consumerKey || !consumerSecret) {
-    throw new HttpError(400, 'Daraja credentials are not configured. Set DARAJA_CONSUMER_KEY and DARAJA_CONSUMER_SECRET on the server.', 'DARAJA_CREDENTIALS_MISSING');
-  }
-  return { consumerKey, consumerSecret };
-}
-
-async function getDarajaAccessToken(mode: DarajaMode): Promise<string> {
-  const { consumerKey, consumerSecret } = getDarajaCredentials();
-  const authHeader = Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64');
-  const tokenRes = await fetch(`${getDarajaBaseUrl(mode)}/oauth/v1/generate?grant_type=client_credentials`, {
-    method: 'GET',
-    headers: {
-      Authorization: `Basic ${authHeader}`
-    }
-  });
-
-  if (!tokenRes.ok) {
-    const errText = await tokenRes.text();
-    throw new HttpError(400, `Failed to authenticate with Safaricom Daraja API. Status: ${tokenRes.status}`, errText);
-  }
-
-  const tokenData = await tokenRes.json() as any;
-  if (!tokenData.access_token) {
-    throw new HttpError(400, 'Safaricom response did not contain an access_token.', 'DARAJA_TOKEN_MISSING');
-  }
-
-  return tokenData.access_token;
-}
-
-const defaultMPesaConfig = {
-  shortcode: process.env.DARAJA_SHORTCODE || '',
-  callbackUrl: process.env.DARAJA_CALLBACK_BASE_URL || '',
-  mode: getDarajaMode(),
-  stkPushEnabled: process.env.DARAJA_STK_PUSH_ENABLED !== 'false'
-};
-
 // Optional Firestore development adapter.
 const firestoreOptions: ConstructorParameters<typeof Firestore>[0] = {};
 const firestoreProjectId = process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT;
@@ -548,7 +442,7 @@ const localStore = {
   vehicles: [...initialVehicles],
   transactions: [...initialTransactions],
   payments: [] as PaymentRecord[],
-  mpesaConfig: { ...defaultMPesaConfig },
+  coopBankEvents: [] as Array<CoopBankEvent & { rawPayload: unknown }>,
   mfaChallenges: [] as Array<{
     id: string;
     userId: string;
@@ -567,6 +461,230 @@ let useFirestore = Boolean(
   process.env.GCLOUD_PROJECT
 );
 const allowInMemoryStore = !isProduction && process.env.ALLOW_IN_MEMORY_DB === 'true';
+
+type CoopBankIncomingEvent = Omit<CoopBankEvent, 'id' | 'status' | 'receivedAt'> & { rawPayload: unknown };
+
+function normalizeBankAccountNumber(value: unknown): string {
+  return String(value || '').replace(/\s+/g, '');
+}
+
+function configuredCoopBankAccounts(): string[] {
+  return String(process.env.COOP_B2B_ALLOWED_ACCOUNT_NUMBERS || '')
+    .split(',')
+    .map(normalizeBankAccountNumber)
+    .filter(Boolean);
+}
+
+function coopBankAuthMode(): 'token' | 'basic' {
+  const configured = String(process.env.COOP_B2B_IPN_AUTH_MODE || 'token').trim().toLowerCase();
+  if (configured === 'token' || configured === 'basic') return configured;
+  throw new HttpError(503, 'Co-op Bank IPN authentication is not configured.', 'COOP_B2B_AUTH_UNAVAILABLE');
+}
+
+function constantTimeMatches(actual: string, expected: string): boolean {
+  const actualValue = Buffer.from(actual);
+  const expectedValue = Buffer.from(expected);
+  return actualValue.length === expectedValue.length && crypto.timingSafeEqual(actualValue, expectedValue);
+}
+
+function assertCoopBankIpnAuthentication(req: express.Request): void {
+  const mode = coopBankAuthMode();
+  const authorization = String(req.headers.authorization || '');
+  if (mode === 'token') {
+    const token = String(process.env.COOP_B2B_IPN_TOKEN || '');
+    if (!token) throw new HttpError(503, 'Co-op Bank IPN authentication is not configured.', 'COOP_B2B_AUTH_UNAVAILABLE');
+    const supplied = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length).trim() : '';
+    if (!constantTimeMatches(supplied, token)) {
+      throw new HttpError(401, 'Co-op Bank IPN authentication failed.', 'COOP_B2B_AUTH_FAILED');
+    }
+    return;
+  }
+
+  const username = String(process.env.COOP_B2B_IPN_BASIC_USERNAME || '');
+  const password = String(process.env.COOP_B2B_IPN_BASIC_PASSWORD || '');
+  if (!username || !password) throw new HttpError(503, 'Co-op Bank IPN authentication is not configured.', 'COOP_B2B_AUTH_UNAVAILABLE');
+  const encoded = authorization.startsWith('Basic ') ? authorization.slice('Basic '.length).trim() : '';
+  let decoded = '';
+  try {
+    decoded = Buffer.from(encoded, 'base64').toString('utf8');
+  } catch {
+    decoded = '';
+  }
+  const separator = decoded.indexOf(':');
+  const suppliedUsername = separator >= 0 ? decoded.slice(0, separator) : '';
+  const suppliedPassword = separator >= 0 ? decoded.slice(separator + 1) : '';
+  if (!constantTimeMatches(suppliedUsername, username) || !constantTimeMatches(suppliedPassword, password)) {
+    throw new HttpError(401, 'Co-op Bank IPN authentication failed.', 'COOP_B2B_AUTH_FAILED');
+  }
+}
+
+function optionalNumericBankField(value: unknown, fieldName: string): number | undefined {
+  const raw = String(value ?? '').trim();
+  if (!raw) return undefined;
+  const numberValue = Number(raw);
+  if (!Number.isFinite(numberValue)) {
+    throw new HttpError(422, `${fieldName} must be numeric when supplied.`, 'COOP_B2B_PAYLOAD_INVALID');
+  }
+  return numberValue;
+}
+
+function normalizeCoopBankEvent(payload: unknown): CoopBankIncomingEvent {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new HttpError(422, 'Co-op Bank IPN payload must be a JSON object.', 'COOP_B2B_PAYLOAD_INVALID');
+  }
+  const body = payload as Record<string, unknown>;
+  const transactionId = String(body.TransactionId || '').trim();
+  const accountNumber = normalizeBankAccountNumber(body.AcctNo);
+  const amount = Number(body.Amount);
+  const currency = String(body.Currency || '').trim().toUpperCase();
+  const eventType = String(body.EventType || '').trim().toUpperCase() as CoopBankEventType;
+  const allowedAccounts = configuredCoopBankAccounts();
+  const requiredCurrency = String(process.env.COOP_B2B_IPN_CURRENCY || 'KES').trim().toUpperCase();
+
+  if (!transactionId || !accountNumber || !Number.isFinite(amount) || amount <= 0 || !currency || !['CREDIT', 'DEBIT'].includes(eventType)) {
+    throw new HttpError(422, 'Co-op Bank IPN payload is missing a valid transaction ID, account, amount, currency, or event type.', 'COOP_B2B_PAYLOAD_INVALID');
+  }
+  if (!allowedAccounts.length) {
+    throw new HttpError(503, 'No Co-op Bank collection accounts are configured.', 'COOP_B2B_ACCOUNTS_UNAVAILABLE');
+  }
+  if (!allowedAccounts.includes(accountNumber)) {
+    throw new HttpError(422, 'The supplied Co-op Bank account is not registered for this SACCO.', 'COOP_B2B_ACCOUNT_UNRECOGNIZED');
+  }
+  if (currency !== requiredCurrency) {
+    throw new HttpError(422, `Only ${requiredCurrency} Co-op Bank events are accepted.`, 'COOP_B2B_CURRENCY_UNSUPPORTED');
+  }
+
+  return {
+    transactionId,
+    paymentRef: String(body.PaymentRef || '').trim() || undefined,
+    accountNumber,
+    amount,
+    currency,
+    eventType,
+    narration: String(body.Narration || '').trim(),
+    customerMemoLine1: String(body.CustMemoLine1 || '').trim() || undefined,
+    customerMemoLine2: String(body.CustMemoLine2 || '').trim() || undefined,
+    customerMemoLine3: String(body.CustMemoLine3 || '').trim() || undefined,
+    bookedBalance: optionalNumericBankField(body.BookedBalance, 'BookedBalance'),
+    clearedBalance: optionalNumericBankField(body.ClearedBalance, 'ClearedBalance'),
+    exchangeRate: optionalNumericBankField(body.ExchangeRate, 'ExchangeRate'),
+    postingDate: String(body.PostingDate || '').trim() || undefined,
+    valueDate: String(body.ValueDate || '').trim() || undefined,
+    transactionDate: String(body.TransactionDate || '').trim() || undefined,
+    rawPayload: payload
+  };
+}
+
+function toPublicCoopBankEvent(event: CoopBankEvent & { rawPayload?: unknown }): CoopBankEvent {
+  const { rawPayload: _rawPayload, ...publicEvent } = event;
+  return publicEvent;
+}
+
+async function persistCoopBankEvent(event: CoopBankIncomingEvent): Promise<{ created: boolean; event: CoopBankEvent }> {
+  const receivedAt = new Date().toISOString();
+  const status: CoopBankEventStatus = 'PendingReview';
+  if (postgresPool) {
+    const inserted = await postgresPool.query(
+      `INSERT INTO coop_bank_ipn_events (
+         transaction_id, payment_ref, account_number, amount, currency, event_type,
+         narration, customer_memo_line1, customer_memo_line2, customer_memo_line3,
+         booked_balance, cleared_balance, exchange_rate, posting_date, value_date,
+         transaction_date, status, raw_payload
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb
+       ) ON CONFLICT (transaction_id) DO NOTHING
+       RETURNING id, transaction_id, payment_ref, account_number, amount, currency, event_type,
+                 narration, customer_memo_line1, customer_memo_line2, customer_memo_line3,
+                 booked_balance, cleared_balance, exchange_rate, posting_date, value_date,
+                 transaction_date, status, received_at`,
+      [
+        event.transactionId, event.paymentRef || null, event.accountNumber, event.amount, event.currency, event.eventType,
+        event.narration, event.customerMemoLine1 || null, event.customerMemoLine2 || null, event.customerMemoLine3 || null,
+        event.bookedBalance ?? null, event.clearedBalance ?? null, event.exchangeRate ?? null, event.postingDate || null,
+        event.valueDate || null, event.transactionDate || null, status, JSON.stringify(event.rawPayload)
+      ]
+    );
+    if (inserted.rowCount) {
+      return { created: true, event: mapCoopBankEvent(inserted.rows[0]) };
+    }
+    const existing = await postgresPool.query(
+      `SELECT id, transaction_id, payment_ref, account_number, amount, currency, event_type,
+              narration, customer_memo_line1, customer_memo_line2, customer_memo_line3,
+              booked_balance, cleared_balance, exchange_rate, posting_date, value_date,
+              transaction_date, status, received_at
+       FROM coop_bank_ipn_events WHERE transaction_id = $1 LIMIT 1`,
+      [event.transactionId]
+    );
+    return { created: false, event: mapCoopBankEvent(existing.rows[0]) };
+  }
+
+  const existing = localStore.coopBankEvents.find(item => item.transactionId === event.transactionId);
+  if (existing) return { created: false, event: toPublicCoopBankEvent(existing) };
+  const stored: CoopBankEvent & { rawPayload: unknown } = {
+    id: `coop-event-${crypto.randomUUID()}`,
+    ...event,
+    status,
+    receivedAt
+  };
+  localStore.coopBankEvents.push(stored);
+  return { created: true, event: toPublicCoopBankEvent(stored) };
+}
+
+function mapCoopBankEvent(row: any): CoopBankEvent {
+  return {
+    id: String(row.id),
+    transactionId: String(row.transaction_id),
+    paymentRef: row.payment_ref || undefined,
+    accountNumber: String(row.account_number),
+    amount: Number(row.amount),
+    currency: String(row.currency),
+    eventType: String(row.event_type) as CoopBankEventType,
+    narration: row.narration || '',
+    customerMemoLine1: row.customer_memo_line1 || undefined,
+    customerMemoLine2: row.customer_memo_line2 || undefined,
+    customerMemoLine3: row.customer_memo_line3 || undefined,
+    bookedBalance: row.booked_balance === null || row.booked_balance === undefined ? undefined : Number(row.booked_balance),
+    clearedBalance: row.cleared_balance === null || row.cleared_balance === undefined ? undefined : Number(row.cleared_balance),
+    exchangeRate: row.exchange_rate === null || row.exchange_rate === undefined ? undefined : Number(row.exchange_rate),
+    postingDate: row.posting_date || undefined,
+    valueDate: row.value_date || undefined,
+    transactionDate: row.transaction_date || undefined,
+    status: String(row.status) as CoopBankEventStatus,
+    receivedAt: new Date(row.received_at).toISOString()
+  };
+}
+
+async function listCoopBankEvents(): Promise<CoopBankEvent[]> {
+  if (postgresPool) {
+    const result = await postgresPool.query(
+      `SELECT id, transaction_id, payment_ref, account_number, amount, currency, event_type,
+              narration, customer_memo_line1, customer_memo_line2, customer_memo_line3,
+              booked_balance, cleared_balance, exchange_rate, posting_date, value_date,
+              transaction_date, status, received_at
+       FROM coop_bank_ipn_events ORDER BY received_at DESC LIMIT 250`
+    );
+    return result.rows.map(mapCoopBankEvent);
+  }
+  return localStore.coopBankEvents
+    .map(toPublicCoopBankEvent)
+    .sort((left, right) => new Date(right.receivedAt).getTime() - new Date(left.receivedAt).getTime());
+}
+
+function coopBankPublicConfig() {
+  const authMode = coopBankAuthMode();
+  const baseUrl = String(process.env.APP_URL || '').replace(/\/+$/, '');
+  const configured = authMode === 'token'
+    ? Boolean(process.env.COOP_B2B_IPN_TOKEN)
+    : Boolean(process.env.COOP_B2B_IPN_BASIC_USERNAME && process.env.COOP_B2B_IPN_BASIC_PASSWORD);
+  return {
+    provider: COOP_BANK_NAME,
+    webhookPath: '/api/webhooks/coop-bank/b2b-ipn',
+    webhookUrl: baseUrl ? `${baseUrl}/api/webhooks/coop-bank/b2b-ipn` : '',
+    authMode: authMode === 'token' ? 'Token' : 'Basic',
+    authenticationConfigured: configured,
+    configuredAccountCount: configuredCoopBankAccounts().length
+  };
+}
 
 function passwordAuthenticationEnabled(): boolean {
   return process.env.PASSWORD_AUTH_ENABLED !== 'false';
@@ -963,10 +1081,6 @@ function sendApiError(res: express.Response, error: any) {
   return res.status(500).json({ error: 'Unexpected server error.', code: 'INTERNAL_ERROR' });
 }
 
-function getCollectionDestination(value: unknown): CollectionAccountConfig {
-  return findCollectionAccount(value) || getCollectionAccountByTill('VehicleTill');
-}
-
 async function listPaymentRecords(): Promise<PaymentRecord[]> {
   if (postgresPool) {
     return listPostgresPayments(postgresPool);
@@ -1005,21 +1119,6 @@ async function savePaymentRecord(record: PaymentRecord): Promise<PaymentRecord> 
   );
 
   return record;
-}
-
-async function findPaymentByRef(refCode: string): Promise<PaymentRecord | null> {
-  if (postgresPool) {
-    return findPostgresPaymentByRef(postgresPool, refCode);
-  }
-
-  return safeDbOperation<PaymentRecord | null>(
-    async (firestoreDb) => {
-      const snap = await firestoreDb.collection('payments').where('refCode', '==', refCode).limit(1).get();
-      return snap.empty ? null : snap.docs[0].data() as PaymentRecord;
-    },
-    () => localStore.payments.find(payment => payment.refCode === refCode) || null,
-    'payments'
-  );
 }
 
 async function getAllMembers(): Promise<Member[]> {
@@ -1221,124 +1320,6 @@ async function validateLedgerRegistration(tx: Transaction): Promise<void> {
   tx.vehiclePlate = vehicle.plateNumber;
 }
 
-async function processIncomingPayment(input: IncomingPaymentInput): Promise<PaymentRecord> {
-  const refCode = normalizeRefCode(input.refCode);
-  const amount = Number(input.amount);
-  if (!refCode) {
-    throw new HttpError(400, 'Payment reference code is required.', 'MISSING_PAYMENT_REF');
-  }
-  if (!Number.isFinite(amount) || amount <= 0) {
-    throw new HttpError(400, 'Payment amount must be greater than zero.', 'INVALID_PAYMENT_AMOUNT');
-  }
-
-  const existing = await findPaymentByRef(refCode);
-  if (existing) {
-    return {
-      ...existing,
-      status: existing.status === 'Reconciled' ? 'Duplicate' : existing.status,
-      note: `Duplicate callback or manual entry detected for ${refCode}.`
-    };
-  }
-
-  const tillConfig = getCollectionDestination(input.destinationAccountNumber || input.shortcode);
-  const category = input.category || tillConfig.defaultCategory;
-  if (tillConfig.allocation === 'savings' && category !== 'Savings Contribution') {
-    throw new HttpError(400, `Account ${tillConfig.accountNumber} accepts savings contributions only.`, 'INVALID_COLLECTION_ALLOCATION');
-  }
-  const [allMembers, allVehicles] = await Promise.all([getAllMembers(), getAllVehicles()]);
-  const accountReference = String(input.accountReference || '').trim();
-  const payerPhone = String(input.payerPhone || '').trim();
-  const { member, matchMethod } = matchPaymentMember(allMembers, accountReference, payerPhone, input.memberId);
-  const payerName = input.payerName || (member ? member.name : 'Unmatched M-Pesa Payer');
-  const normalizedAccountReference = accountReference.replace(/\s+/g, '').toUpperCase();
-  const matchedVehicle = member && normalizedAccountReference
-    ? allVehicles.find(vehicle =>
-        vehicle.ownerId === member.id &&
-        vehicle.status === 'Active' &&
-        vehicle.plateNumber.replace(/\s+/g, '').toUpperCase() === normalizedAccountReference
-      )
-    : undefined;
-  const canAutoReconcile = Boolean(member && member.status === 'Active');
-
-  if (input.source === 'Manual') {
-    if (!member || !canAutoReconcile) {
-      throw new HttpError(400, 'Select an active registered member before logging a manual payment.', 'REGISTERED_MEMBER_REQUIRED');
-    }
-    if (normalizedAccountReference && !matchedVehicle) {
-      const submittedVehicle = allVehicles.find(vehicle =>
-        vehicle.plateNumber.replace(/\s+/g, '').toUpperCase() === normalizedAccountReference
-      );
-      if (!submittedVehicle) {
-        throw new HttpError(400, `Car/V.REG "${accountReference}" is not registered.`, 'VEHICLE_NOT_REGISTERED');
-      }
-      if (submittedVehicle.ownerId !== member.id) {
-        throw new HttpError(400, `Car/V.REG "${submittedVehicle.plateNumber}" is not registered under ${member.name}.`, 'MEMBER_VEHICLE_MISMATCH');
-      }
-      throw new HttpError(409, `Car/V.REG "${submittedVehicle.plateNumber}" is not active.`, 'VEHICLE_NOT_ACTIVE');
-    }
-  }
-
-  let payment: PaymentRecord = {
-    id: `pay-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-    timestamp: new Date().toISOString(),
-    source: input.source,
-    status: canAutoReconcile ? 'Pending' : 'Unmatched',
-    refCode,
-    amount,
-    tillNumber: tillConfig.tillNumber,
-    category,
-    accountReference,
-    destinationAccount: tillConfig.accountNumber,
-    payerName,
-    payerPhone,
-    memberId: member?.id,
-    memberName: member?.name,
-    vehiclePlate: matchedVehicle?.plateNumber || accountReference,
-    matchMethod,
-    rawPayload: input.rawPayload,
-    note: canAutoReconcile
-      ? `Matched by ${matchMethod}.`
-      : member
-        ? 'Member matched, but the profile is not active.'
-        : 'Awaiting accountant reconciliation.'
-  };
-
-  if (!member || !canAutoReconcile) {
-    return savePaymentRecord(payment);
-  }
-
-  const transactionInput = normalizeTransactionInput({
-    id: `t-mpesa-${Date.now()}`,
-    timestamp: payment.timestamp,
-    memberId: member.id,
-    memberName: member.name,
-    vehiclePlate: matchedVehicle?.plateNumber || '',
-    description: `Co-op Paybill ${COOP_PAYBILL_NUMBER} ${input.source.toLowerCase()} deposit of KES ${amount.toLocaleString()} received for ${tillConfig.displayName} ${tillConfig.accountNumber} (Payer Ref: ${accountReference || 'N/A'}). Reconciled automatically.`,
-    refCode,
-    type: 'Credit',
-    category,
-    amount,
-    recorderName: input.recorderName,
-    tillNumber: tillConfig.tillNumber,
-    ...(tillConfig.allocation === 'savings' ? { savingsContribution: amount } : {})
-  });
-  await validateLedgerRegistration(transactionInput);
-
-  payment = {
-    ...payment,
-    status: 'Reconciled',
-    note: `Auto-reconciled by ${matchMethod}.`
-  };
-
-  if (postgresPool) {
-    return reconcilePostgresPayment(postgresPool, payment, transactionInput);
-  }
-
-  const transaction = await createLedgerTransaction(transactionInput);
-  payment.transactionId = transaction.id;
-  return savePaymentRecord(payment);
-}
-
 async function reconcilePaymentRecord(paymentId: string, memberId: string, recorderName: string): Promise<PaymentRecord> {
   const payments = await listPaymentRecords();
   const payment = payments.find(item => item.id === paymentId);
@@ -1367,12 +1348,12 @@ async function reconcilePaymentRecord(paymentId: string, memberId: string, recor
   }
 
   const transactionInput = normalizeTransactionInput({
-    id: `t-mpesa-${Date.now()}`,
+    id: `t-coop-bank-${Date.now()}`,
     timestamp: new Date().toISOString(),
     memberId: member.id,
     memberName: member.name,
     vehiclePlate: memberVehicle?.plateNumber || '',
-    description: `Co-op Paybill ${COOP_PAYBILL_NUMBER} unmatched deposit of KES ${payment.amount.toLocaleString()} assigned to ${member.name}. Original Payer Ref: ${payment.accountReference || 'N/A'}.`,
+    description: `${COOP_BANK_NAME} historical deposit of KES ${payment.amount.toLocaleString()} assigned to ${member.name}. Original reference: ${payment.accountReference || 'N/A'}.`,
     refCode: payment.refCode,
     type: 'Credit',
     category: payment.category,
@@ -2501,265 +2482,44 @@ async function startServer() {
   });
 
   // =========================================================================
-  // M-PESA PAYBILL & DARJA API INTEGRATION GATEWAY
+  // CO-OPERATIVE BANK B2B EVENT NOTIFICATION (IPN) INGRESS
   // =========================================================================
 
-  // API 14: Get active M-Pesa configuration
-  app.get('/api/mpesa/config', authenticateSaccoUser, requirePermission('mpesa.manage'), async (req, res) => {
-    res.json(getDarajaSafeConfig());
-  });
-
-  // API 15: Save/Update non-secret M-Pesa configuration (Admin/Treasurer)
-  app.post('/api/mpesa/config', authenticateSaccoUser, requirePermission('mpesa.manage'), async (req, res) => {
+  app.get('/api/coop-bank/config', authenticateSaccoUser, requirePermission('payments.read.all'), (req, res) => {
     try {
-      const newConfig = req.body;
-      const updated = {
-        shortcode: newConfig.shortcode || '',
-        callbackUrl: newConfig.callbackUrl || '',
-        mode: getDarajaMode(newConfig.mode),
-        stkPushEnabled: newConfig.stkPushEnabled !== false
-      };
-
-      await safeDbOperation(
-        async (firestoreDb) => {
-          await firestoreDb.collection('mpesaConfig').doc('active').set(updated);
-        },
-        () => {
-          localStore.mpesaConfig = updated;
-        },
-        'mpesaConfig'
-      );
-      res.json({
-        ...updated,
-        ...getDarajaSafeConfig({ shortcode: updated.shortcode, mode: updated.mode })
-      });
+      res.json(coopBankPublicConfig());
     } catch (error: any) {
       sendApiError(res, error);
     }
   });
 
-  // API 15C: Safaricom C2B register URL using server-side Daraja credentials
-  app.post('/api/mpesa/register-url', authenticateSaccoUser, requirePermission('mpesa.manage'), async (req, res) => {
+  app.get('/api/coop-bank/events', authenticateSaccoUser, requirePermission('payments.read.all'), async (req, res) => {
     try {
-      const { shortcode, mode, confirmationUrl, validationUrl } = req.body;
-      const darajaConfig = getDarajaSafeConfig({ shortcode, mode });
-      
-      if (!darajaConfig.shortcode) {
-        return res.status(400).json({ error: 'Missing required parameter: shortcode is required or DARAJA_SHORTCODE must be configured.' });
-      }
-      if (!confirmationUrl || !validationUrl) {
-        return res.status(400).json({ error: 'Confirmation and validation callback URLs are required.' });
-      }
-
-      const confirmationCallbackUrl = parsePublicDarajaCallbackUrl(confirmationUrl, 'Confirmation URL');
-      const validationCallbackUrl = parsePublicDarajaCallbackUrl(validationUrl, 'Validation URL');
-      if (confirmationCallbackUrl.pathname !== '/api/daraja/c2b-confirmation' || validationCallbackUrl.pathname !== '/api/daraja/c2b-validation') {
-        return res.status(400).json({ error: 'Use the generated /api/daraja/c2b-confirmation and /api/daraja/c2b-validation callback URLs.' });
-      }
-
-      const accessToken = await getDarajaAccessToken(darajaConfig.mode);
-
-      // 2. Call Safaricom C2B Register URL API
-      const registerRes = await fetch(`${getDarajaBaseUrl(darajaConfig.mode)}/mpesa/c2b/v1/registerurl`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${accessToken}`
-        },
-        body: JSON.stringify({
-          ShortCode: darajaConfig.shortcode,
-          ResponseType: 'Completed',
-          ConfirmationURL: confirmationCallbackUrl.toString(),
-          ValidationURL: validationCallbackUrl.toString()
-        })
-      });
-
-      const registerResponseText = await registerRes.text();
-      let registerData: any = registerResponseText;
-      try {
-        registerData = registerResponseText ? JSON.parse(registerResponseText) : {};
-      } catch {
-        // Preserve a non-JSON Daraja response for the administrator's diagnosis.
-      }
-
-      if (!registerRes.ok) {
-        const remoteMessage = typeof registerData === 'object'
-          ? registerData.errorMessage || registerData.error || 'Safaricom rejected the callback registration request.'
-          : 'Safaricom rejected the callback registration request.';
-        return res.status(registerRes.status >= 500 ? 502 : registerRes.status).json({
-          status: 'failed',
-          statusCode: registerRes.status,
-          error: remoteMessage,
-          response: registerData
-        });
-      }
-
-      return res.status(200).json({
-        status: 'success',
-        statusCode: registerRes.status,
-        response: registerData
-      });
-
-    } catch (error: any) {
-      console.error('M-Pesa Webhook Registration Error:', error);
-      return sendApiError(res, error);
-    }
-  });
-
-  // API 15D: Safaricom C2B sandbox simulation trigger
-  app.post('/api/mpesa/simulate-c2b', authenticateSaccoUser, requirePermission('mpesa.manage'), async (req, res) => {
-    try {
-      const { shortcode, mode, amount, msisdn, billRefNumber } = req.body;
-      const darajaConfig = getDarajaSafeConfig({ shortcode, mode });
-
-      if (!darajaConfig.shortcode || !amount || !msisdn) {
-        return res.status(400).json({
-          error: 'Missing required parameters: shortcode, amount, and msisdn are required.'
-        });
-      }
-
-      const numAmount = Number(amount);
-      if (!Number.isFinite(numAmount) || numAmount <= 0) {
-        return res.status(400).json({ error: 'Amount must be greater than zero.' });
-      }
-
-      if (darajaConfig.mode === 'production') {
-        return res.status(400).json({ error: 'C2B simulation is only available in Daraja sandbox mode.' });
-      }
-
-      const accessToken = await getDarajaAccessToken('sandbox');
-
-      const simulateRes = await fetch(`${getDarajaBaseUrl('sandbox')}/mpesa/c2b/v1/simulate`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${accessToken}`
-        },
-        body: JSON.stringify({
-          ShortCode: darajaConfig.shortcode,
-          CommandID: 'CustomerPayBillOnline',
-          Amount: numAmount,
-          Msisdn: String(msisdn).replace(/\D/g, ''),
-          BillRefNumber: String(billRefNumber || '').trim()
-        })
-      });
-
-      const simulateData = await simulateRes.json() as any;
-      return res.status(simulateRes.ok ? 200 : 400).json({
-        status: simulateRes.ok ? 'success' : 'failed',
-        statusCode: simulateRes.status,
-        response: simulateData
-      });
-    } catch (error: any) {
-      console.error('M-Pesa Sandbox C2B Simulation Error:', error);
-      return sendApiError(res, error);
-    }
-  });
-
-  // API 15A: Safaricom C2B validation webhook (Public - called by Daraja)
-  const handleC2BValidation = async (req: express.Request, res: express.Response) => {
-    try {
-      const { TransAmount } = req.body;
-      const numAmount = Number(TransAmount);
-      
-      if (isNaN(numAmount) || numAmount <= 0) {
-        return res.status(200).json({
-          ResultCode: 'C2B00013',
-          ResultDesc: 'Rejected: Invalid amount'
-        });
-      }
-
-      // Sacco accepts all payments (even non-members can pay and we handle as direct depositors)
-      return res.status(200).json({
-        ResultCode: 0,
-        ResultDesc: 'Accepted'
-      });
-    } catch (error: any) {
-      return res.status(200).json({
-        ResultCode: 'C2B00016',
-        ResultDesc: 'Rejected: Internal Validation Exception'
-      });
-    }
-  };
-
-  app.post('/api/mpesa/c2b-validation', handleC2BValidation);
-  app.post('/api/daraja/c2b-validation', handleC2BValidation);
-
-  // API 15B: Safaricom C2B confirmation webhook (Public - called by Daraja)
-  const handleC2BConfirmation = async (req: express.Request, res: express.Response) => {
-    try {
-      const { TransID, TransAmount, BusinessShortCode, BillRefNumber, MSISDN, FirstName, MiddleName, LastName } = req.body;
-
-      if (!TransID || !TransAmount || !BusinessShortCode) {
-        return res.status(400).json({ error: 'Missing required C2B confirmation payload parameters.' });
-      }
-
-      const payerName = [FirstName, MiddleName, LastName].filter(Boolean).join(' ').trim() || 'Direct Cashless Depositor';
-      const payment = await processIncomingPayment({
-        source: 'Webhook',
-        refCode: TransID,
-        amount: TransAmount,
-        shortcode: BusinessShortCode,
-        accountReference: BillRefNumber,
-        payerPhone: MSISDN ? '+' + String(MSISDN).replace(/\+/g, '') : '',
-        payerName,
-        rawPayload: req.body,
-        recorderName: 'M-Pesa Gateway API'
-      });
-
-      return res.status(200).json({
-        ResultCode: 0,
-        ResultDesc: payment.status === 'Unmatched'
-          ? 'Confirmation received; payment queued for reconciliation'
-          : 'Confirmation received and reconciled successfully'
-      });
-
-    } catch (error: any) {
-      console.error('M-Pesa Confirmation Webhook Error.');
-      return res.status(500).json({ error: 'Confirmation could not be processed.' });
-    }
-  };
-
-  app.post('/api/mpesa/c2b-confirmation', handleC2BConfirmation);
-  app.post('/api/daraja/c2b-confirmation', handleC2BConfirmation);
-
-  // API 16: Log direct M-Pesa cashless payment for both paybills
-  app.post('/api/mpesa/log-payment', authenticateSaccoUser, requirePermission('payments.reconcile'), async (req, res) => {
-    try {
-      const { memberId, accountReference, payerPhone, amount, category, refCode, tillNumber } = req.body;
-      const normalizedPayerPhone = sanitizePhoneNumber(payerPhone);
-
-      if (!amount || !category || !refCode || !tillNumber) {
-        return res.status(400).json({ error: 'Parameters (amount, category, refCode, tillNumber) are required.' });
-      }
-
-      if (tillNumber !== 'VehicleTill' && tillNumber !== 'UtilityTill') {
-        return res.status(400).json({ error: 'Invalid collection account. Select Operations 48277 or Savings 871671.' });
-      }
-      if (normalizedPayerPhone && !isValidPhoneNumber(normalizedPayerPhone)) {
-        return res.status(400).json({ error: 'Payer phone number must contain 9 to 15 digits.' });
-      }
-
-      const payment = await processIncomingPayment({
-        source: 'Manual',
-        refCode,
-        amount,
-        shortcode: COOP_PAYBILL_NUMBER,
-        destinationAccountNumber: getCollectionAccountByTill(tillNumber).accountNumber,
-        memberId,
-        accountReference: String(accountReference || '').trim(),
-        payerPhone: normalizedPayerPhone,
-        category,
-        recorderName: `Co-op Paybill Logger (${(req as any).user?.role || 'System'})`
-      });
-
-      res.status(200).json({
-        status: 'success',
-        payment
-      });
-
+      res.json(await listCoopBankEvents());
     } catch (error: any) {
       sendApiError(res, error);
+    }
+  });
+
+  // Co-operative Bank calls this endpoint after the bank has received the URL
+  // and credentials through the B2B onboarding process. The response is 2xx
+  // only after the event has been durably accepted or identified as a retry.
+  app.post('/api/webhooks/coop-bank/b2b-ipn', async (req, res) => {
+    try {
+      assertCoopBankIpnAuthentication(req);
+      const result = await persistCoopBankEvent(normalizeCoopBankEvent(req.body));
+      const status = result.created ? 201 : 200;
+      return res.status(status).json({
+        MessageCode: String(status),
+        Message: result.created ? 'Successfully received data' : 'Duplicate event already received'
+      });
+    } catch (error: any) {
+      const status = error instanceof HttpError ? error.status : 500;
+      if (!(error instanceof HttpError)) console.error('Co-op Bank B2B IPN processing failed.');
+      return res.status(status).json({
+        MessageCode: String(status),
+        Message: error instanceof HttpError ? error.message : 'Unable to receive data'
+      });
     }
   });
 

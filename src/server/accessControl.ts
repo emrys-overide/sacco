@@ -19,7 +19,7 @@ export type SaccoPermission =
   | 'reports.read.all'
   | 'reports.export'
   | 'system.read.all'
-  | 'mpesa.manage'
+  | 'banking.manage'
   | 'member.portal.read';
 
 export type AccountStatus = 'PendingActivation' | 'Active' | 'Suspended' | 'Disabled' | 'Rejected' | 'Locked';
@@ -47,7 +47,7 @@ const ALL_ADMIN_PERMISSIONS: readonly SaccoPermission[] = [
   'reports.read.all',
   'reports.export',
   'system.read.all',
-  'mpesa.manage'
+  'banking.manage'
 ];
 
 export const ROLE_PERMISSION_MATRIX: Readonly<Record<UserRole, readonly SaccoPermission[]>> = {
@@ -75,7 +75,7 @@ export const ROLE_PERMISSION_MATRIX: Readonly<Record<UserRole, readonly SaccoPer
     'reports.read.all',
     'reports.export',
     'system.read.all',
-    'mpesa.manage'
+    'banking.manage'
   ],
   Accountant: [
     'members.read.all',

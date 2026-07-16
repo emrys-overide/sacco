@@ -1,6 +1,6 @@
 # Matatu SACCO Management System
 
-A full-stack financial operations app for members, vehicles, daily collections, M-Pesa reconciliation, and ledger reporting.
+A full-stack financial operations app for members, vehicles, daily collections, Co-op Bank B2B event review, and ledger reporting.
 
 ## Local Setup
 
