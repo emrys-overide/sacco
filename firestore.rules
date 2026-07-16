@@ -2,10 +2,10 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     // Sacco OS Zero-Trust Security Rules
-    // All direct client-side reads and writes are strictly forbidden.
-    // Database access is mediated 100% securely through the Express server.
+    // Direct client-side reads and writes are blocked by default.
+    // All application data access should flow through the secure backend API.
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
   }
 }

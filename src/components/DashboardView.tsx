@@ -112,8 +112,8 @@ function SaccoAnalyticsChart({ transactions }: SaccoAnalyticsChartProps) {
         <svg className="w-full h-full min-h-[220px]" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none">
           <defs>
             <linearGradient id="chartGlow" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#2563eb" stopOpacity="0.15" />
-              <stop offset="100%" stopColor="#2563eb" stopOpacity="0.0" />
+              <stop offset="0%" stopColor="#4f46e5" stopOpacity="0.2" />
+              <stop offset="100%" stopColor="#06b6d4" stopOpacity="0.0" />
             </linearGradient>
           </defs>
 
@@ -128,7 +128,7 @@ function SaccoAnalyticsChart({ transactions }: SaccoAnalyticsChartProps) {
                   y1={y}
                   x2={width - paddingRight}
                   y2={y}
-                  stroke="#f1f5f9"
+                  stroke="#e7e5f4"
                   strokeDasharray="4 4"
                   strokeWidth="1.5"
                 />
@@ -154,7 +154,7 @@ function SaccoAnalyticsChart({ transactions }: SaccoAnalyticsChartProps) {
             <path
               d={linePath}
               fill="none"
-              stroke="#2563eb"
+              stroke="#4f46e5"
               strokeWidth="3.5"
               strokeLinecap="round"
               strokeLinejoin="round"
@@ -169,14 +169,14 @@ function SaccoAnalyticsChart({ transactions }: SaccoAnalyticsChartProps) {
                 cy={p.y}
                 r="4.5"
                 fill="#ffffff"
-                stroke="#2563eb"
+                stroke="#4f46e5"
                 strokeWidth="2.5"
               />
               <circle
                 cx={p.x}
                 cy={p.y}
                 r="10"
-                fill="#2563eb"
+                fill="#06b6d4"
                 fillOpacity="0"
                 className="hover:fill-opacity-15 transition-all duration-200"
               />
@@ -694,6 +694,17 @@ export default function DashboardView({
             <Sparkline data={[2, 3, 3, 4, 3, activeFleetCount]} color="#3b82f6" />
           </div>
         </motion.div>
+
+        <section className="flow-visual-band md:col-span-12" aria-label="SACCO collections in motion">
+          <div className="flow-visual-content">
+            <span>Paybill 400200 · One connected ledger</span>
+            <h2>Every collection,<br />moving in one direction.</h2>
+            <p>
+              Operations settle to account 48277 while member savings remain
+              protected in account 871671.
+            </p>
+          </div>
+        </section>
 
         {/* ANALYTICS ROW */}
         {/* Sacco Analytics Chart */}
