@@ -56,6 +56,7 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
   // New Member Form State
   const [name, setName] = useState('');
   const [idNumber, setIdNumber] = useState('');
+  const [email, setEmail] = useState('');
   const [phoneNumber, setPhoneNumber] = useState('');
   const [assignedVehicle, setAssignedVehicle] = useState('');
   const [openingLoanBalance, setOpeningLoanBalance] = useState('');
@@ -95,7 +96,7 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || !idNumber.trim() || !phoneNumber.trim()) {
+    if (!name.trim() || !idNumber.trim() || !email.trim() || !phoneNumber.trim()) {
       setError('Please fill in all required fields.');
       return;
     }
@@ -107,10 +108,15 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
       setError('Enter a valid phone number using digits only.');
       return;
     }
+    if (!/^\S+@\S+\.\S+$/.test(email.trim())) {
+      setError('Enter the member email address used for secure account verification.');
+      return;
+    }
     try {
       await onAddMember({
         name,
         idNumber,
+        email: email.trim().toLowerCase(),
         phoneNumber,
         status: 'Active',
         vehicleAssigned: assignedVehicle.trim() || undefined,
@@ -124,6 +130,7 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
     // Reset Form
     setName('');
     setIdNumber('');
+    setEmail('');
     setPhoneNumber('');
     setAssignedVehicle('');
     setOpeningLoanBalance('');
@@ -663,6 +670,21 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                   pattern="[0-9]+"
                   title="Numbers only."
                     className="w-full p-2 border border-slate-200 rounded text-xs font-mono focus:outline-none focus:border-emerald-600"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
+                    Email for account verification *
+                  </label>
+                  <input
+                    type="email"
+                    required
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value.trimStart())}
+                    autoComplete="email"
+                    className="w-full border border-slate-200 rounded-md px-3 py-2 text-xs outline-none focus:border-emerald-600"
+                    placeholder="member@example.com"
                   />
                 </div>
 

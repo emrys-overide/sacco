@@ -11,6 +11,12 @@ export default defineConfig(() => {
 
   return {
     plugins: [react(), tailwindcss()],
+    build: {
+      // Keep browser assets isolated from the bundled Express server so a
+      // Firebase Hosting deploy cannot publish backend source or source maps.
+      outDir: 'dist/client',
+      emptyOutDir: true,
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

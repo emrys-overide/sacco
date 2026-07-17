@@ -72,6 +72,7 @@ function mapMember(row: QueryResultRow): Member {
   return {
     id: String(row.id),
     name: row.full_name,
+    email: row.email || undefined,
     membershipNumber: row.member_number || undefined,
     idNumber: row.national_id || '',
     phoneNumber: row.phone || '',
@@ -268,10 +269,10 @@ export async function getPostgresMember(pool: Pool, memberId: string): Promise<M
 export async function createPostgresMember(pool: Pool, member: Omit<Member, 'id'>): Promise<Member> {
   try {
     const result = await pool.query(
-      `INSERT INTO members (full_name, national_id, phone, status, date_registered, initial_loan_amount, loan_balance)
-       VALUES ($1, $2, $3, $4, $5, $6, $6)
+      `INSERT INTO members (full_name, national_id, phone, email, status, date_registered, initial_loan_amount, loan_balance)
+       VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, $7, $7)
        RETURNING *`,
-      [member.name, member.idNumber, member.phoneNumber, member.status, member.dateRegistered, member.initialLoanAmount || 0]
+      [member.name, member.idNumber, member.phoneNumber, member.email || '', member.status, member.dateRegistered, member.initialLoanAmount || 0]
     );
     return mapMember({ ...result.rows[0], shares_amount: 0, savings_amount: 0, derived_loan_balance: member.initialLoanAmount || 0 });
   } catch (error) {
@@ -490,6 +491,100 @@ async function insertTransaction(client: Pool | PoolClient, transaction: Transac
 
 export async function createPostgresTransaction(pool: Pool, transaction: Transaction): Promise<Transaction> {
   return insertTransaction(pool, transaction);
+}
+
+export async function reconcilePostgresCoopBankEvent(
+  pool: Pool,
+  input: {
+    eventId: string;
+    memberId: string;
+    vehicleId?: string;
+    category: TransactionCategory;
+    tillNumber: Transaction['tillNumber'];
+    note?: string;
+    actorId: string;
+    actorName: string;
+    correlationId: string;
+  }
+): Promise<{ ledgerEntryId: string }> {
+  const accountType = CATEGORY_TO_ACCOUNT[input.category];
+  if (!accountType) throw new PersistenceError(400, 'Choose a supported allocation category.', 'COOP_ALLOCATION_INVALID');
+  if ((input.category === 'Savings Contribution') !== (input.tillNumber === 'UtilityTill')) {
+    throw new PersistenceError(400, 'Savings allocations use the utility account; all other allocations use the vehicle account.', 'COOP_ALLOCATION_TILL_INVALID');
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const eventResult = await client.query(
+      `SELECT * FROM coop_bank_ipn_events WHERE id = $1 FOR UPDATE`,
+      [input.eventId]
+    );
+    const event = eventResult.rows[0];
+    if (!event) throw new PersistenceError(404, 'Bank event was not found.', 'COOP_EVENT_NOT_FOUND');
+    if (event.event_type !== 'CREDIT') throw new PersistenceError(409, 'Only CREDIT events can be allocated to the member ledger.', 'COOP_EVENT_NOT_CREDIT');
+    if (event.ledger_entry_id || ['POSTED', 'MANUALLY_RECONCILED'].includes(event.reconciliation_status)) {
+      throw new PersistenceError(409, 'This bank event has already been reconciled.', 'COOP_EVENT_ALREADY_RECONCILED');
+    }
+    const member = await client.query(`SELECT id, full_name FROM members WHERE id = $1 AND status = 'Active'`, [input.memberId]);
+    if (!member.rowCount) throw new PersistenceError(400, 'Choose an active SACCO member.', 'COOP_MEMBER_INVALID');
+    if (input.vehicleId) {
+      const vehicle = await client.query(`SELECT id FROM vehicles WHERE id = $1 AND member_id = $2`, [input.vehicleId, input.memberId]);
+      if (!vehicle.rowCount) throw new PersistenceError(400, 'The selected vehicle does not belong to this member.', 'COOP_VEHICLE_INVALID');
+    }
+
+    const metadata = {
+      recorderName: input.actorName,
+      memberName: member.rows[0].full_name,
+      bankEventId: String(event.id),
+      externalTransactionId: event.transaction_id,
+      paymentReference: event.payment_ref || null,
+      reconciliationNote: input.note || ''
+    };
+    const ledger = await client.query(
+      `INSERT INTO ledger_entries (
+         entry_date, entry_time, transaction_type, account_type, till_type, amount,
+         member_id, vehicle_id, reference_code, description, recorded_by, source,
+         status, metadata
+       ) VALUES (
+         COALESCE(NULLIF(left(COALESCE($1, $2), 10), '')::date, current_date), now(),
+         'Credit', $3, $4, $5, $6, $7, $8, $9, $10, 'COOP_BANK_IPN',
+         'Posted', $11::jsonb
+       ) RETURNING id`,
+      [event.transaction_date, event.posting_date, accountType, input.tillNumber, event.amount,
+        input.memberId, input.vehicleId || null, event.transaction_id,
+        `Co-op Bank ${input.category}${input.note ? `: ${input.note}` : ''}`,
+        input.actorId, JSON.stringify(metadata)]
+    );
+    const ledgerEntryId = String(ledger.rows[0].id);
+    const updated = await client.query(
+      `UPDATE coop_bank_ipn_events
+       SET status = 'Reconciled', processing_status = 'PROCESSED',
+           reconciliation_status = 'MANUALLY_RECONCILED', matched_member_id = $2,
+           matched_vehicle_id = $3, ledger_entry_id = $4, match_method = 'MANUAL_ASSIGNMENT',
+           match_confidence = 1, manual_review_reason = NULL, reconciled_at = now(),
+           reconciled_by = $5, posted_at = now(), processed_at = COALESCE(processed_at, now())
+       WHERE id = $1 AND ledger_entry_id IS NULL
+       RETURNING id`,
+      [input.eventId, input.memberId, input.vehicleId || null, ledgerEntryId, input.actorId]
+    );
+    if (!updated.rowCount) throw new PersistenceError(409, 'This bank event was completed by another request.', 'COOP_EVENT_STALE');
+    await client.query(
+      `INSERT INTO coop_bank_event_audit (
+         bank_event_id, action, actor_type, actor_user_id, previous_status,
+         new_status, reason, correlation_id, metadata
+       ) VALUES ($1, 'MANUAL_RECONCILIATION_POSTED', 'USER', $2, $3,
+                 'MANUALLY_RECONCILED', $4, $5, $6::jsonb)`,
+      [input.eventId, input.actorId, event.reconciliation_status, input.note || null,
+        input.correlationId, JSON.stringify({ ledgerEntryId, memberId: input.memberId, vehicleId: input.vehicleId || null, category: input.category })]
+    );
+    await client.query('COMMIT');
+    return { ledgerEntryId };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function reversePostgresTransaction(pool: Pool, transactionId: string, recorderName: string): Promise<Transaction> {

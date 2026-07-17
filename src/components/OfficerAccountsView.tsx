@@ -1,0 +1,166 @@
+import React, { useEffect, useState } from 'react';
+import { CheckCircle2, ShieldCheck, UserPlus, UsersRound } from 'lucide-react';
+import type { User, UserRole } from '../types';
+import { fetchSaccoJson, postSaccoJson } from '../lib/api';
+import { sanitizePersonName, sanitizePhoneNumber } from '../lib/inputValidation';
+
+type OfficerRole = Exclude<UserRole, 'Chairman' | 'Member'>;
+type OfficerCreation = { fullName: string; email: string; phone: string; role: OfficerRole; password: string };
+type OfficerCreationResponse = { user: User; requiresTotpEnrollment: boolean };
+
+const officerRoles: Array<{ value: OfficerRole; label: string }> = [
+  { value: 'Secretary', label: 'Secretary' },
+  { value: 'Treasurer', label: 'Treasurer' },
+  { value: 'Accountant', label: 'Accountant' },
+  { value: 'Auditor', label: 'Auditor' }
+];
+
+const inputClass = 'w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-600 focus:ring-4 focus:ring-emerald-100';
+
+export default function OfficerAccountsView({ fallbackAuthToken }: { fallbackAuthToken: string }) {
+  const [officers, setOfficers] = useState<User[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [form, setForm] = useState<OfficerCreation>({
+    fullName: '',
+    email: '',
+    phone: '',
+    role: 'Secretary',
+    password: ''
+  });
+
+  useEffect(() => {
+    let active = true;
+    fetchSaccoJson<User[]>('/api/users', {}, fallbackAuthToken)
+      .then(users => {
+        if (active) setOfficers(users);
+      })
+      .catch(caught => {
+        if (active) setError(caught instanceof Error ? caught.message : 'Account access could not be loaded.');
+      })
+      .finally(() => {
+        if (active) setIsLoading(false);
+      });
+    return () => { active = false; };
+  }, [fallbackAuthToken]);
+
+  const update = <Key extends keyof OfficerCreation>(key: Key, value: OfficerCreation[Key]) => {
+    setForm(current => ({ ...current, [key]: value }));
+  };
+
+  const createOfficer = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setError('');
+    setNotice('');
+    if (!form.fullName || !form.email || form.password.length < 8) {
+      setError('Enter the officer’s full name, email, and a password of at least 8 characters.');
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      const result = await postSaccoJson<OfficerCreationResponse, OfficerCreation>('/api/users', form, fallbackAuthToken);
+      setOfficers(current => [...current, result.user].sort((left, right) => left.name.localeCompare(right.name)));
+      setForm({ fullName: '', email: '', phone: '', role: 'Secretary', password: '' });
+      setNotice(`${result.user.name} can now sign in with their work email or phone and password.`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Officer account could not be created.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const resetPassword = async (officer: User) => {
+    const password = window.prompt(`Set a new temporary password for ${officer.name} (at least 8 characters):`);
+    if (password === null) return;
+    if (password.length < 8) { setError('The temporary password must contain at least 8 characters.'); return; }
+    setError(''); setNotice(''); setIsSaving(true);
+    try {
+      await postSaccoJson(`/api/users/${officer.id}/password`, { password }, fallbackAuthToken);
+      setNotice(`${officer.name}'s password was reset. They can sign in immediately.`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'The password could not be reset.');
+    } finally { setIsSaving(false); }
+  };
+
+  return (
+    <div className="flex-1 overflow-y-auto bg-slate-50 p-4 sm:p-8">
+      <div className="mx-auto grid max-w-6xl gap-6 lg:grid-cols-[1.05fr_0.95fr]">
+        <section className="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
+          <div className="flex items-start gap-4">
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-emerald-100 text-emerald-700"><UserPlus className="h-6 w-6" /></div>
+            <div>
+              <p className="text-xs font-bold uppercase tracking-[0.16em] text-emerald-700">Chairman controls</p>
+              <h2 className="mt-1 font-display text-2xl font-bold text-slate-900">Create an officer account</h2>
+              <p className="mt-2 text-sm leading-6 text-slate-500">Give a trusted officer the right role and a temporary password they can use on the normal login screen.</p>
+            </div>
+          </div>
+
+          <form className="mt-8 space-y-4" onSubmit={createOfficer}>
+            <div>
+              <label className="mb-2 block text-xs font-bold text-slate-600">Full name</label>
+              <input value={form.fullName} onChange={event => update('fullName', sanitizePersonName(event.target.value))} autoComplete="name" className={inputClass} required />
+            </div>
+            <div>
+              <label className="mb-2 block text-xs font-bold text-slate-600">Work email</label>
+              <input type="email" value={form.email} onChange={event => update('email', event.target.value)} autoComplete="email" className={inputClass} required />
+            </div>
+            <div>
+              <label className="mb-2 block text-xs font-bold text-slate-600">Phone number <span className="font-medium text-slate-400">(optional)</span></label>
+              <input type="tel" value={form.phone} onChange={event => update('phone', sanitizePhoneNumber(event.target.value))} inputMode="tel" autoComplete="tel" pattern="[+]?[0-9]{9,15}" className={inputClass} />
+            </div>
+            <div>
+              <label className="mb-2 block text-xs font-bold text-slate-600">Role</label>
+              <select value={form.role} onChange={event => update('role', event.target.value as OfficerRole)} className={inputClass}>
+                {officerRoles.map(role => <option key={role.value} value={role.value}>{role.label}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="mb-2 block text-xs font-bold text-slate-600">Temporary password</label>
+              <input type="password" value={form.password} onChange={event => update('password', event.target.value)} autoComplete="new-password" className={inputClass} required />
+            </div>
+
+            {error && <p className="rounded-xl bg-rose-50 px-3 py-2.5 text-xs font-medium leading-5 text-rose-700">{error}</p>}
+            {notice && <p className="rounded-xl bg-emerald-50 px-3 py-2.5 text-xs font-medium leading-5 text-emerald-700">{notice}</p>}
+
+            <button type="submit" disabled={isSaving} className="flex w-full items-center justify-center gap-2 rounded-2xl bg-emerald-600 px-4 py-3.5 text-sm font-bold text-white shadow-lg shadow-emerald-900/15 transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60">
+              <UserPlus className="h-4 w-4" />
+              {isSaving ? 'Creating account...' : 'Create officer account'}
+            </button>
+          </form>
+        </section>
+
+        <section className="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-100 text-slate-600"><UsersRound className="h-5 w-5" /></div>
+            <div>
+              <h2 className="font-display text-xl font-bold text-slate-900">Account access</h2>
+              <p className="text-xs text-slate-500">Active officer and member profiles</p>
+            </div>
+          </div>
+
+          <div className="mt-6 space-y-3">
+            {isLoading ? <p className="text-sm text-slate-500">Loading officer accounts...</p> : officers.map(officer => (
+              <div key={officer.id} className="flex items-center justify-between gap-4 rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-bold text-slate-800">{officer.name}</p>
+                  <p className="truncate text-xs text-slate-500">{officer.email}</p>
+                </div>
+                <div className="flex shrink-0 flex-col items-end gap-1.5"><span className="rounded-full bg-emerald-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-emerald-700">{officer.role}</span><button type="button" disabled={isSaving} onClick={() => void resetPassword(officer)} className="text-[10px] font-bold text-slate-500 hover:text-emerald-700">Reset password</button></div>
+              </div>
+            ))}
+            {!isLoading && officers.length === 0 && <p className="text-sm text-slate-500">No officer accounts are active yet.</p>}
+          </div>
+
+          <div className="mt-7 flex gap-3 rounded-2xl border border-emerald-100 bg-emerald-50 p-4 text-xs leading-5 text-slate-600">
+            <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" />
+            <p>Each officer’s access is limited by server-side role permissions. An optional authenticator step can be enabled for the whole SACCO later.</p>
+          </div>
+          <p className="mt-4 text-[11px] text-slate-400"><CheckCircle2 className="mr-1 inline h-3.5 w-3.5 text-emerald-600" />The Chairman account cannot be duplicated here.</p>
+        </section>
+      </div>
+    </div>
+  );
+}

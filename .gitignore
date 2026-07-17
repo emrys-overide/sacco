@@ -4,5 +4,6 @@ dist/
 coverage/
 .DS_Store
 *.log
+gha-creds-*.json
 .env*
 !.env.example

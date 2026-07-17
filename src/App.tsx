@@ -17,6 +17,7 @@ import BlueprintView from './components/BlueprintView';
 import ExpensesView from './components/ExpensesView';
 import CoopBankView from './components/CoopBankView';
 import MemberPortal from './components/MemberPortal';
+import OfficerAccountsView from './components/OfficerAccountsView';
 
 const MEMBER_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary', 'Treasurer'];
 const VEHICLE_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary'];
@@ -409,6 +410,10 @@ export default function App() {
         return (
           <CoopBankView fallbackAuthToken={authToken} />
         );
+      case 'Account Access':
+        return currentUser.role === 'Chairman'
+          ? <OfficerAccountsView fallbackAuthToken={authToken} />
+          : <div className="flex-1 p-8 text-sm text-slate-600">Only the Chairman can manage account access.</div>;
       default:
         return <div className="p-8">View not found</div>;
     }

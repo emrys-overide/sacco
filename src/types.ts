@@ -19,6 +19,8 @@ export interface User {
 export interface Member {
   id: string;
   name: string;
+  /** Trusted email recorded by an officer; used with phone and name to gate member account creation. */
+  email?: string;
   membershipNumber?: string;
   idNumber: string;
   phoneNumber: string;
@@ -101,8 +103,9 @@ export type PaymentStatus = 'Pending' | 'Reconciled' | 'Unmatched' | 'Rejected' 
 export type PaymentSource = 'Manual' | 'Webhook';
 export type PaymentMatchMethod = 'Member ID' | 'Vehicle Plate' | 'Phone Number' | 'Manual Assignment' | 'None';
 
-export type CoopBankEventType = 'CREDIT' | 'DEBIT';
-export type CoopBankEventStatus = 'PendingReview' | 'Reconciled' | 'Ignored';
+export type CoopBankEventType = 'CREDIT' | 'DEBIT' | string;
+export type CoopBankProcessingStatus = 'RECEIVED' | 'VALIDATED' | 'PROCESSING' | 'PROCESSED' | 'FAILED' | 'QUARANTINED';
+export type CoopBankReconciliationStatus = 'NOT_EVALUATED' | 'MATCHED' | 'UNMATCHED' | 'AMBIGUOUS' | 'IGNORED_DEBIT' | 'PENDING_ALLOCATION' | 'POSTED' | 'MANUALLY_RECONCILED';
 
 /** A durable Co-operative Bank B2B/IPN event. Raw bank payloads remain server-only. */
 export interface CoopBankEvent {
@@ -123,8 +126,22 @@ export interface CoopBankEvent {
   postingDate?: string;
   valueDate?: string;
   transactionDate?: string;
-  status: CoopBankEventStatus;
+  processingStatus: CoopBankProcessingStatus;
+  reconciliationStatus: CoopBankReconciliationStatus;
+  matchedMemberId?: string;
+  matchedMemberName?: string;
+  matchedVehicleId?: string;
+  matchedVehiclePlate?: string;
+  ledgerEntryId?: string;
+  matchMethod?: string;
+  matchConfidence?: number;
+  manualReviewReason?: string;
+  processingAttempts: number;
+  duplicateCount: number;
+  lastProcessingError?: string;
   receivedAt: string;
+  processedAt?: string;
+  reconciledAt?: string;
 }
 
 export interface PaymentRecord {

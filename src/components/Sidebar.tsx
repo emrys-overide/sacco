@@ -15,7 +15,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Database,
-  Building2
+  Building2,
+  UserRoundPlus
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -58,7 +59,9 @@ export default function Sidebar({
   ];
   const menuItems = currentUser.role === 'Member'
     ? [{ name: 'My Account', icon: <LayoutDashboard className="w-4 h-4" /> }]
-    : administratorMenuItems;
+    : currentUser.role === 'Chairman'
+      ? [...administratorMenuItems, { name: 'Account Access', icon: <UserRoundPlus className="w-4 h-4" /> }]
+      : administratorMenuItems;
 
   return (
     <aside 

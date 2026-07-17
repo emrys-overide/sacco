@@ -2,9 +2,10 @@ import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import crypto from 'node:crypto';
-import { createServer as createViteServer } from 'vite';
 import { Firestore } from '@google-cloud/firestore';
 import { Pool } from 'pg';
+import { applicationDefault, cert, getApps as getFirebaseAdminApps, initializeApp as initializeFirebaseAdminApp } from 'firebase-admin/app';
+import { getAuth as getFirebaseAdminAuth, type Auth as FirebaseAdminAuth, type DecodedIdToken } from 'firebase-admin/auth';
 import {
   PersistenceError,
   correctPostgresTransaction,
@@ -23,6 +24,7 @@ import {
   listPostgresUsers,
   listPostgresVehicles,
   listPostgresVehiclesByOwner,
+  reconcilePostgresCoopBankEvent,
   reconcilePostgresPayment,
   reversePostgresTransaction,
   savePostgresPayment
@@ -55,10 +57,21 @@ import {
 } from './src/server/accessControl';
 import { createBase32Secret, createTotpUri, verifyTotpCode } from './src/server/totp';
 import { COOP_BANK_NAME } from './src/lib/collectionAccounts';
+import {
+  CoopIpnError,
+  assertCoopIpnAuthentication,
+  assertCoopIpnConfiguration,
+  classifyEventType,
+  loadCoopIpnConfig,
+  maskAccountNumber,
+  normalizeCoopIpnPayload,
+  normalizeReference,
+  referenceCandidates,
+  type CoopReconciliationStatus,
+  type NormalizedCoopEvent
+} from './src/server/coopBankIpn';
 import type {
   CoopBankEvent,
-  CoopBankEventStatus,
-  CoopBankEventType,
   Member,
   MemberPortalData,
   PaymentRecord,
@@ -109,7 +122,7 @@ const initialTransactions: Transaction[] = [];
 const JWT_ISSUER = 'matatu-sacco-management-system';
 const JWT_AUDIENCE = 'sacco-api';
 const DEFAULT_JWT_EXPIRES_SECONDS = 60 * 60 * 8;
-const isProduction = process.env.NODE_ENV === 'production';
+const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.K_SERVICE);
 const postgresPool = process.env.DATABASE_URL
   ? new Pool({
       connectionString: process.env.DATABASE_URL,
@@ -137,6 +150,417 @@ function mapPasswordAuthenticatedUser(row: any): PasswordAuthenticatedUser {
     totpSecretCiphertext: row.totp_secret_ciphertext || undefined,
     totpEnabledAt: row.totp_enabled_at ? new Date(row.totp_enabled_at).toISOString() : undefined
   };
+}
+
+function normalizedEmail(value: unknown): string {
+  return String(value || '').trim().toLowerCase();
+}
+
+function normalizedPersonName(value: unknown): string {
+  return sanitizePersonName(value).trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+}
+
+function firebaseProjectId(): string {
+  return String(process.env.FIREBASE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || '').trim();
+}
+
+function firebaseAuthEnabled(): boolean {
+  return process.env.FIREBASE_AUTH_ENABLED !== 'false';
+}
+
+function firebaseWebApiKey(): string {
+  return String(process.env.FIREBASE_WEB_API_KEY || process.env.VITE_FIREBASE_API_KEY || '').trim();
+}
+
+function firebaseAdminAuth(): FirebaseAdminAuth {
+  if (!firebaseAuthEnabled()) {
+    throw new HttpError(503, 'Firebase Authentication is not enabled for member accounts.', 'FIREBASE_AUTH_DISABLED');
+  }
+  const existing = getFirebaseAdminApps()[0];
+  if (existing) return getFirebaseAdminAuth(existing);
+
+  const projectId = firebaseProjectId();
+  if (!projectId) {
+    throw new HttpError(503, 'Firebase Authentication is not configured on the server.', 'FIREBASE_AUTH_UNAVAILABLE');
+  }
+
+  const serviceAccountJson = String(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || '').trim();
+  try {
+    const credential = serviceAccountJson ? cert(JSON.parse(serviceAccountJson) as any) : applicationDefault();
+    return getFirebaseAdminAuth(initializeFirebaseAdminApp({ projectId, credential }));
+  } catch {
+    throw new HttpError(503, 'Firebase Authentication is not configured on the server.', 'FIREBASE_AUTH_UNAVAILABLE');
+  }
+}
+
+function firebaseMemberId(token: DecodedIdToken): string {
+  const memberId = String((token as Record<string, unknown>).saccoMemberId || '').trim();
+  if (!memberId.match(/^[0-9a-f-]{36}$/i)) {
+    throw new HttpError(403, 'This Firebase account is not approved for a SACCO member profile.', 'FIREBASE_MEMBER_CLAIM_REQUIRED');
+  }
+  return memberId;
+}
+
+function isFirebaseServiceCredentialError(error: any): boolean {
+  const code = String(error?.code || '');
+  const message = String(error?.message || '');
+  return code.startsWith('app/')
+    || /default credentials|credential implementation|could not load.*credential|service account/i.test(message);
+}
+
+async function verifyFirebaseIdToken(token: string): Promise<DecodedIdToken> {
+  try {
+    return await firebaseAdminAuth().verifyIdToken(token, true);
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    if (isFirebaseServiceCredentialError(error)) {
+      throw new HttpError(503, 'Firebase Authentication is not configured on the server.', 'FIREBASE_AUTH_UNAVAILABLE');
+    }
+    throw new HttpError(401, 'The Firebase session is invalid or has expired.', 'FIREBASE_TOKEN_INVALID');
+  }
+}
+
+/**
+ * Chairman recovery deliberately asks Firebase itself to validate the ID token.
+ * This is limited to recovery because the normal member session path uses the
+ * Admin SDK with revocation checks. It lets a verified Firebase email prove
+ * control of an already-linked Chairman profile before its local password is
+ * replaced.
+ */
+async function verifyFirebaseRecoveryIdentity(token: string): Promise<{ uid: string; email: string }> {
+  const apiKey = firebaseWebApiKey();
+  if (!apiKey) {
+    throw new HttpError(503, 'Secure officer recovery is not configured.', 'OFFICER_RECOVERY_UNAVAILABLE');
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(apiKey)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idToken: token })
+    });
+  } catch {
+    throw new HttpError(503, 'Firebase could not confirm this recovery session. Try again shortly.', 'OFFICER_RECOVERY_UNAVAILABLE');
+  }
+
+  const data = await response.json().catch(() => ({})) as { users?: Array<{ localId?: string; email?: string; emailVerified?: boolean; disabled?: boolean }> };
+  const identity = data.users?.[0];
+  if (!response.ok || !identity?.localId || !identity.email || identity.emailVerified !== true || identity.disabled === true) {
+    throw new HttpError(403, 'Use the verified Firebase email linked to the Chairman account to reset this password.', 'OFFICER_RECOVERY_IDENTITY_INVALID');
+  }
+  return { uid: identity.localId, email: normalizedEmail(identity.email) };
+}
+
+function assertVerifiedFirebaseEmail(token: DecodedIdToken): string {
+  const email = normalizedEmail(token.email);
+  if (!token.email_verified || !email) {
+    throw new HttpError(403, 'Verify your email from the Firebase link before accessing the SACCO dashboard.', 'EMAIL_VERIFICATION_REQUIRED');
+  }
+  return email;
+}
+
+async function registerFirebaseMemberAccount(input: { fullName: unknown; phone: unknown; email: unknown; password: unknown }): Promise<void> {
+  if (!postgresPool) {
+    throw new HttpError(503, 'Secure member registration requires the PostgreSQL SACCO database.', 'MEMBER_REGISTRATION_UNAVAILABLE');
+  }
+  const fullName = sanitizePersonName(input.fullName).trim();
+  const phone = sanitizePhoneNumber(input.phone).trim();
+  const phoneDigits = normalizedPhone(phone);
+  const email = normalizedEmail(input.email);
+  const password = String(input.password || '');
+  if (!isValidPersonName(fullName) || !isValidPhoneNumber(phone) || !/^\S+@\S+\.\S+$/.test(email) || password.length < 8) {
+    throw new HttpError(400, 'Enter your full name, registered phone number and email, plus a password of at least 8 characters.', 'MEMBER_REGISTRATION_INVALID');
+  }
+
+  const client = await postgresPool.connect();
+  let firebaseUid = '';
+  let committed = false;
+  try {
+    await client.query('BEGIN');
+    const memberResult = await client.query(
+      `SELECT id, full_name, phone, email
+       FROM members
+       WHERE status = 'Active'
+         AND regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = $1
+         AND lower(COALESCE(email, '')) = $2
+       FOR UPDATE`,
+      [phoneDigits, email]
+    );
+    if (memberResult.rowCount !== 1) {
+      throw new HttpError(403, 'The phone number and email must match one active SACCO member record before an account can be created.', 'MEMBER_EMAIL_PHONE_MISMATCH');
+    }
+    const member = memberResult.rows[0];
+    if (normalizedPersonName(member.full_name) !== normalizedPersonName(fullName)) {
+      throw new HttpError(403, 'Your full name, phone number, and email must match one active SACCO member record before an account can be created.', 'MEMBER_IDENTITY_MISMATCH');
+    }
+    const [existingProfile, existingEnrollment] = await Promise.all([
+      client.query('SELECT id FROM users WHERE linked_member_id = $1 OR lower(COALESCE(email, \'\')) = $2 LIMIT 1 FOR UPDATE', [member.id, email]),
+      client.query('SELECT firebase_uid FROM member_firebase_enrollments WHERE member_id = $1 LIMIT 1 FOR UPDATE', [member.id])
+    ]);
+    if (existingProfile.rowCount || existingEnrollment.rowCount) {
+      throw new HttpError(409, 'A secure online account already exists or is awaiting email verification for this member.', 'MEMBER_ACCOUNT_EXISTS');
+    }
+
+    const auth = firebaseAdminAuth();
+    let firebaseUser;
+    try {
+      firebaseUser = await auth.createUser({
+        email,
+        password,
+        displayName: member.full_name,
+        emailVerified: false,
+        disabled: false
+      });
+    } catch (error: any) {
+      if (error?.code === 'auth/email-already-exists') {
+        throw new HttpError(409, 'A Firebase account already uses this email. Sign in and verify the email link, or ask an administrator for help.', 'FIREBASE_EMAIL_EXISTS');
+      }
+      throw error;
+    }
+    firebaseUid = firebaseUser.uid;
+    await auth.setCustomUserClaims(firebaseUid, { saccoMemberId: String(member.id) });
+    await client.query(
+      `INSERT INTO member_firebase_enrollments (member_id, firebase_uid, email)
+       VALUES ($1, $2, $3)`,
+      [member.id, firebaseUid, email]
+    );
+    await client.query('COMMIT');
+    committed = true;
+  } catch (error) {
+    if (!committed) await client.query('ROLLBACK');
+    if (firebaseUid) {
+      try {
+        await firebaseAdminAuth().deleteUser(firebaseUid);
+      } catch {
+        // The Firebase account is unusable without the server-side enrollment
+        // row, and the error is intentionally not exposed to the client.
+      }
+    }
+    if (isFirebaseServiceCredentialError(error)) {
+      throw new HttpError(503, 'Firebase Authentication is not configured on the server.', 'FIREBASE_AUTH_UNAVAILABLE');
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Default member onboarding path. The server, not the browser, proves that all
+ * supplied identity fields belong to one active member before a password
+ * profile is created. Existing uncompleted Firebase profiles are migrated in
+ * place so a member is never left with two SACCO identities.
+ */
+async function registerPasswordMemberAccount(input: { fullName: unknown; phone: unknown; email: unknown; password: unknown }): Promise<AuthorizedUser> {
+  const fullName = sanitizePersonName(input.fullName).trim();
+  const phone = sanitizePhoneNumber(input.phone).trim();
+  const phoneDigits = normalizedPhone(phone);
+  const email = normalizedEmail(input.email);
+  const password = String(input.password || '');
+  if (!isValidPersonName(fullName) || !isValidPhoneNumber(phone) || !/^\S+@\S+\.\S+$/.test(email) || password.length < 8) {
+    throw new HttpError(400, 'Enter your full name, registered phone number and email, plus a password of at least 8 characters.', 'MEMBER_REGISTRATION_INVALID');
+  }
+
+  if (postgresPool) {
+    const client = await postgresPool.connect();
+    let committed = false;
+    try {
+      await client.query('BEGIN');
+      const memberResult = await client.query(
+        `SELECT id, full_name, phone, email
+         FROM members
+         WHERE status = 'Active'
+           AND regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = $1
+           AND lower(COALESCE(email, '')) = $2
+         FOR UPDATE`,
+        [phoneDigits, email]
+      );
+      if (memberResult.rowCount !== 1) {
+        throw new HttpError(403, 'The phone number and email must match one active SACCO member record.', 'MEMBER_EMAIL_PHONE_MISMATCH');
+      }
+      const member = memberResult.rows[0];
+      if (normalizedPersonName(member.full_name) !== normalizedPersonName(fullName)) {
+        throw new HttpError(403, 'Your name, phone number, and email must match the same active SACCO member record.', 'MEMBER_IDENTITY_MISMATCH');
+      }
+
+      const existing = await client.query(
+        `SELECT id, firebase_uid, full_name, email, phone, role, is_active, account_status,
+                linked_member_id, password_hash
+         FROM users
+         WHERE linked_member_id = $1 OR lower(COALESCE(email, '')) = $2
+         LIMIT 1 FOR UPDATE`,
+        [member.id, email]
+      );
+      let user: AuthorizedUser;
+      if (existing.rowCount) {
+        const row = existing.rows[0];
+        if (row.role !== 'Member' || (row.linked_member_id && String(row.linked_member_id) !== String(member.id))) {
+          throw new HttpError(409, 'This email is already assigned to another SACCO account.', 'MEMBER_PROFILE_CONFLICT');
+        }
+        if (row.password_hash) {
+          throw new HttpError(409, 'An online account already exists for this member. Sign in or ask the Chairman to reset it.', 'MEMBER_ACCOUNT_EXISTS');
+        }
+        const updated = await client.query(
+          `UPDATE users
+           SET full_name = $1, phone = $2, email = $3, linked_member_id = $4,
+               password_hash = crypt($5, gen_salt('bf')), is_active = TRUE,
+               account_status = 'Active', approved_at = COALESCE(approved_at, now()), updated_at = now()
+           WHERE id = $6
+           RETURNING id, firebase_uid, full_name, email, phone, role, is_active, account_status, linked_member_id`,
+          [member.full_name, member.phone || phone, email, member.id, password, row.id]
+        );
+        user = mapDbUser(updated.rows[0]);
+      } else {
+        const created = await client.query(
+          `INSERT INTO users (
+             full_name, email, phone, role, password_hash, is_active,
+             linked_member_id, account_status, approved_at
+           ) VALUES ($1, $2, $3, 'Member', crypt($4, gen_salt('bf')), TRUE, $5, 'Active', now())
+           RETURNING id, firebase_uid, full_name, email, phone, role, is_active, account_status, linked_member_id`,
+          [member.full_name, email, member.phone || phone, password, member.id]
+        );
+        user = mapDbUser(created.rows[0]);
+      }
+      await client.query('COMMIT');
+      committed = true;
+      return user;
+    } catch (error) {
+      if (!committed) await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  if (!allowInMemoryStore) {
+    throw new HttpError(503, 'Member registration requires the SACCO database.', 'MEMBER_REGISTRATION_UNAVAILABLE');
+  }
+  const member = localStore.members.find(item =>
+    item.status === 'Active'
+    && normalizedPhone(item.phoneNumber) === phoneDigits
+    && normalizedEmail(item.email) === email
+    && normalizedPersonName(item.name) === normalizedPersonName(fullName)
+  );
+  if (!member) {
+    throw new HttpError(403, 'Your name, phone number, and email must match the same active SACCO member record.', 'MEMBER_IDENTITY_MISMATCH');
+  }
+  const existing = localStore.users.find(item => item.linkedMemberId === member.id || normalizedEmail(item.email) === email);
+  if (existing) throw new HttpError(409, 'An online account already exists for this member.', 'MEMBER_ACCOUNT_EXISTS');
+  const user: AuthorizedUser = {
+    id: `member-${crypto.randomUUID()}`,
+    name: member.name,
+    email,
+    phone: member.phoneNumber,
+    role: 'Member',
+    isActive: true,
+    accountStatus: 'Active',
+    linkedMemberId: member.id,
+    devPassword: password
+  };
+  localStore.users.push(user);
+  return user;
+}
+
+async function createOrLoadVerifiedFirebaseMember(token: DecodedIdToken): Promise<AuthorizedUser> {
+  if (!postgresPool) {
+    throw new HttpError(503, 'Secure Firebase member access requires the PostgreSQL SACCO database.', 'FIREBASE_MEMBER_ACCESS_UNAVAILABLE');
+  }
+  const email = assertVerifiedFirebaseEmail(token);
+  const memberId = firebaseMemberId(token);
+  const firebaseUid = String(token.uid || '').trim();
+  if (!firebaseUid) throw new HttpError(401, 'The Firebase session is invalid.', 'FIREBASE_TOKEN_INVALID');
+
+  const client = await postgresPool.connect();
+  let committed = false;
+  try {
+    await client.query('BEGIN');
+    const memberResult = await client.query(
+      `SELECT m.id, m.full_name, m.phone, m.email
+       FROM member_firebase_enrollments e
+       JOIN members m ON m.id = e.member_id
+       WHERE e.firebase_uid = $1
+         AND e.member_id = $2
+         AND lower(e.email) = $3
+         AND lower(COALESCE(m.email, '')) = $3
+         AND m.status = 'Active'
+       FOR UPDATE OF e, m`,
+      [firebaseUid, memberId, email]
+    );
+    if (memberResult.rowCount !== 1) {
+      throw new HttpError(403, 'This verified email is no longer eligible for the linked SACCO member profile.', 'FIREBASE_MEMBER_LINK_INVALID');
+    }
+    const member = memberResult.rows[0];
+    const existingResult = await client.query(
+      `SELECT id, firebase_uid, full_name, email, phone, role, is_active, account_status, linked_member_id
+       FROM users WHERE firebase_uid = $1 LIMIT 1 FOR UPDATE`,
+      [firebaseUid]
+    );
+    let user: AuthorizedUser;
+    if (existingResult.rowCount) {
+      user = mapDbUser(existingResult.rows[0]);
+      if (user.role !== 'Member' || user.linkedMemberId !== String(member.id) || normalizedEmail(user.email) !== email) {
+        throw new HttpError(409, 'This Firebase identity is already linked to a different SACCO profile.', 'FIREBASE_PROFILE_CONFLICT');
+      }
+      await client.query(
+        `UPDATE users
+         SET firebase_email_verified_at = now(), last_login_at = now(), updated_at = now()
+         WHERE id = $1`,
+        [user.id]
+      );
+    } else {
+      const existingMemberProfile = await client.query('SELECT id FROM users WHERE linked_member_id = $1 LIMIT 1 FOR UPDATE', [member.id]);
+      if (existingMemberProfile.rowCount) {
+        throw new HttpError(409, 'This member already has a SACCO profile. Ask an administrator to migrate it to Firebase.', 'MEMBER_PROFILE_EXISTS');
+      }
+      const created = await client.query(
+        `INSERT INTO users (
+           firebase_uid, full_name, email, phone, role, is_active, linked_member_id,
+           account_status, approved_at, firebase_email_verified_at, last_login_at
+         ) VALUES ($1, $2, $3, $4, 'Member', TRUE, $5, 'Active', now(), now(), now())
+         RETURNING id, firebase_uid, full_name, email, phone, role, is_active, account_status, linked_member_id`,
+        [firebaseUid, member.full_name, email, member.phone || null, member.id]
+      );
+      user = mapDbUser(created.rows[0]);
+    }
+    if (!hasActiveAccount(user)) {
+      throw new HttpError(403, 'This SACCO account is not active.', 'ACCOUNT_INACTIVE');
+    }
+    await client.query('UPDATE member_firebase_enrollments SET email_verified_at = now() WHERE firebase_uid = $1', [firebaseUid]);
+    await client.query('COMMIT');
+    committed = true;
+    return user;
+  } catch (error) {
+    if (!committed) await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function authenticateVerifiedFirebaseUser(token: string): Promise<AuthorizedUser> {
+  if (!postgresPool) {
+    throw new HttpError(503, 'Secure Firebase member access requires the PostgreSQL SACCO database.', 'FIREBASE_MEMBER_ACCESS_UNAVAILABLE');
+  }
+  const decoded = await verifyFirebaseIdToken(token);
+  const email = assertVerifiedFirebaseEmail(decoded);
+  const result = await postgresPool.query(
+    `SELECT id, firebase_uid, full_name, email, phone, role, is_active, account_status, linked_member_id
+     FROM users
+     WHERE firebase_uid = $1
+       AND lower(COALESCE(email, '')) = $2
+       AND firebase_email_verified_at IS NOT NULL
+     LIMIT 1`,
+    [decoded.uid, email]
+  );
+  if (!result.rowCount) {
+    throw new HttpError(403, 'Create your verified SACCO member profile before accessing the dashboard.', 'FIREBASE_PROFILE_REQUIRED');
+  }
+  const user = mapDbUser(result.rows[0]);
+  if (!hasActiveAccount(user) || !isMemberUser(user) || !user.linkedMemberId) {
+    throw new HttpError(403, 'This Firebase account is not authorized for SACCO access.', 'FIREBASE_PROFILE_INACTIVE');
+  }
+  return user;
 }
 
 async function recordAuditLog(req: express.Request, action: string, entityTable: string, entityId?: string, oldData?: unknown, newData?: unknown) {
@@ -173,24 +597,24 @@ async function recordAuditLog(req: express.Request, action: string, entityTable:
   }
 }
 
-async function countSaccoUsers(): Promise<number> {
+async function countSaccoAdmins(): Promise<number> {
   if (postgresPool) {
-    const result = await postgresPool.query('SELECT COUNT(*)::int AS count FROM users');
+    const result = await postgresPool.query("SELECT COUNT(*)::int AS count FROM users WHERE role = 'Chairman'");
     return Number(result.rows[0]?.count || 0);
   }
 
   if (useFirestore) {
     return safeDbOperation(
       async (firestoreDb) => {
-        const snap = await firestoreDb.collection('users').limit(1).get();
+        const snap = await firestoreDb.collection('users').where('role', '==', 'Chairman').limit(1).get();
         return snap.empty ? 0 : 1;
       },
-      () => localStore.users.length,
+      () => localStore.users.filter(user => user.role === 'Chairman').length,
       'users'
     );
   }
 
-  return localStore.users.length;
+  return localStore.users.filter(user => user.role === 'Chairman').length;
 }
 
 async function createFirstAdminProfile(input: {
@@ -209,18 +633,18 @@ async function createFirstAdminProfile(input: {
     const result = await postgresPool.query(
       `INSERT INTO users (full_name, email, phone, role, password_hash, is_active, account_status, approved_at)
        VALUES ($1, $2, $3, 'Chairman', crypt($4, gen_salt('bf')), TRUE, 'Active', now())
-       ON CONFLICT (email) DO UPDATE SET
-         full_name = EXCLUDED.full_name,
-         phone = EXCLUDED.phone,
-         role = 'Chairman',
-         password_hash = EXCLUDED.password_hash,
-         is_active = TRUE,
-         account_status = 'Active',
-         updated_at = now()
+       ON CONFLICT (email) DO NOTHING
        RETURNING id, firebase_uid, full_name, email, phone, role, is_active, account_status, linked_member_id`,
       [fullName, email, input.phone || null, input.password]
     );
+    if (!result.rowCount) {
+      throw new HttpError(409, 'That email already belongs to a SACCO profile. Ask an existing admin for help.', 'BOOTSTRAP_EMAIL_EXISTS');
+    }
     return mapDbUser(result.rows[0]);
+  }
+
+  if (await findDevelopmentUserByEmail(email)) {
+    throw new HttpError(409, 'That email already belongs to a SACCO profile. Ask an existing admin for help.', 'BOOTSTRAP_EMAIL_EXISTS');
   }
 
   const newUser: AuthorizedUser = {
@@ -352,22 +776,10 @@ async function authenticatePasswordUser(identifierValue: unknown, password: stri
       `SELECT id, firebase_uid, full_name, email, phone, role, is_active, account_status, linked_member_id,
               totp_secret_ciphertext, totp_enabled_at
        FROM users
-       WHERE (
-         (
-           role = 'Member'
-           AND $1 <> ''
-           AND regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = $1
-         ) OR (
-           role <> 'Member'
-           AND (
-             ($1 <> '' AND regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = $1)
-             OR ($2 LIKE '%@%' AND lower(COALESCE(email, '')) = $2)
-           )
-         )
-       )
+       WHERE (($1 <> '' AND regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = $1)
+          OR ($2 LIKE '%@%' AND lower(COALESCE(email, '')) = $2))
        AND password_hash IS NOT NULL
          AND password_hash = crypt($3, password_hash)
-       ORDER BY CASE WHEN role = 'Member' THEN 0 ELSE 1 END
        LIMIT 1`,
       [phone, email, password]
     );
@@ -376,8 +788,7 @@ async function authenticatePasswordUser(identifierValue: unknown, password: stri
 
   const user = localStore.users.find(item => {
     const itemPhone = normalizedPhone(item.phone);
-    return (item.role === 'Member' && phone && itemPhone === phone)
-      || (item.role !== 'Member' && ((phone && itemPhone === phone) || (email.includes('@') && item.email?.toLowerCase() === email)));
+    return (phone && itemPhone === phone) || (email.includes('@') && item.email?.toLowerCase() === email);
   });
   return user?.devPassword && password === user.devPassword ? { ...user, totpSecretCiphertext: user.totpSecret, totpEnabledAt: user.totpEnabledAt } : null;
 }
@@ -462,172 +873,15 @@ let useFirestore = Boolean(
 );
 const allowInMemoryStore = !isProduction && process.env.ALLOW_IN_MEMORY_DB === 'true';
 
-type CoopBankIncomingEvent = Omit<CoopBankEvent, 'id' | 'status' | 'receivedAt'> & { rawPayload: unknown };
-
-function normalizeBankAccountNumber(value: unknown): string {
-  return String(value || '').replace(/\s+/g, '');
-}
-
-function configuredCoopBankAccounts(): string[] {
-  return String(process.env.COOP_B2B_ALLOWED_ACCOUNT_NUMBERS || '')
-    .split(',')
-    .map(normalizeBankAccountNumber)
-    .filter(Boolean);
-}
-
-function coopBankAuthMode(): 'token' | 'basic' {
-  const configured = String(process.env.COOP_B2B_IPN_AUTH_MODE || 'token').trim().toLowerCase();
-  if (configured === 'token' || configured === 'basic') return configured;
-  throw new HttpError(503, 'Co-op Bank IPN authentication is not configured.', 'COOP_B2B_AUTH_UNAVAILABLE');
-}
-
-function constantTimeMatches(actual: string, expected: string): boolean {
-  const actualValue = Buffer.from(actual);
-  const expectedValue = Buffer.from(expected);
-  return actualValue.length === expectedValue.length && crypto.timingSafeEqual(actualValue, expectedValue);
-}
-
-function assertCoopBankIpnAuthentication(req: express.Request): void {
-  const mode = coopBankAuthMode();
-  const authorization = String(req.headers.authorization || '');
-  if (mode === 'token') {
-    const token = String(process.env.COOP_B2B_IPN_TOKEN || '');
-    if (!token) throw new HttpError(503, 'Co-op Bank IPN authentication is not configured.', 'COOP_B2B_AUTH_UNAVAILABLE');
-    const supplied = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length).trim() : '';
-    if (!constantTimeMatches(supplied, token)) {
-      throw new HttpError(401, 'Co-op Bank IPN authentication failed.', 'COOP_B2B_AUTH_FAILED');
-    }
-    return;
-  }
-
-  const username = String(process.env.COOP_B2B_IPN_BASIC_USERNAME || '');
-  const password = String(process.env.COOP_B2B_IPN_BASIC_PASSWORD || '');
-  if (!username || !password) throw new HttpError(503, 'Co-op Bank IPN authentication is not configured.', 'COOP_B2B_AUTH_UNAVAILABLE');
-  const encoded = authorization.startsWith('Basic ') ? authorization.slice('Basic '.length).trim() : '';
-  let decoded = '';
-  try {
-    decoded = Buffer.from(encoded, 'base64').toString('utf8');
-  } catch {
-    decoded = '';
-  }
-  const separator = decoded.indexOf(':');
-  const suppliedUsername = separator >= 0 ? decoded.slice(0, separator) : '';
-  const suppliedPassword = separator >= 0 ? decoded.slice(separator + 1) : '';
-  if (!constantTimeMatches(suppliedUsername, username) || !constantTimeMatches(suppliedPassword, password)) {
-    throw new HttpError(401, 'Co-op Bank IPN authentication failed.', 'COOP_B2B_AUTH_FAILED');
-  }
-}
-
-function optionalNumericBankField(value: unknown, fieldName: string): number | undefined {
-  const raw = String(value ?? '').trim();
-  if (!raw) return undefined;
-  const numberValue = Number(raw);
-  if (!Number.isFinite(numberValue)) {
-    throw new HttpError(422, `${fieldName} must be numeric when supplied.`, 'COOP_B2B_PAYLOAD_INVALID');
-  }
-  return numberValue;
-}
-
-function normalizeCoopBankEvent(payload: unknown): CoopBankIncomingEvent {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    throw new HttpError(422, 'Co-op Bank IPN payload must be a JSON object.', 'COOP_B2B_PAYLOAD_INVALID');
-  }
-  const body = payload as Record<string, unknown>;
-  const transactionId = String(body.TransactionId || '').trim();
-  const accountNumber = normalizeBankAccountNumber(body.AcctNo);
-  const amount = Number(body.Amount);
-  const currency = String(body.Currency || '').trim().toUpperCase();
-  const eventType = String(body.EventType || '').trim().toUpperCase() as CoopBankEventType;
-  const allowedAccounts = configuredCoopBankAccounts();
-  const requiredCurrency = String(process.env.COOP_B2B_IPN_CURRENCY || 'KES').trim().toUpperCase();
-
-  if (!transactionId || !accountNumber || !Number.isFinite(amount) || amount <= 0 || !currency || !['CREDIT', 'DEBIT'].includes(eventType)) {
-    throw new HttpError(422, 'Co-op Bank IPN payload is missing a valid transaction ID, account, amount, currency, or event type.', 'COOP_B2B_PAYLOAD_INVALID');
-  }
-  if (!allowedAccounts.length) {
-    throw new HttpError(503, 'No Co-op Bank collection accounts are configured.', 'COOP_B2B_ACCOUNTS_UNAVAILABLE');
-  }
-  if (!allowedAccounts.includes(accountNumber)) {
-    throw new HttpError(422, 'The supplied Co-op Bank account is not registered for this SACCO.', 'COOP_B2B_ACCOUNT_UNRECOGNIZED');
-  }
-  if (currency !== requiredCurrency) {
-    throw new HttpError(422, `Only ${requiredCurrency} Co-op Bank events are accepted.`, 'COOP_B2B_CURRENCY_UNSUPPORTED');
-  }
-
-  return {
-    transactionId,
-    paymentRef: String(body.PaymentRef || '').trim() || undefined,
-    accountNumber,
-    amount,
-    currency,
-    eventType,
-    narration: String(body.Narration || '').trim(),
-    customerMemoLine1: String(body.CustMemoLine1 || '').trim() || undefined,
-    customerMemoLine2: String(body.CustMemoLine2 || '').trim() || undefined,
-    customerMemoLine3: String(body.CustMemoLine3 || '').trim() || undefined,
-    bookedBalance: optionalNumericBankField(body.BookedBalance, 'BookedBalance'),
-    clearedBalance: optionalNumericBankField(body.ClearedBalance, 'ClearedBalance'),
-    exchangeRate: optionalNumericBankField(body.ExchangeRate, 'ExchangeRate'),
-    postingDate: String(body.PostingDate || '').trim() || undefined,
-    valueDate: String(body.ValueDate || '').trim() || undefined,
-    transactionDate: String(body.TransactionDate || '').trim() || undefined,
-    rawPayload: payload
-  };
-}
+const COOP_EVENT_PUBLIC_SELECT = `
+  SELECT e.*, m.full_name AS matched_member_name, v.plate_number AS matched_vehicle_plate
+  FROM coop_bank_ipn_events e
+  LEFT JOIN members m ON m.id = e.matched_member_id
+  LEFT JOIN vehicles v ON v.id = e.matched_vehicle_id`;
 
 function toPublicCoopBankEvent(event: CoopBankEvent & { rawPayload?: unknown }): CoopBankEvent {
-  const { rawPayload: _rawPayload, ...publicEvent } = event;
-  return publicEvent;
-}
-
-async function persistCoopBankEvent(event: CoopBankIncomingEvent): Promise<{ created: boolean; event: CoopBankEvent }> {
-  const receivedAt = new Date().toISOString();
-  const status: CoopBankEventStatus = 'PendingReview';
-  if (postgresPool) {
-    const inserted = await postgresPool.query(
-      `INSERT INTO coop_bank_ipn_events (
-         transaction_id, payment_ref, account_number, amount, currency, event_type,
-         narration, customer_memo_line1, customer_memo_line2, customer_memo_line3,
-         booked_balance, cleared_balance, exchange_rate, posting_date, value_date,
-         transaction_date, status, raw_payload
-       ) VALUES (
-         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb
-       ) ON CONFLICT (transaction_id) DO NOTHING
-       RETURNING id, transaction_id, payment_ref, account_number, amount, currency, event_type,
-                 narration, customer_memo_line1, customer_memo_line2, customer_memo_line3,
-                 booked_balance, cleared_balance, exchange_rate, posting_date, value_date,
-                 transaction_date, status, received_at`,
-      [
-        event.transactionId, event.paymentRef || null, event.accountNumber, event.amount, event.currency, event.eventType,
-        event.narration, event.customerMemoLine1 || null, event.customerMemoLine2 || null, event.customerMemoLine3 || null,
-        event.bookedBalance ?? null, event.clearedBalance ?? null, event.exchangeRate ?? null, event.postingDate || null,
-        event.valueDate || null, event.transactionDate || null, status, JSON.stringify(event.rawPayload)
-      ]
-    );
-    if (inserted.rowCount) {
-      return { created: true, event: mapCoopBankEvent(inserted.rows[0]) };
-    }
-    const existing = await postgresPool.query(
-      `SELECT id, transaction_id, payment_ref, account_number, amount, currency, event_type,
-              narration, customer_memo_line1, customer_memo_line2, customer_memo_line3,
-              booked_balance, cleared_balance, exchange_rate, posting_date, value_date,
-              transaction_date, status, received_at
-       FROM coop_bank_ipn_events WHERE transaction_id = $1 LIMIT 1`,
-      [event.transactionId]
-    );
-    return { created: false, event: mapCoopBankEvent(existing.rows[0]) };
-  }
-
-  const existing = localStore.coopBankEvents.find(item => item.transactionId === event.transactionId);
-  if (existing) return { created: false, event: toPublicCoopBankEvent(existing) };
-  const stored: CoopBankEvent & { rawPayload: unknown } = {
-    id: `coop-event-${crypto.randomUUID()}`,
-    ...event,
-    status,
-    receivedAt
-  };
-  localStore.coopBankEvents.push(stored);
-  return { created: true, event: toPublicCoopBankEvent(stored) };
+  const { rawPayload: _rawPayload, ...safe } = event;
+  return safe;
 }
 
 function mapCoopBankEvent(row: any): CoopBankEvent {
@@ -635,54 +889,326 @@ function mapCoopBankEvent(row: any): CoopBankEvent {
     id: String(row.id),
     transactionId: String(row.transaction_id),
     paymentRef: row.payment_ref || undefined,
-    accountNumber: String(row.account_number),
+    accountNumber: maskAccountNumber(row.account_number),
     amount: Number(row.amount),
     currency: String(row.currency),
-    eventType: String(row.event_type) as CoopBankEventType,
+    eventType: String(row.event_type),
     narration: row.narration || '',
     customerMemoLine1: row.customer_memo_line1 || undefined,
     customerMemoLine2: row.customer_memo_line2 || undefined,
     customerMemoLine3: row.customer_memo_line3 || undefined,
-    bookedBalance: row.booked_balance === null || row.booked_balance === undefined ? undefined : Number(row.booked_balance),
-    clearedBalance: row.cleared_balance === null || row.cleared_balance === undefined ? undefined : Number(row.cleared_balance),
-    exchangeRate: row.exchange_rate === null || row.exchange_rate === undefined ? undefined : Number(row.exchange_rate),
+    bookedBalance: row.booked_balance == null ? undefined : Number(row.booked_balance),
+    clearedBalance: row.cleared_balance == null ? undefined : Number(row.cleared_balance),
+    exchangeRate: row.exchange_rate == null ? undefined : Number(row.exchange_rate),
     postingDate: row.posting_date || undefined,
     valueDate: row.value_date || undefined,
     transactionDate: row.transaction_date || undefined,
-    status: String(row.status) as CoopBankEventStatus,
-    receivedAt: new Date(row.received_at).toISOString()
+    processingStatus: row.processing_status,
+    reconciliationStatus: row.reconciliation_status,
+    matchedMemberId: row.matched_member_id ? String(row.matched_member_id) : undefined,
+    matchedMemberName: row.matched_member_name || undefined,
+    matchedVehicleId: row.matched_vehicle_id ? String(row.matched_vehicle_id) : undefined,
+    matchedVehiclePlate: row.matched_vehicle_plate || undefined,
+    ledgerEntryId: row.ledger_entry_id ? String(row.ledger_entry_id) : undefined,
+    matchMethod: row.match_method || undefined,
+    matchConfidence: row.match_confidence == null ? undefined : Number(row.match_confidence),
+    manualReviewReason: row.manual_review_reason || undefined,
+    processingAttempts: Number(row.processing_attempts || 0),
+    duplicateCount: Number(row.duplicate_count || 0),
+    lastProcessingError: row.last_processing_error || undefined,
+    receivedAt: new Date(row.received_at).toISOString(),
+    processedAt: row.processed_at ? new Date(row.processed_at).toISOString() : undefined,
+    reconciledAt: row.reconciled_at ? new Date(row.reconciled_at).toISOString() : undefined
   };
 }
 
-async function listCoopBankEvents(): Promise<CoopBankEvent[]> {
+async function recordCoopBankAudit(input: {
+  eventId?: string; action: string; actorType: 'SYSTEM' | 'BANK_CALLBACK' | 'USER'; actorUserId?: string;
+  previousStatus?: string; newStatus?: string; reason?: string; correlationId: string; metadata?: unknown;
+}): Promise<void> {
+  if (!postgresPool) return;
+  await postgresPool.query(
+    `INSERT INTO coop_bank_event_audit (
+       bank_event_id, action, actor_type, actor_user_id, previous_status,
+       new_status, reason, correlation_id, metadata
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)`,
+    [input.eventId || null, input.action, input.actorType, input.actorUserId || null,
+      input.previousStatus || null, input.newStatus || null, input.reason || null,
+      input.correlationId, JSON.stringify(input.metadata || {})]
+  );
+}
+
+async function persistCoopBankEvent(event: NormalizedCoopEvent, authenticationMode: string, correlationId: string): Promise<{ created: boolean; eventId: string }> {
   if (postgresPool) {
-    const result = await postgresPool.query(
-      `SELECT id, transaction_id, payment_ref, account_number, amount, currency, event_type,
-              narration, customer_memo_line1, customer_memo_line2, customer_memo_line3,
-              booked_balance, cleared_balance, exchange_rate, posting_date, value_date,
-              transaction_date, status, received_at
-       FROM coop_bank_ipn_events ORDER BY received_at DESC LIMIT 250`
+    const inserted = await postgresPool.query(
+      `INSERT INTO coop_bank_ipn_events (
+         provider, transaction_id, idempotency_key, payment_ref, account_number,
+         amount, currency, event_type, narration, customer_memo_line1,
+         customer_memo_line2, customer_memo_line3, booked_balance, cleared_balance,
+         exchange_rate, posting_date, value_date, transaction_date, status,
+         authentication_mode, processing_status, reconciliation_status, raw_payload
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+         $15, $16, $17, $18, 'PendingReview', $19, 'RECEIVED', 'NOT_EVALUATED', $20::jsonb
+       ) ON CONFLICT (idempotency_key) DO NOTHING RETURNING id`,
+      [event.provider, event.externalTransactionId, event.idempotencyKey, event.paymentReference || null,
+        event.accountNumber, event.amount, event.currency, event.eventType, event.narration,
+        event.customerMemoLine1 || null, event.customerMemoLine2 || null, event.customerMemoLine3 || null,
+        event.bookedBalance || null, event.clearedBalance || null, event.exchangeRate || null,
+        event.postingDate || null, event.valueDate || null, event.transactionDate || null,
+        authenticationMode, JSON.stringify(event.rawPayload)]
     );
-    return result.rows.map(mapCoopBankEvent);
+    if (inserted.rowCount) {
+      const eventId = String(inserted.rows[0].id);
+      await recordCoopBankAudit({ eventId, action: 'CALLBACK_RECEIVED', actorType: 'BANK_CALLBACK', newStatus: 'RECEIVED', correlationId, metadata: { externalTransactionId: event.externalTransactionId } });
+      return { created: true, eventId };
+    }
+    const duplicate = await postgresPool.query(
+      `UPDATE coop_bank_ipn_events SET duplicate_count = duplicate_count + 1
+       WHERE idempotency_key = $1 RETURNING id`,
+      [event.idempotencyKey]
+    );
+    if (!duplicate.rowCount) throw new Error('Duplicate bank event could not be reloaded.');
+    const eventId = String(duplicate.rows[0].id);
+    await recordCoopBankAudit({ eventId, action: 'DUPLICATE_DETECTED', actorType: 'BANK_CALLBACK', correlationId, metadata: { externalTransactionId: event.externalTransactionId } });
+    return { created: false, eventId };
   }
-  return localStore.coopBankEvents
-    .map(toPublicCoopBankEvent)
-    .sort((left, right) => new Date(right.receivedAt).getTime() - new Date(left.receivedAt).getTime());
+
+  if (!allowInMemoryStore) throw new HttpError(503, 'Durable bank event storage is unavailable.', 'COOP_IPN_PERSISTENCE_UNAVAILABLE');
+  const existing = localStore.coopBankEvents.find(item => item.transactionId === event.externalTransactionId);
+  if (existing) {
+    existing.duplicateCount += 1;
+    return { created: false, eventId: existing.id };
+  }
+  const receivedAt = new Date().toISOString();
+  const stored: CoopBankEvent & { rawPayload: unknown } = {
+    id: `coop-event-${crypto.randomUUID()}`,
+    transactionId: event.externalTransactionId,
+    paymentRef: event.paymentReference,
+    accountNumber: maskAccountNumber(event.accountNumber),
+    amount: Number(event.amount), currency: event.currency, eventType: event.eventType,
+    narration: event.narration, customerMemoLine1: event.customerMemoLine1,
+    customerMemoLine2: event.customerMemoLine2, customerMemoLine3: event.customerMemoLine3,
+    bookedBalance: event.bookedBalance ? Number(event.bookedBalance) : undefined,
+    clearedBalance: event.clearedBalance ? Number(event.clearedBalance) : undefined,
+    exchangeRate: event.exchangeRate ? Number(event.exchangeRate) : undefined,
+    postingDate: event.postingDate, valueDate: event.valueDate, transactionDate: event.transactionDate,
+    processingStatus: 'RECEIVED', reconciliationStatus: 'NOT_EVALUATED', processingAttempts: 0,
+    duplicateCount: 0, receivedAt, rawPayload: event.rawPayload
+  };
+  localStore.coopBankEvents.push(stored);
+  return { created: true, eventId: stored.id };
+}
+
+function coopMatchCandidates(event: any, members: any[], vehicles: any[]) {
+  const candidates = referenceCandidates({
+    paymentReference: event.payment_ref,
+    customerMemoLine1: event.customer_memo_line1,
+    customerMemoLine2: event.customer_memo_line2,
+    customerMemoLine3: event.customer_memo_line3,
+    narration: event.narration
+  });
+  const matches = new Map<string, { memberId: string; vehicleId?: string; method: string }>();
+  for (const candidate of candidates) {
+    for (const member of members) {
+      const fields: Array<[unknown, string]> = [[member.member_number, 'MEMBER_NUMBER'], [member.id, 'MEMBER_ID'], [member.phone, 'PHONE']];
+      const matched = fields.find(([value]) => value && normalizeReference(value) === candidate);
+      if (matched) matches.set(String(member.id), { memberId: String(member.id), method: matched[1] });
+    }
+    for (const vehicle of vehicles) {
+      if (normalizeReference(vehicle.plate_number) === candidate && vehicle.member_id) {
+        matches.set(String(vehicle.member_id), { memberId: String(vehicle.member_id), vehicleId: String(vehicle.id), method: 'VEHICLE_PLATE' });
+      }
+    }
+  }
+  return [...matches.values()];
+}
+
+async function processCoopBankEvent(eventId: string, correlationId: string = crypto.randomUUID()): Promise<void> {
+  if (!postgresPool) {
+    const event = localStore.coopBankEvents.find(item => item.id === eventId);
+    if (!event || ['MANUALLY_RECONCILED', 'POSTED'].includes(event.reconciliationStatus)) return;
+    event.processingAttempts += 1;
+    const classification = classifyEventType(event.eventType);
+    event.processingStatus = classification.processingStatus;
+    event.reconciliationStatus = classification.reconciliationStatus;
+    event.manualReviewReason = classification.reason;
+    if (event.eventType === 'CREDIT') {
+      const raw = (event.rawPayload && typeof event.rawPayload === 'object' ? event.rawPayload : {}) as Record<string, unknown>;
+      const matches = coopMatchCandidates(
+        {
+          payment_ref: raw.PaymentRef, customer_memo_line1: raw.CustMemoLine1,
+          customer_memo_line2: raw.CustMemoLine2, customer_memo_line3: raw.CustMemoLine3,
+          narration: raw.Narration
+        },
+        localStore.members.map(member => ({ id: member.id, member_number: member.membershipNumber, phone: member.phoneNumber })),
+        localStore.vehicles.map(vehicle => ({ id: vehicle.id, member_id: vehicle.ownerId, plate_number: vehicle.plateNumber }))
+      );
+      if (matches.length === 1) {
+        event.matchedMemberId = matches[0].memberId;
+        event.matchedVehicleId = matches[0].vehicleId;
+        event.matchMethod = matches[0].method;
+        event.matchConfidence = 1;
+        event.reconciliationStatus = 'PENDING_ALLOCATION';
+        event.manualReviewReason = 'Member matched exactly; an officer must choose the ledger allocation.';
+      } else if (matches.length > 1) {
+        event.reconciliationStatus = 'AMBIGUOUS';
+        event.manualReviewReason = 'More than one member matched the supplied references.';
+      } else {
+        event.reconciliationStatus = 'UNMATCHED';
+        event.manualReviewReason = 'No exact member, phone, or vehicle reference match was found.';
+      }
+    }
+    event.processedAt = new Date().toISOString();
+    return;
+  }
+
+  const leased = await postgresPool.query(
+    `UPDATE coop_bank_ipn_events
+     SET processing_status = 'PROCESSING', processing_attempts = processing_attempts + 1,
+         last_processing_error = NULL
+     WHERE id = $1 AND ledger_entry_id IS NULL
+       AND reconciliation_status NOT IN ('POSTED','MANUALLY_RECONCILED')
+       AND processing_status <> 'PROCESSING'
+     RETURNING *`,
+    [eventId]
+  );
+  if (!leased.rowCount) return;
+  const event = leased.rows[0];
+  try {
+    await recordCoopBankAudit({ eventId, action: 'PROCESSING_STARTED', actorType: 'SYSTEM', previousStatus: event.processing_status, newStatus: 'PROCESSING', correlationId });
+    const classification = classifyEventType(event.event_type);
+    let reconciliationStatus: CoopReconciliationStatus = classification.reconciliationStatus;
+    let matchedMemberId: string | null = null;
+    let matchedVehicleId: string | null = null;
+    let matchMethod: string | null = null;
+    let confidence: number | null = null;
+    let reason = classification.reason || null;
+    if (event.event_type === 'CREDIT') {
+      const [memberResult, vehicleResult] = await Promise.all([
+        postgresPool.query(`SELECT id, member_number, phone FROM members WHERE status = 'Active'`),
+        postgresPool.query(`SELECT id, member_id, plate_number FROM vehicles WHERE status = 'Active'`)
+      ]);
+      const matches = coopMatchCandidates(event, memberResult.rows, vehicleResult.rows);
+      if (matches.length === 1) {
+        matchedMemberId = matches[0].memberId;
+        matchedVehicleId = matches[0].vehicleId || null;
+        matchMethod = matches[0].method;
+        confidence = 1;
+        reconciliationStatus = 'PENDING_ALLOCATION';
+        reason = 'Member matched exactly; an officer must choose the ledger allocation.';
+      } else if (matches.length > 1) {
+        reconciliationStatus = 'AMBIGUOUS';
+        reason = 'More than one member matched the supplied references.';
+      } else {
+        reconciliationStatus = 'UNMATCHED';
+        reason = 'No exact member, phone, or vehicle reference match was found.';
+      }
+    }
+    await postgresPool.query(
+      `UPDATE coop_bank_ipn_events
+       SET processing_status = $2, reconciliation_status = $3, matched_member_id = $4,
+           matched_vehicle_id = $5, match_method = $6, match_confidence = $7,
+           manual_review_reason = $8, processed_at = now()
+       WHERE id = $1`,
+      [eventId, classification.processingStatus, reconciliationStatus, matchedMemberId,
+        matchedVehicleId, matchMethod, confidence, reason]
+    );
+    await recordCoopBankAudit({ eventId, action: reconciliationStatus, actorType: 'SYSTEM', previousStatus: 'NOT_EVALUATED', newStatus: reconciliationStatus, reason: reason || undefined, correlationId });
+  } catch (error: any) {
+    const safeError = String(error?.message || 'Bank event processing failed.').slice(0, 500);
+    await postgresPool.query(
+      `UPDATE coop_bank_ipn_events SET processing_status = 'FAILED', last_processing_error = $2 WHERE id = $1`,
+      [eventId, safeError]
+    );
+    await recordCoopBankAudit({ eventId, action: 'PROCESSING_FAILED', actorType: 'SYSTEM', previousStatus: 'PROCESSING', newStatus: 'FAILED', reason: safeError, correlationId });
+  }
+}
+
+export async function resumePendingCoopBankEvents(): Promise<void> {
+  if (!postgresPool) return;
+  const config = loadCoopIpnConfig();
+  if (!config.enabled) return;
+  await postgresPool.query(
+    `UPDATE coop_bank_ipn_events SET processing_status = 'RECEIVED',
+       last_processing_error = COALESCE(last_processing_error, 'Recovered an expired processing lease.')
+     WHERE processing_status = 'PROCESSING' AND updated_at < now() - interval '5 minutes'
+       AND ledger_entry_id IS NULL`
+  );
+  const pending = await postgresPool.query(
+    `SELECT id FROM coop_bank_ipn_events
+     WHERE processing_status IN ('RECEIVED','FAILED') AND ledger_entry_id IS NULL
+       AND reconciliation_status NOT IN ('POSTED','MANUALLY_RECONCILED')
+     ORDER BY received_at LIMIT 100`
+  );
+  for (const row of pending.rows) await processCoopBankEvent(String(row.id));
+}
+
+async function listCoopBankEvents(filters: Record<string, unknown> = {}): Promise<CoopBankEvent[]> {
+  if (!postgresPool) return localStore.coopBankEvents.map(toPublicCoopBankEvent).sort((a, b) => Date.parse(b.receivedAt) - Date.parse(a.receivedAt));
+  const clauses: string[] = [];
+  const values: unknown[] = [];
+  const add = (sql: string, value: unknown) => { values.push(value); clauses.push(sql.replace('?', `$${values.length}`)); };
+  if (filters.status) add(`e.reconciliation_status = ?`, String(filters.status));
+  if (filters.eventType) add(`e.event_type = ?`, String(filters.eventType).toUpperCase());
+  if (filters.memberId) add(`e.matched_member_id = ?::uuid`, String(filters.memberId));
+  if (filters.reference) {
+    values.push(String(filters.reference).slice(0, 100));
+    clauses.push(`(e.payment_ref ILIKE '%' || $${values.length} || '%' OR e.transaction_id ILIKE '%' || $${values.length} || '%')`);
+  }
+  if (filters.dateFrom) add(`e.received_at >= ?::date`, String(filters.dateFrom));
+  if (filters.dateTo) add(`e.received_at < (?::date + interval '1 day')`, String(filters.dateTo));
+  if (filters.amount) add(`e.amount = ?::numeric`, String(filters.amount));
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const result = await postgresPool.query(`${COOP_EVENT_PUBLIC_SELECT} ${where} ORDER BY e.received_at DESC LIMIT 250`, values);
+  return result.rows.map(mapCoopBankEvent);
+}
+
+async function coopBankOperationalCounts() {
+  if (!postgresPool) {
+    return { total: localStore.coopBankEvents.length, receivedToday: localStore.coopBankEvents.length,
+      unmatched: localStore.coopBankEvents.filter(item => item.reconciliationStatus === 'UNMATCHED').length,
+      ambiguous: localStore.coopBankEvents.filter(item => item.reconciliationStatus === 'AMBIGUOUS').length,
+      pendingAllocation: localStore.coopBankEvents.filter(item => item.reconciliationStatus === 'PENDING_ALLOCATION').length,
+      posted: localStore.coopBankEvents.filter(item => ['POSTED', 'MANUALLY_RECONCILED'].includes(item.reconciliationStatus)).length,
+      failed: localStore.coopBankEvents.filter(item => item.processingStatus === 'FAILED').length,
+      quarantined: localStore.coopBankEvents.filter(item => item.processingStatus === 'QUARANTINED').length,
+      duplicates: localStore.coopBankEvents.reduce((sum, item) => sum + item.duplicateCount, 0), lastSuccessfulCallbackAt: null };
+  }
+  const result = await postgresPool.query(
+    `SELECT count(*)::int AS total,
+       count(*) FILTER (WHERE received_at::date = current_date)::int AS received_today,
+       count(*) FILTER (WHERE reconciliation_status = 'UNMATCHED')::int AS unmatched,
+       count(*) FILTER (WHERE reconciliation_status = 'AMBIGUOUS')::int AS ambiguous,
+       count(*) FILTER (WHERE reconciliation_status = 'PENDING_ALLOCATION')::int AS pending_allocation,
+       count(*) FILTER (WHERE reconciliation_status IN ('POSTED','MANUALLY_RECONCILED'))::int AS posted,
+       count(*) FILTER (WHERE processing_status = 'FAILED')::int AS failed,
+       count(*) FILTER (WHERE processing_status = 'QUARANTINED')::int AS quarantined,
+       COALESCE(sum(duplicate_count), 0)::int AS duplicates,
+       max(received_at) AS last_successful_callback_at
+     FROM coop_bank_ipn_events`
+  );
+  const row = result.rows[0];
+  return { total: row.total, receivedToday: row.received_today, unmatched: row.unmatched,
+    ambiguous: row.ambiguous, pendingAllocation: row.pending_allocation, posted: row.posted,
+    failed: row.failed, quarantined: row.quarantined, duplicates: row.duplicates,
+    lastSuccessfulCallbackAt: row.last_successful_callback_at ? new Date(row.last_successful_callback_at).toISOString() : null };
 }
 
 function coopBankPublicConfig() {
-  const authMode = coopBankAuthMode();
+  const config = loadCoopIpnConfig();
   const baseUrl = String(process.env.APP_URL || '').replace(/\/+$/, '');
-  const configured = authMode === 'token'
-    ? Boolean(process.env.COOP_B2B_IPN_TOKEN)
-    : Boolean(process.env.COOP_B2B_IPN_BASIC_USERNAME && process.env.COOP_B2B_IPN_BASIC_PASSWORD);
+  const webhookPath = '/api/integrations/coop/ipn';
   return {
     provider: COOP_BANK_NAME,
-    webhookPath: '/api/webhooks/coop-bank/b2b-ipn',
-    webhookUrl: baseUrl ? `${baseUrl}/api/webhooks/coop-bank/b2b-ipn` : '',
-    authMode: authMode === 'token' ? 'Token' : 'Basic',
-    authenticationConfigured: configured,
-    configuredAccountCount: configuredCoopBankAccounts().length
+    enabled: config.enabled,
+    webhookPath,
+    webhookUrl: baseUrl ? `${baseUrl}${webhookPath}` : '',
+    authMode: config.authMode === 'TOKEN' ? 'Token' : 'Basic',
+    authenticationConfigured: config.authMode === 'TOKEN' ? Boolean(config.token) : Boolean(config.basicUsername && config.basicPassword),
+    configuredAccountCount: config.allowedAccountNumbers.length,
+    observeOnly: config.observeOnly,
+    autoPostingEnabled: config.autoPostingEnabled
   };
 }
 
@@ -691,7 +1217,7 @@ function passwordAuthenticationEnabled(): boolean {
 }
 
 function requiresTotp(user: AuthorizedUser): boolean {
-  return TOTP_REQUIRED_ROLES.includes(user.role);
+  return process.env.OFFICER_TOTP_REQUIRED === 'true' && TOTP_REQUIRED_ROLES.includes(user.role);
 }
 
 function getTotpEncryptionKey(): Buffer {
@@ -851,7 +1377,9 @@ async function verifyOfficerTotpChallenge(challengeIdValue: unknown, codeValue: 
 
 async function completePasswordAuthentication(user: PasswordAuthenticatedUser): Promise<Record<string, unknown>> {
   requireActiveAccount(user);
-  if (isMemberUser(user)) requireLinkedMember(user);
+  if (isMemberUser(user)) {
+    requireLinkedMember(user);
+  }
   if (requiresTotp(user)) {
     return { user: publicUser(user), ...(await startOfficerTotpChallenge(user)) };
   }
@@ -1404,8 +1932,14 @@ const authenticateSaccoUser = async (req: express.Request, res: express.Response
         await recordAuditLog(req, 'API_AUTHORIZED', req.path);
         return next();
       }
-
-      throw new HttpError(401, 'A current SACCO session is required.', 'AUTHENTICATION_REQUIRED');
+      (req as any).user = await authenticateVerifiedFirebaseUser(token);
+      (req as any).authContext = {
+        provider: 'firebase-email-verified',
+        firebaseUid: (req as any).user.firebaseUid,
+        userId: (req as any).user.id
+      };
+      await recordAuditLog(req, 'API_AUTHORIZED', req.path);
+      return next();
     }
 
     return res.status(401).json({ error: 'A current SACCO session is required.', code: 'AUTHENTICATION_REQUIRED' });
@@ -1791,28 +2325,132 @@ async function seedDatabaseIfEmpty() {
   }
 }
 
-async function startServer() {
-  const app = express();
-  const PORT = Number(process.env.PORT || 3000);
+type SaccoAppOptions = {
+  serveFrontend?: boolean;
+  runBackgroundProcessor?: boolean;
+};
 
-  app.use(express.json());
+export async function createSaccoApp(options: SaccoAppOptions = {}) {
+  const app = express();
+  const trustProxy = String(process.env.TRUST_PROXY || '').trim().toLowerCase();
+  if (trustProxy === '1' || trustProxy === 'true') app.set('trust proxy', 1);
+  else if (trustProxy && trustProxy !== '0' && trustProxy !== 'false') {
+    throw new Error('TRUST_PROXY must be true/false or 1/0.');
+  }
+
+  app.use(express.json({ limit: '64kb' }));
 
   // Run database seeding
   await seedDatabaseIfEmpty();
+  const coopStartupConfig = loadCoopIpnConfig();
+  assertCoopIpnConfiguration(coopStartupConfig);
+  if (isProduction && coopStartupConfig.enabled) {
+    const publicUrl = String(process.env.APP_URL || '').trim();
+    if (!publicUrl.startsWith('https://')) throw new Error('APP_URL must be HTTPS when Co-op Bank IPN is enabled in production.');
+  }
+  await resumePendingCoopBankEvents();
+  if (options.runBackgroundProcessor !== false) {
+    const coopProcessorTimer = setInterval(() => {
+      void resumePendingCoopBankEvents().catch(() => console.error('[Co-op IPN] Deferred processor failed; durable events remain available for retry.'));
+    }, 30_000);
+    coopProcessorTimer.unref();
+  }
 
   // API 1: Healthcheck
   app.get('/api/health', (req, res) => {
     res.json({
       status: 'ok',
       database: postgresPool ? 'postgres_configured' : (useFirestore ? 'firestore_connected' : 'local_fallback'),
-      auth: 'password_and_totp',
+      auth: process.env.OFFICER_TOTP_REQUIRED === 'true' ? 'password_with_optional_officer_totp' : 'password',
       timestamp: new Date().toISOString()
     });
   });
 
+  // This endpoint exposes only whether a first Chairman is still needed. The
+  // bootstrap route repeats the same check so hiding setup in the UI is never
+  // relied on as an authorization control.
+  app.get('/api/auth/onboarding-status', async (req, res) => {
+    try {
+      res.json({ needsFirstAdmin: (await countSaccoAdmins()) === 0 });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
   app.post('/api/auth/session', async (req, res) => {
     try {
-      throw new HttpError(410, 'Firebase sign-in is disabled. Use the SACCO password sign-in flow.', 'LEGACY_AUTH_DISABLED');
+      throw new HttpError(410, 'Use /api/auth/login to create a SACCO session.', 'LEGACY_AUTH_DISABLED');
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.post('/api/auth/member-registration', async (req, res) => {
+    try {
+      const user = await registerPasswordMemberAccount({
+        fullName: req.body?.fullName,
+        phone: req.body?.phone,
+        email: req.body?.email,
+        password: req.body?.password
+      });
+      await recordAuditLog(req, 'MEMBER_PASSWORD_ACCOUNT_CREATED', 'users', user.id, undefined, { linkedMemberId: user.linkedMemberId });
+      res.status(201).json({ accountCreated: true });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.post('/api/auth/firebase/session', async (req, res) => {
+    try {
+      const authorization = String(req.headers.authorization || '');
+      const token = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length).trim() : '';
+      if (!token) throw new HttpError(401, 'A Firebase ID token is required.', 'FIREBASE_TOKEN_REQUIRED');
+      const user = await createOrLoadVerifiedFirebaseMember(await verifyFirebaseIdToken(token));
+      (req as any).user = user;
+      (req as any).authContext = { provider: 'firebase-email-verified', firebaseUid: user.firebaseUid, userId: user.id };
+      await recordAuditLog(req, 'FIREBASE_MEMBER_SESSION_CREATED', 'users', user.id, undefined, { linkedMemberId: user.linkedMemberId });
+      res.status(200).json({ user: publicUser(user), authProvider: 'firebase-email-verified' });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.post('/api/auth/officer-recovery', async (req, res) => {
+    try {
+      if (!passwordAuthenticationEnabled()) throw new HttpError(503, 'Officer password authentication is not enabled.', 'PASSWORD_AUTH_DISABLED');
+
+      const authorization = String(req.headers.authorization || '');
+      const token = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length).trim() : '';
+      if (!token) throw new HttpError(401, 'A verified Firebase recovery session is required.', 'OFFICER_RECOVERY_TOKEN_REQUIRED');
+
+      if (!postgresPool) throw new HttpError(503, 'Secure officer recovery requires the PostgreSQL SACCO database.', 'OFFICER_RECOVERY_UNAVAILABLE');
+
+      const password = String(req.body?.password || '');
+      if (password.length < 8) throw new HttpError(400, 'Choose a new password of at least 8 characters.', 'OFFICER_RECOVERY_PASSWORD_INVALID');
+
+      const identity = await verifyFirebaseRecoveryIdentity(token);
+      const result = await postgresPool.query(
+        `UPDATE users
+         SET password_hash = crypt($1, gen_salt('bf')),
+             firebase_email_verified_at = COALESCE(firebase_email_verified_at, now()),
+             updated_at = now()
+         WHERE firebase_uid = $2
+           AND lower(COALESCE(email, '')) = $3
+           AND role = 'Chairman'
+           AND is_active = TRUE
+           AND account_status = 'Active'
+         RETURNING id, firebase_uid, full_name, email, phone, role, is_active, account_status, linked_member_id`,
+        [password, identity.uid, identity.email]
+      );
+      if (!result.rowCount) {
+        throw new HttpError(403, 'This verified email is not linked to an active Chairman account.', 'OFFICER_RECOVERY_PROFILE_INVALID');
+      }
+
+      const user = mapDbUser(result.rows[0]);
+      (req as any).user = user;
+      (req as any).authContext = { provider: 'firebase-verified-officer-recovery', firebaseUid: identity.uid, userId: user.id };
+      await recordAuditLog(req, 'CHAIRMAN_PASSWORD_RECOVERED', 'users', user.id, undefined, { role: user.role });
+      res.json({ passwordUpdated: true });
     } catch (error: any) {
       sendApiError(res, error);
     }
@@ -1820,8 +2458,8 @@ async function startServer() {
 
   app.post('/api/auth/bootstrap', async (req, res) => {
     try {
-      const existingUsers = await countSaccoUsers();
-      if (existingUsers > 0) {
+      const existingAdmins = await countSaccoAdmins();
+      if (existingAdmins > 0) {
         return res.status(409).json({ error: 'SACCO onboarding is already complete. Ask an existing admin to create your profile.' });
       }
 
@@ -1871,12 +2509,11 @@ async function startServer() {
     }
   });
 
-  // Member activation does not reveal whether an identifier belongs to a
-  // SACCO record. The code is delivered only to the phone already held in the
-  // trusted member register and is never returned or logged by this API.
+  // Kept as explicit retirement responses so old browser bundles cannot fall
+  // back to the former SMS/password member path.
   app.post('/api/member-activation/request', async (req, res) => {
     try {
-      res.status(202).json(await requestMemberActivation(req.body?.phone ?? req.body?.identifier, req.ip));
+      throw new HttpError(410, 'Member SMS activation has been replaced by Firebase email verification.', 'MEMBER_SMS_FLOW_RETIRED');
     } catch (error: any) {
       sendApiError(res, error);
     }
@@ -1884,9 +2521,7 @@ async function startServer() {
 
   app.post('/api/member-activation/verify', async (req, res) => {
     try {
-      const user = await verifyMemberActivation(req, req.body?.requestId, req.body?.code, req.body?.password);
-      const signed = signJwt(user);
-      res.status(201).json({ user, token: signed.token, expiresAt: signed.expiresAt, tokenType: 'Bearer', authProvider: 'member-sms-activation' });
+      throw new HttpError(410, 'Member SMS activation has been replaced by Firebase email verification.', 'MEMBER_SMS_FLOW_RETIRED');
     } catch (error: any) {
       sendApiError(res, error);
     }
@@ -1894,7 +2529,7 @@ async function startServer() {
 
   app.post('/api/auth/member-password-reset/request', async (req, res) => {
     try {
-      res.status(202).json(await requestMemberPasswordReset(req.body?.phone, req.ip));
+      throw new HttpError(410, 'Member password reset is now sent by Firebase to the registered email address.', 'MEMBER_SMS_FLOW_RETIRED');
     } catch (error: any) {
       sendApiError(res, error);
     }
@@ -1902,8 +2537,7 @@ async function startServer() {
 
   app.post('/api/auth/member-password-reset/verify', async (req, res) => {
     try {
-      await verifyMemberPasswordReset(req.body?.requestId, req.body?.code, req.body?.password);
-      res.status(204).end();
+      throw new HttpError(410, 'Member password reset is now sent by Firebase to the registered email address.', 'MEMBER_SMS_FLOW_RETIRED');
     } catch (error: any) {
       sendApiError(res, error);
     }
@@ -1974,9 +2608,8 @@ async function startServer() {
     }
   });
 
-  // Officer credentials are provisioned by the Chairman. Member accounts are
-  // created only through the phone/SMS activation flow and are never accepted
-  // by this endpoint.
+  // Officer credentials are provisioned by the Chairman. Members continue to
+  // use the public member-gated registration endpoint linked to members.id.
   app.post('/api/users', requirePermission('users.write'), async (req, res) => {
     try {
       const fullName = sanitizePersonName(req.body?.fullName).trim();
@@ -1984,7 +2617,7 @@ async function startServer() {
       const phone = sanitizePhoneNumber(req.body?.phone).trim();
       const password = String(req.body?.password || '');
       const role = String(req.body?.role || '') as UserRole;
-      const officerRoles: readonly UserRole[] = ['Chairman', 'Secretary', 'Treasurer', 'Auditor', 'Accountant'];
+      const officerRoles: readonly UserRole[] = ['Secretary', 'Treasurer', 'Auditor', 'Accountant'];
       if (!isValidPersonName(fullName) || !email.includes('@') || (phone && !isValidPhoneNumber(phone)) || password.length < 8 || !officerRoles.includes(role)) {
         throw new HttpError(400, 'Provide an officer name, email, optional valid phone, approved officer role, and password of at least 8 characters.', 'OFFICER_PROVISIONING_INVALID');
       }
@@ -2021,7 +2654,38 @@ async function startServer() {
         );
       }
       await recordAuditLog(req, 'OFFICER_ACCOUNT_PROVISIONED', 'users', created.id, undefined, { role: created.role, email: created.email });
-      res.status(201).json({ user: publicUser(created), requiresTotpEnrollment: true });
+      res.status(201).json({ user: publicUser(created), requiresTotpEnrollment: requiresTotp(created) });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.post('/api/users/:id/password', requirePermission('users.write'), async (req, res) => {
+    try {
+      const password = String(req.body?.password || '');
+      if (password.length < 8) throw new HttpError(400, 'Choose a temporary password of at least 8 characters.', 'PASSWORD_INVALID');
+      let updated: AuthorizedUser | undefined;
+      if (postgresPool) {
+        if (!req.params.id.match(/^[0-9a-f-]{36}$/i)) throw new HttpError(404, 'Account was not found.', 'USER_NOT_FOUND');
+        const result = await postgresPool.query(
+          `UPDATE users SET password_hash = crypt($1, gen_salt('bf')),
+             totp_secret_ciphertext = CASE WHEN $2 THEN NULL ELSE totp_secret_ciphertext END,
+             totp_enabled_at = CASE WHEN $2 THEN NULL ELSE totp_enabled_at END,
+             updated_at = now()
+           WHERE id = $3 AND is_active = TRUE
+           RETURNING id, firebase_uid, full_name, email, phone, role, is_active, account_status, linked_member_id`,
+          [password, process.env.OFFICER_TOTP_REQUIRED !== 'true', req.params.id]
+        );
+        if (!result.rowCount) throw new HttpError(404, 'Account was not found.', 'USER_NOT_FOUND');
+        updated = mapDbUser(result.rows[0]);
+      } else {
+        const user = localStore.users.find(item => item.id === req.params.id);
+        if (!user) throw new HttpError(404, 'Account was not found.', 'USER_NOT_FOUND');
+        user.devPassword = password;
+        updated = user;
+      }
+      await recordAuditLog(req, 'ACCOUNT_PASSWORD_RESET_BY_CHAIRMAN', 'users', updated.id, undefined, { role: updated.role });
+      res.json({ passwordUpdated: true });
     } catch (error: any) {
       sendApiError(res, error);
     }
@@ -2065,6 +2729,7 @@ async function startServer() {
       const name = sanitizePersonName(memberData.name).trim();
       const idNumber = sanitizeIntegerInput(memberData.idNumber, 12);
       const phoneNumber = sanitizePhoneNumber(memberData.phoneNumber);
+      const email = normalizedEmail(memberData.email);
       const vehicleAssigned = sanitizeVehiclePlate(memberData.vehicleAssigned).trim();
       if (!isValidPersonName(name)) {
         return res.status(400).json({ error: 'Member name must contain letters only.' });
@@ -2074,6 +2739,9 @@ async function startServer() {
       }
       if (!isValidPhoneNumber(phoneNumber)) {
         return res.status(400).json({ error: 'Enter a valid member phone number using digits only.' });
+      }
+      if (!/^\S+@\S+\.\S+$/.test(email)) {
+        return res.status(400).json({ error: 'Enter a valid member email address for secure account verification.', code: 'MEMBER_EMAIL_REQUIRED' });
       }
       if (vehicleAssigned && !isValidKenyanVehiclePlate(vehicleAssigned)) {
         return res.status(400).json({ error: 'Assigned vehicle plate must use a valid Kenyan plate format.' });
@@ -2090,6 +2758,7 @@ async function startServer() {
         id: memberId,
         name,
         idNumber,
+        email,
         phoneNumber,
         status: memberData.status || 'Active',
         dateRegistered: memberData.dateRegistered || new Date().toISOString().substring(0, 10),
@@ -2485,9 +3154,9 @@ async function startServer() {
   // CO-OPERATIVE BANK B2B EVENT NOTIFICATION (IPN) INGRESS
   // =========================================================================
 
-  app.get('/api/coop-bank/config', authenticateSaccoUser, requirePermission('payments.read.all'), (req, res) => {
+  app.get('/api/coop-bank/config', authenticateSaccoUser, requirePermission('payments.read.all'), async (_req, res) => {
     try {
-      res.json(coopBankPublicConfig());
+      res.json({ ...coopBankPublicConfig(), counts: await coopBankOperationalCounts() });
     } catch (error: any) {
       sendApiError(res, error);
     }
@@ -2495,52 +3164,148 @@ async function startServer() {
 
   app.get('/api/coop-bank/events', authenticateSaccoUser, requirePermission('payments.read.all'), async (req, res) => {
     try {
-      res.json(await listCoopBankEvents());
+      res.json(await listCoopBankEvents(req.query));
     } catch (error: any) {
       sendApiError(res, error);
     }
   });
 
-  // Co-operative Bank calls this endpoint after the bank has received the URL
-  // and credentials through the B2B onboarding process. The response is 2xx
-  // only after the event has been durably accepted or identified as a retry.
-  app.post('/api/webhooks/coop-bank/b2b-ipn', async (req, res) => {
+  app.get('/api/coop-bank/events/:id/raw', authenticateSaccoUser, async (req, res) => {
     try {
-      assertCoopBankIpnAuthentication(req);
-      const result = await persistCoopBankEvent(normalizeCoopBankEvent(req.body));
-      const status = result.created ? 201 : 200;
-      return res.status(status).json({
-        MessageCode: String(status),
-        Message: result.created ? 'Successfully received data' : 'Duplicate event already received'
-      });
+      const user = requireAuthenticatedUser(req);
+      if (user.role !== 'Chairman') throw new HttpError(403, 'Only the Chairman can view protected raw bank payloads.', 'ACCESS_DENIED');
+      if (!postgresPool || !req.params.id.match(/^[0-9a-f-]{36}$/i)) throw new HttpError(404, 'Bank event was not found.', 'COOP_EVENT_NOT_FOUND');
+      const result = await postgresPool.query('SELECT raw_payload FROM coop_bank_ipn_events WHERE id = $1', [req.params.id]);
+      if (!result.rowCount) throw new HttpError(404, 'Bank event was not found.', 'COOP_EVENT_NOT_FOUND');
+      res.json({ rawPayload: result.rows[0].raw_payload });
     } catch (error: any) {
-      const status = error instanceof HttpError ? error.status : 500;
-      if (!(error instanceof HttpError)) console.error('Co-op Bank B2B IPN processing failed.');
-      return res.status(status).json({
-        MessageCode: String(status),
-        Message: error instanceof HttpError ? error.message : 'Unable to receive data'
-      });
+      sendApiError(res, error);
     }
   });
 
-  // Vite middleware or production static server setup
-  if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+  app.post('/api/coop-bank/events/:id/reprocess', authenticateSaccoUser, requirePermission('payments.reconcile'), async (req, res) => {
+    try {
+      if (!req.params.id.match(/^[0-9a-f-]{36}$/i)) throw new HttpError(404, 'Bank event was not found.', 'COOP_EVENT_NOT_FOUND');
+      if (postgresPool) {
+        const guarded = await postgresPool.query(
+          `UPDATE coop_bank_ipn_events SET processing_status = 'RECEIVED', last_processing_error = NULL
+           WHERE id = $1 AND ledger_entry_id IS NULL
+             AND reconciliation_status NOT IN ('POSTED','MANUALLY_RECONCILED') RETURNING id`,
+          [req.params.id]
+        );
+        if (!guarded.rowCount) throw new HttpError(409, 'Posted or manually completed events cannot be reprocessed.', 'COOP_REPROCESS_REJECTED');
+      }
+      const correlationId = crypto.randomUUID();
+      await recordCoopBankAudit({ eventId: req.params.id, action: 'REPROCESS_REQUESTED', actorType: 'USER', actorUserId: requireAuthenticatedUser(req).id, correlationId });
+      await processCoopBankEvent(req.params.id, correlationId);
+      res.json({ event: (await listCoopBankEvents()).find(item => item.id === req.params.id) || null });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.post('/api/coop-bank/events/:id/reconcile', authenticateSaccoUser, requirePermission('payments.reconcile'), async (req, res) => {
+    try {
+      const config = loadCoopIpnConfig();
+      if (config.observeOnly) throw new HttpError(409, 'Observe-only mode is active. Disable it in the server environment before posting any bank event.', 'COOP_OBSERVE_ONLY');
+      if (!postgresPool) throw new HttpError(503, 'Manual bank reconciliation requires PostgreSQL.', 'COOP_RECONCILIATION_UNAVAILABLE');
+      if (!req.params.id.match(/^[0-9a-f-]{36}$/i)) throw new HttpError(404, 'Bank event was not found.', 'COOP_EVENT_NOT_FOUND');
+      const category = String(req.body?.category || '') as Transaction['category'];
+      const tillNumber = String(req.body?.tillNumber || (category === 'Savings Contribution' ? 'UtilityTill' : 'VehicleTill')) as Transaction['tillNumber'];
+      const user = requireAuthenticatedUser(req);
+      const result = await reconcilePostgresCoopBankEvent(postgresPool, {
+        eventId: req.params.id,
+        memberId: String(req.body?.memberId || ''),
+        vehicleId: String(req.body?.vehicleId || '') || undefined,
+        category,
+        tillNumber,
+        note: String(req.body?.note || '').trim().slice(0, 500),
+        actorId: user.id,
+        actorName: user.name,
+        correlationId: crypto.randomUUID()
+      });
+      await recordAuditLog(req, 'COOP_BANK_EVENT_RECONCILED', 'coop_bank_ipn_events', req.params.id, undefined, result);
+      res.json({ ...result, event: (await listCoopBankEvents()).find(item => item.id === req.params.id) || null });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.post('/api/coop-bank/events/:id/quarantine', authenticateSaccoUser, requirePermission('payments.reconcile'), async (req, res) => {
+    try {
+      if (!postgresPool || !req.params.id.match(/^[0-9a-f-]{36}$/i)) throw new HttpError(404, 'Bank event was not found.', 'COOP_EVENT_NOT_FOUND');
+      const reason = String(req.body?.reason || '').trim().slice(0, 500);
+      if (!reason) throw new HttpError(400, 'Give a reason for quarantining this event.', 'COOP_QUARANTINE_REASON_REQUIRED');
+      const previous = await postgresPool.query(
+        `UPDATE coop_bank_ipn_events SET processing_status = 'QUARANTINED', manual_review_reason = $2
+         WHERE id = $1 AND ledger_entry_id IS NULL AND reconciliation_status NOT IN ('POSTED','MANUALLY_RECONCILED')
+         RETURNING reconciliation_status`,
+        [req.params.id, reason]
+      );
+      if (!previous.rowCount) throw new HttpError(409, 'This event has already been completed.', 'COOP_EVENT_ALREADY_RECONCILED');
+      const user = requireAuthenticatedUser(req);
+      await recordCoopBankAudit({ eventId: req.params.id, action: 'EVENT_QUARANTINED', actorType: 'USER', actorUserId: user.id, previousStatus: previous.rows[0].reconciliation_status, newStatus: 'QUARANTINED', reason, correlationId: crypto.randomUUID() });
+      res.json({ quarantined: true });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  const receiveCoopBankIpn = async (req: express.Request, res: express.Response) => {
+    const startedAt = Date.now();
+    const suppliedCorrelation = String(req.headers['x-correlation-id'] || '');
+    const correlationId = suppliedCorrelation.match(/^[0-9a-f-]{36}$/i) ? suppliedCorrelation : crypto.randomUUID();
+    try {
+      if (!req.is('application/json')) throw new CoopIpnError(415, 'Content-Type must be application/json.', 'COOP_IPN_CONTENT_TYPE_INVALID');
+      if (isProduction && !req.secure) throw new CoopIpnError(403, 'HTTPS is required.', 'COOP_IPN_HTTPS_REQUIRED');
+      const config = loadCoopIpnConfig();
+      const credentialHeader = config.authMode === 'TOKEN' ? req.headers[config.tokenHeader] : req.headers.authorization;
+      assertCoopIpnAuthentication(Array.isArray(credentialHeader) ? credentialHeader[0] : credentialHeader, config);
+      const event = normalizeCoopIpnPayload(req.body, config);
+      const result = await persistCoopBankEvent(event, config.authMode, correlationId);
+      res.status(200).json({ MessageCode: config.successMessageCode, Message: 'Successfully received data' });
+      console.info(JSON.stringify({ component: 'coop_ipn', correlationId, bankEventId: result.eventId,
+        externalTransactionId: event.externalTransactionId, result: result.created ? 'STORED' : 'DUPLICATE', durationMs: Date.now() - startedAt }));
+      if (result.created) setImmediate(() => { void processCoopBankEvent(result.eventId, correlationId); });
+    } catch (error: any) {
+      const status = error instanceof CoopIpnError || error instanceof HttpError ? error.status : 503;
+      console.warn(JSON.stringify({ component: 'coop_ipn', correlationId, result: 'REJECTED', errorCategory: error?.code || 'PERSISTENCE_FAILED', durationMs: Date.now() - startedAt }));
+      res.status(status).json({ MessageCode: String(status), Message: error instanceof CoopIpnError || error instanceof HttpError ? error.message : 'Unable to durably receive data' });
+    }
+  };
+
+  // The new route is the canonical callback. The previous route remains as a
+  // compatibility alias so existing bank onboarding does not break.
+  app.post('/api/integrations/coop/ipn', receiveCoopBankIpn);
+  app.post('/api/webhooks/coop-bank/b2b-ipn', receiveCoopBankIpn);
+  app.all(['/api/integrations/coop/ipn', '/api/webhooks/coop-bank/b2b-ipn'], (_req, res) => {
+    res.status(405).json({ MessageCode: '405', Message: 'Method not allowed' });
+  });
+
+  app.use((error: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (error?.type === 'entity.too.large') return res.status(413).json({ MessageCode: '413', Message: 'Request body is too large' });
+    if (error instanceof SyntaxError && 'body' in error) return res.status(400).json({ MessageCode: '400', Message: 'Malformed JSON payload' });
+    next(error);
+  });
+
+  // Firebase Hosting serves the SPA separately. The standalone Node runtime
+  // keeps the existing Vite development middleware and production static app.
+  if (options.serveFrontend !== false) {
+    if (!isProduction) {
+      const { createServer: createViteServer } = await import('vite');
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+    } else {
+      const distPath = path.join(process.cwd(), 'dist', 'client');
+      app.use(express.static(distPath));
+      app.get('*', (_req, res) => {
+        res.sendFile(path.join(distPath, 'index.html'));
+      });
+    }
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Sacco Ledger OS] Express full-stack server listening on http://0.0.0.0:${PORT}`);
-  });
+  return app;
 }
-
-startServer();

@@ -3,7 +3,6 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import test from 'node:test';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createTotpCode } from '../src/server/totp';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -35,7 +34,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
   const port = 4400 + (process.pid % 500);
   const baseUrl = `http://127.0.0.1:${port}`;
   let logs = '';
-  const server = spawn(process.execPath, ['--import', 'tsx', 'server.ts'], {
+  const server = spawn(process.execPath, ['--import', 'tsx', 'start.ts'], {
     cwd: repoRoot,
     detached: true,
     env: {
@@ -55,9 +54,15 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       ALLOW_DEV_JWT_AUTH: 'true',
       JWT_SECRET: 'isolated-e2e-secret',
       TOTP_ENCRYPTION_KEY: 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=',
-      COOP_B2B_IPN_AUTH_MODE: 'token',
-      COOP_B2B_IPN_TOKEN: 'isolated-coop-bank-token',
-      COOP_B2B_ALLOWED_ACCOUNT_NUMBERS: '01134248358600',
+      OFFICER_TOTP_REQUIRED: 'false',
+      COOP_IPN_ENABLED: 'true',
+      COOP_IPN_AUTH_MODE: 'TOKEN',
+      COOP_IPN_TOKEN: 'isolated-coop-bank-token',
+      COOP_IPN_TOKEN_HEADER: 'x-coop-bank-token',
+      COOP_IPN_TOKEN_SCHEME: 'Token',
+      COOP_ALLOWED_ACCOUNT_NUMBERS: '01134248358600',
+      COOP_OBSERVE_ONLY: 'true',
+      COOP_AUTO_POSTING_ENABLED: 'false',
       SACCO_TEST_MODE: databaseUrl ? 'false' : 'true',
       VITE_FIREBASE_AUTH_ENABLED: 'false',
       DISABLE_HMR: 'true'
@@ -95,6 +100,12 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
 
   const health = await waitForHealth(baseUrl, server, () => logs);
   assert.equal(health.database, databaseUrl ? 'postgres_configured' : 'local_fallback');
+  const onboardingBeforeBootstrap = await request<{ needsFirstAdmin: boolean }>('/api/auth/onboarding-status', 200);
+  assert.equal(onboardingBeforeBootstrap.needsFirstAdmin, true);
+  await request('/api/auth/officer-recovery', 401, {
+    method: 'POST',
+    body: { password: 'not-a-recovery' }
+  });
 
   const bootstrap = await request('/api/auth/bootstrap', 201, {
     method: 'POST',
@@ -106,14 +117,10 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
     }
   });
   assert.equal(bootstrap.user.role, 'Chairman');
-  assert.equal(bootstrap.requiresTotp, true);
-  assert.ok(bootstrap.challengeId);
-  assert.ok(bootstrap.enrollment?.manualKey);
-  const bootstrapTotp = await request('/api/auth/totp/verify', 200, {
-    method: 'POST',
-    body: { challengeId: bootstrap.challengeId, code: createTotpCode(bootstrap.enrollment.manualKey) }
-  });
-  const token = bootstrapTotp.token as string;
+  assert.ok(bootstrap.token);
+  const onboardingAfterBootstrap = await request<{ needsFirstAdmin: boolean }>('/api/auth/onboarding-status', 200);
+  assert.equal(onboardingAfterBootstrap.needsFirstAdmin, false);
+  const token = bootstrap.token as string;
   assert.ok(token);
 
   await request('/api/auth/bootstrap', 409, {
@@ -132,12 +139,8 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
     method: 'POST',
     body: { email: 'chairman.e2e@example.com', password: 'test-password' }
   });
-  assert.equal(login.requiresTotp, true);
-  const loginTotp = await request('/api/auth/totp/verify', 200, {
-    method: 'POST',
-    body: { challengeId: login.challengeId, code: createTotpCode(bootstrap.enrollment.manualKey) }
-  });
-  const loginToken = loginTotp.token as string;
+  assert.ok(login.token);
+  const loginToken = login.token as string;
   const treasurer = await request('/api/users', 201, {
     method: 'POST',
     token,
@@ -154,15 +157,25 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
     method: 'POST',
     body: { identifier: 'treasurer.e2e@example.com', password: 'treasurer-password' }
   });
-  assert.equal(treasurerLogin.requiresTotp, true);
-  assert.ok(treasurerLogin.enrollment?.manualKey);
-  const treasurerTotp = await request('/api/auth/totp/verify', 200, {
-    method: 'POST',
-    body: { challengeId: treasurerLogin.challengeId, code: createTotpCode(treasurerLogin.enrollment.manualKey) }
-  });
-  assert.equal(treasurerTotp.user.role, 'Treasurer');
-  assert.ok(treasurerTotp.token);
+  assert.equal(treasurerLogin.user.role, 'Treasurer');
+  assert.ok(treasurerLogin.token);
   await request('/api/members', 401);
+  await request('/api/member-activation/request', 410, {
+    method: 'POST',
+    body: { phone: '0711111111' }
+  });
+
+  await request('/api/members', 400, {
+    method: 'POST',
+    token: loginToken,
+    body: {
+      id: 'member-e2e-missing-email',
+      name: 'No Email Member',
+      idNumber: '99990000',
+      phoneNumber: '0799999999',
+      status: 'Active'
+    }
+  });
 
   const firstMember = await request('/api/members', 201, {
     method: 'POST',
@@ -171,6 +184,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       id: 'member-e2e-one',
       name: 'Alice Kamau',
       idNumber: '11112222',
+      email: 'alice.member@example.com',
       phoneNumber: '0711111111',
       status: 'Active'
     }
@@ -182,6 +196,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       id: 'member-e2e-two',
       name: 'Brian Otieno',
       idNumber: '33334444',
+      email: 'brian.member@example.com',
       phoneNumber: '0722222222',
       status: 'Active'
     }
@@ -193,6 +208,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       id: 'member-e2e-duplicate',
       name: 'Duplicate Member',
       idNumber: '11112222',
+      email: 'duplicate.member@example.com',
       phoneNumber: '0733333333',
       status: 'Active'
     }
@@ -304,7 +320,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
   });
   const bankPayload = {
     TransactionId: 'E2E-BANK-001',
-    PaymentRef: 'E2E-PAYMENT-001',
+    PaymentRef: 'KDA 123A',
     AcctNo: '01134248358600',
     Amount: '750.00',
     Currency: 'KES',
@@ -315,27 +331,28 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
     ClearedBalance: '14500.00',
     TransactionDate: '2026-07-15+03:00'
   };
-  const received = await request('/api/webhooks/coop-bank/b2b-ipn', 201, {
+  const received = await request('/api/integrations/coop/ipn', 200, {
     method: 'POST',
-    headers: { Authorization: 'Bearer isolated-coop-bank-token' },
+    headers: { 'x-coop-bank-token': 'Token isolated-coop-bank-token' },
     body: bankPayload
   });
-  assert.equal(received.MessageCode, '201');
+  assert.equal(received.MessageCode, '2XX');
   const duplicate = await request('/api/webhooks/coop-bank/b2b-ipn', 200, {
     method: 'POST',
-    headers: { Authorization: 'Bearer isolated-coop-bank-token' },
+    headers: { 'x-coop-bank-token': 'Token isolated-coop-bank-token' },
     body: bankPayload
   });
-  assert.equal(duplicate.MessageCode, '200');
-  await request('/api/webhooks/coop-bank/b2b-ipn', 422, {
+  assert.equal(duplicate.MessageCode, '2XX');
+  await request('/api/webhooks/coop-bank/b2b-ipn', 403, {
     method: 'POST',
-    headers: { Authorization: 'Bearer isolated-coop-bank-token' },
+    headers: { 'x-coop-bank-token': 'Token isolated-coop-bank-token' },
     body: { ...bankPayload, TransactionId: 'E2E-BANK-UNKNOWN', AcctNo: '01134248358699' }
   });
   const bankEvents = await request<any[]>('/api/coop-bank/events', 200, { token });
   assert.equal(bankEvents.length, 1);
   assert.equal(bankEvents[0].transactionId, 'E2E-BANK-001');
-  assert.equal(bankEvents[0].status, 'PendingReview');
+  assert.equal(bankEvents[0].reconciliationStatus, 'PENDING_ALLOCATION');
+  assert.equal(bankEvents[0].accountNumber.endsWith('8600'), true);
   assert.equal(bankEvents[0].rawPayload, undefined);
 
   const finalMembers = await request<any[]>('/api/members', 200, { token });
@@ -359,15 +376,16 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
   assert.equal(typeof status.totalMemberSavings, 'number');
 
   if (!databaseUrl) {
-    await request('/api/testing/member-profile', 201, {
+    const registration = await request('/api/auth/member-registration', 201, {
       method: 'POST',
-      token,
       body: {
-        memberId: firstMember.id,
+        fullName: firstMember.name,
+        phone: firstMember.phoneNumber,
         email: 'alice.member@example.com',
         password: 'member-password'
       }
     });
+    assert.equal(registration.accountCreated, true);
     const memberLogin = await request('/api/auth/login', 200, {
       method: 'POST',
       body: { identifier: firstMember.phoneNumber, password: 'member-password' }

@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { CheckCircle2, KeyRound, LogIn, ShieldCheck, Smartphone, UserPlus } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { ArrowLeft, CheckCircle2, HelpCircle, LogIn, ShieldCheck, UserPlus } from 'lucide-react';
 import type { User } from '../types';
 import { sanitizePersonName, sanitizePhoneNumber } from '../lib/inputValidation';
 
@@ -7,10 +7,11 @@ interface LoginModalProps {
   onLoginSuccess: (user: User, token: string) => void;
 }
 
-type AuthMode = 'login' | 'activate' | 'reset' | 'bootstrap' | 'totp';
-type Audience = 'member' | 'officer';
-
+type AuthScreen = 'welcome' | 'help' | 'login' | 'register' | 'reset' | 'bootstrap' | 'totp';
 type TotpEnrollment = { manualKey: string; otpauthUri: string };
+
+const inputClass = 'w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-600 focus:ring-4 focus:ring-emerald-100';
+const isStaticHostingPreview = import.meta.env.VITE_STATIC_HOSTING_PREVIEW === 'true';
 
 async function api(path: string, body: unknown) {
   const response = await fetch(path, {
@@ -19,104 +20,90 @@ async function api(path: string, body: unknown) {
     body: JSON.stringify(body)
   });
   const text = await response.text();
-  const data = text ? JSON.parse(text) : {};
-  if (!response.ok) throw new Error(data.error || 'The request could not be completed.');
+  let data: any = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = {};
+  }
+  if (!response.ok) {
+    if (isStaticHostingPreview) {
+      throw new Error('This no-cost preview hosts the interface only. Sign-in and account actions need the secure backend deployment.');
+    }
+    throw new Error(data.error || 'The request could not be completed.');
+  }
   return data;
 }
 
 export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
-  const [mode, setMode] = useState<AuthMode>('login');
-  const [audience, setAudience] = useState<Audience>('member');
+  const [screen, setScreen] = useState<AuthScreen>('welcome');
+  const [needsFirstAdmin, setNeedsFirstAdmin] = useState(false);
+  const [identifier, setIdentifier] = useState('');
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
-  const [requestId, setRequestId] = useState('');
+  const [challengeId, setChallengeId] = useState('');
   const [code, setCode] = useState('');
   const [totpEnrollment, setTotpEnrollment] = useState<TotpEnrollment | null>(null);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const resetChallenge = () => {
-    setRequestId('');
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/auth/onboarding-status')
+      .then(async response => response.ok ? response.json() : { needsFirstAdmin: false })
+      .then(data => { if (!cancelled) setNeedsFirstAdmin(data.needsFirstAdmin === true); })
+      .catch(() => { if (!cancelled) setNeedsFirstAdmin(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const chooseScreen = (next: AuthScreen) => {
+    setScreen(next);
+    setError('');
+    setNotice('');
+    setChallengeId('');
     setCode('');
     setTotpEnrollment(null);
   };
 
-  const chooseMode = (next: AuthMode) => {
-    setMode(next);
-    setError('');
-    resetChallenge();
-  };
-
   const completeAuthentication = (data: any) => {
     if (data.requiresTotp) {
-      setRequestId(data.challengeId);
+      setChallengeId(data.challengeId);
       setTotpEnrollment(data.enrollment || null);
-      setCode('');
-      setMode('totp');
+      setScreen('totp');
       return;
     }
     if (!data.token || !data.user) throw new Error('The server did not create a SACCO session.');
     onLoginSuccess(data.user as User, data.token);
   };
 
-  const handleLogin = async () => {
-    const identifier = audience === 'member' ? phone : (email || phone);
-    if (!identifier || !password) throw new Error('Enter your sign-in details and password.');
-    completeAuthentication(await api('/api/auth/login', { identifier, password }));
-  };
-
-  const handleActivation = async () => {
-    if (!phone) throw new Error('Enter the mobile number registered with the SACCO.');
-    if (!requestId) {
-      const data = await api('/api/member-activation/request', { phone });
-      setRequestId(data.requestId);
-      return;
-    }
-    if (!/^\d{6}$/.test(code) || password.length < 8) {
-      throw new Error('Enter the six-digit SMS code and a new password of at least 8 characters.');
-    }
-    completeAuthentication(await api('/api/member-activation/verify', { requestId, code, password }));
-  };
-
-  const handlePasswordReset = async () => {
-    if (!phone) throw new Error('Enter the mobile number registered with the SACCO.');
-    if (!requestId) {
-      const data = await api('/api/auth/member-password-reset/request', { phone });
-      setRequestId(data.requestId);
-      return;
-    }
-    if (!/^\d{6}$/.test(code) || password.length < 8) {
-      throw new Error('Enter the six-digit SMS code and a new password of at least 8 characters.');
-    }
-    await api('/api/auth/member-password-reset/verify', { requestId, code, password });
-    setPassword('');
-    chooseMode('login');
-    setAudience('member');
-    setError('Password updated. You can now sign in.');
-  };
-
-  const handleBootstrap = async () => {
-    if (!fullName || !email || password.length < 8) throw new Error('Full name, email, and a password of at least 8 characters are required.');
-    completeAuthentication(await api('/api/auth/bootstrap', { fullName, email, phone, password }));
-  };
-
-  const handleTotp = async () => {
-    if (!/^\d{6}$/.test(code)) throw new Error('Enter the six-digit code from Google Authenticator.');
-    completeAuthentication(await api('/api/auth/totp/verify', { challengeId: requestId, code }));
-  };
-
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     setError('');
+    setNotice('');
     setIsSubmitting(true);
     try {
-      if (mode === 'login') await handleLogin();
-      else if (mode === 'activate') await handleActivation();
-      else if (mode === 'reset') await handlePasswordReset();
-      else if (mode === 'bootstrap') await handleBootstrap();
-      else await handleTotp();
+      if (screen === 'login') {
+        if (!identifier || !password) throw new Error('Enter your phone or email and password.');
+        completeAuthentication(await api('/api/auth/login', { identifier, password }));
+      } else if (screen === 'register') {
+        if (!fullName || !phone || !email || password.length < 8) {
+          throw new Error('Enter your registered name, phone, email, and a password of at least 8 characters.');
+        }
+        await api('/api/auth/member-registration', { fullName, phone, email, password });
+        setIdentifier(email);
+        setPassword('');
+        setScreen('login');
+        setNotice('Account created. You can now sign in with your email or phone number.');
+      } else if (screen === 'bootstrap') {
+        if (!fullName || !email || password.length < 8) throw new Error('Enter a name, email, and password of at least 8 characters.');
+        completeAuthentication(await api('/api/auth/bootstrap', { fullName, email, phone, password }));
+      } else if (screen === 'totp') {
+        if (!/^\d{6}$/.test(code)) throw new Error('Enter the six-digit code from your authenticator app.');
+        completeAuthentication(await api('/api/auth/totp/verify', { challengeId, code }));
+      }
     } catch (caught: any) {
       setError(caught?.message || 'Authentication failed.');
     } finally {
@@ -124,69 +111,82 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
     }
   };
 
-  const isSmsFlow = mode === 'activate' || mode === 'reset';
-  const title = mode === 'totp'
-    ? 'Google Authenticator verification'
-    : mode === 'activate'
-      ? 'Create your member account'
-      : mode === 'reset'
-        ? 'Reset member password'
-        : mode === 'bootstrap'
-          ? 'Create the first Chairman account'
-          : audience === 'member' ? 'Member sign in' : 'Officer sign in';
+  const title = screen === 'login' ? 'Welcome back'
+    : screen === 'register' ? 'Create your account'
+      : screen === 'bootstrap' ? 'Set up your SACCO'
+        : screen === 'totp' ? 'Confirm your secure code'
+          : screen === 'reset' ? 'Reset your password'
+            : 'Getting started';
+  const subtitle = screen === 'login' ? 'Sign in to access your SACCO account.'
+    : screen === 'register' ? 'Use the same details already saved on your active member record.'
+      : screen === 'bootstrap' ? 'This private setup is available only while no Chairman exists.'
+        : screen === 'totp' ? 'This extra step is enabled by your SACCO administrator.'
+          : screen === 'reset' ? 'A Chairman can safely replace the password on your account.'
+            : 'Choose the option that matches your account.';
 
   return (
-    <div className="auth-shell min-h-screen flex flex-col justify-center py-12 px-4 sm:px-6 lg:px-8 font-sans">
-      <div className="sm:mx-auto sm:w-full sm:max-w-md">
-        <div className="flex justify-center"><div className="w-14 h-14 bg-emerald-950 flex items-center justify-center rounded-2xl shadow-md border border-emerald-800"><span className="text-xl font-bold font-display text-emerald-400 tracking-wider">M</span></div></div>
-        <h2 className="mt-6 text-center text-3xl font-black text-slate-800 font-display tracking-tight">MatatuSacco <span className="text-emerald-600">Pro</span></h2>
-        <p className="mt-2 text-center text-xs text-slate-400 uppercase tracking-[2px] font-mono">Secure SACCO access</p>
-      </div>
-
-      <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
-        <div className="auth-card bg-white py-8 px-6 border border-white/70 rounded-3xl shadow-2xl sm:px-10">
-          {mode !== 'totp' && (
-            <div className="mb-5 grid grid-cols-3 gap-2 bg-slate-100 border border-slate-200 rounded-2xl p-1">
-              <button type="button" onClick={() => chooseMode('login')} className={`py-2 rounded-xl text-xs font-black uppercase tracking-wider ${mode === 'login' ? 'bg-slate-900 text-white shadow-sm' : 'text-slate-500'}`}>Sign in</button>
-              <button type="button" onClick={() => chooseMode('activate')} className={`py-2 rounded-xl text-xs font-black uppercase tracking-wider ${mode === 'activate' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-500'}`}>New member</button>
-              <button type="button" onClick={() => chooseMode('bootstrap')} className={`py-2 rounded-xl text-xs font-black uppercase tracking-wider ${mode === 'bootstrap' ? 'bg-emerald-600 text-white shadow-sm' : 'text-slate-500'}`}>First admin</button>
-            </div>
-          )}
-
-          <div className="mb-6 p-4 bg-emerald-50/50 border border-emerald-100 rounded-2xl">
-            <div className="flex space-x-2.5 items-start text-xs text-slate-600"><ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" /><div><p className="font-bold text-slate-800">{title}</p><p className="mt-1 text-[11px] leading-relaxed">{mode === 'totp' ? 'Open Google Authenticator and enter the current six-digit code.' : isSmsFlow ? 'A one-time SMS code is sent only to the phone already in the SACCO register.' : audience === 'officer' || mode === 'bootstrap' ? 'Chairman, Treasurer, Secretary, Auditor, and Accountant accounts require Google Authenticator after their password.' : 'Members sign in with their registered phone number and password.'}</p></div></div>
-          </div>
-
-          {mode === 'login' && (
-            <div className="mb-5 grid grid-cols-2 gap-2 bg-slate-100 border border-slate-200 rounded-2xl p-1">
-              <button type="button" onClick={() => setAudience('member')} className={`py-2 rounded-xl text-xs font-black uppercase tracking-wider ${audience === 'member' ? 'bg-blue-600 text-white' : 'text-slate-500'}`}>Member</button>
-              <button type="button" onClick={() => setAudience('officer')} className={`py-2 rounded-xl text-xs font-black uppercase tracking-wider ${audience === 'officer' ? 'bg-slate-900 text-white' : 'text-slate-500'}`}>Officer</button>
-            </div>
-          )}
-
-          <form className="space-y-5" onSubmit={handleSubmit}>
-            {mode === 'bootstrap' && <><div><label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Full name</label><input value={fullName} onChange={event => setFullName(sanitizePersonName(event.target.value))} pattern="[A-Za-z .'-]+" className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-emerald-600" required /></div><div><label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Email</label><input type="email" value={email} onChange={event => setEmail(event.target.value)} className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-emerald-600" required /></div></>}
-
-            {(isSmsFlow || (mode === 'login' && audience === 'member') || mode === 'bootstrap' || (mode === 'login' && audience === 'officer')) && mode !== 'totp' && <div><label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">{mode === 'login' && audience === 'officer' ? 'Phone (optional if using email)' : 'Phone'}</label><input type="tel" value={phone} onChange={event => setPhone(sanitizePhoneNumber(event.target.value))} inputMode="tel" pattern="[+]?[0-9]{9,15}" className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-emerald-600" required={isSmsFlow || (mode === 'login' && audience === 'member')} /></div>}
-
-            {mode === 'login' && audience === 'officer' && <div><label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Email (optional if using phone)</label><input type="email" value={email} onChange={event => setEmail(event.target.value)} className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-emerald-600" /></div>}
-
-            {(mode === 'totp' || (isSmsFlow && requestId)) && <div><label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Six-digit code</label><input value={code} onChange={event => setCode(event.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-emerald-600" required /><p className="mt-1 text-[11px] text-slate-500">{mode === 'totp' ? 'Authenticator codes refresh every 30 seconds.' : 'SMS codes expire after 10 minutes and can be used once.'}</p></div>}
-
-            {mode !== 'totp' && (mode === 'login' || mode === 'bootstrap' || (isSmsFlow && requestId)) && <div><label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">{isSmsFlow ? 'New password' : 'Password'}</label><input type="password" value={password} onChange={event => setPassword(event.target.value)} autoComplete={isSmsFlow ? 'new-password' : 'current-password'} className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-emerald-600" required /></div>}
-
-            {mode === 'totp' && totpEnrollment && <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-[11px] text-slate-700"><p className="font-bold">Set up Google Authenticator first</p><p className="mt-1">Add a new account and enter this setup key:</p><code className="mt-2 block break-all rounded bg-white p-2 text-[10px]">{totpEnrollment.manualKey}</code><p className="mt-2">Setup URI (for a compatible authenticator):</p><code className="mt-1 block break-all rounded bg-white p-2 text-[9px]">{totpEnrollment.otpauthUri}</code></div>}
-
-            {error && <p className={`text-xs font-medium ${error.startsWith('Password updated') ? 'text-emerald-600' : 'text-rose-600'}`}>{error}</p>}
-            <button type="submit" disabled={isSubmitting} className="w-full py-3 px-4 bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white font-bold text-xs uppercase tracking-wider rounded-xl shadow-xs transition-all flex items-center justify-center space-x-2 cursor-pointer">
-              {mode === 'bootstrap' ? <UserPlus className="w-4 h-4" /> : mode === 'totp' ? <ShieldCheck className="w-4 h-4" /> : isSmsFlow ? <Smartphone className="w-4 h-4" /> : <LogIn className="w-4 h-4" />}<span>{isSubmitting ? 'Working...' : mode === 'totp' ? 'Verify authenticator' : mode === 'bootstrap' ? 'Create Chairman account' : mode === 'activate' ? requestId ? 'Confirm member account' : 'Send SMS code' : mode === 'reset' ? requestId ? 'Set new password' : 'Send SMS code' : 'Sign in'}</span>
-            </button>
-          </form>
-
-          {mode === 'login' && audience === 'member' && <div className="mt-5 flex justify-between text-xs"><button type="button" onClick={() => chooseMode('activate')} className="text-blue-700 font-semibold">New phone / new member?</button><button type="button" onClick={() => chooseMode('reset')} className="text-blue-700 font-semibold">Forgot password?</button></div>}
-          {mode === 'totp' && <button type="button" onClick={() => chooseMode('login')} className="mt-5 w-full text-xs text-slate-500">Back to sign in</button>}
-          <div className="mt-6 border-t border-slate-100 pt-5 text-center text-[9px] text-slate-400 uppercase tracking-widest font-mono"><CheckCircle2 className="inline h-3 w-3 mr-1 text-emerald-600" />Password and MFA access control</div>
+    <div className="auth-shell min-h-screen px-4 py-10 font-sans sm:px-6">
+      <div className="mx-auto flex min-h-[calc(100vh-5rem)] w-full max-w-md flex-col justify-center">
+        <div className="mb-7 flex items-center justify-center gap-3 text-white">
+          <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-emerald-300/30 bg-emerald-400/15 shadow-lg"><span className="font-display text-lg font-bold text-emerald-300">M</span></div>
+          <div><p className="font-display text-xl font-bold tracking-tight">MatatuSacco</p><p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-emerald-200/80">Member access</p></div>
         </div>
+
+        <main className="auth-card rounded-[2rem] px-6 py-7 sm:px-9 sm:py-9">
+          {screen === 'welcome' ? (
+            <section className="text-center">
+              <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-100 text-emerald-700"><ShieldCheck className="h-7 w-7" /></div>
+              <h1 className="mt-6 font-display text-3xl font-bold tracking-tight text-slate-900">Welcome to your SACCO</h1>
+              <p className="mx-auto mt-3 max-w-sm text-sm leading-6 text-slate-500">One account for members and officers, protected by your password and server-side access rules.</p>
+              {isStaticHostingPreview && <p className="mx-auto mt-4 max-w-sm rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">Static Hosting preview: you can review the interface and navigation, but secure sign-in, data, and payments are unavailable until the backend is deployed.</p>}
+              <div className="mt-8 space-y-3">
+                <button type="button" onClick={() => chooseScreen('login')} className="flex w-full items-center justify-center gap-2 rounded-2xl bg-emerald-600 px-4 py-3.5 text-sm font-bold text-white shadow-lg shadow-emerald-900/15"><LogIn className="h-4 w-4" />Log in</button>
+                <button type="button" onClick={() => chooseScreen('register')} className="w-full rounded-2xl border border-emerald-200 bg-white px-4 py-3.5 text-sm font-bold text-emerald-700">Create member account</button>
+              </div>
+              <button type="button" onClick={() => chooseScreen('help')} className="mt-5 inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500"><HelpCircle className="h-3.5 w-3.5" />First-time help</button>
+              {needsFirstAdmin && <button type="button" onClick={() => chooseScreen('bootstrap')} className="mt-6 block w-full text-xs font-semibold text-slate-500 underline decoration-slate-300 underline-offset-4">Set up the first Chairman</button>}
+            </section>
+          ) : (
+            <section>
+              <button type="button" onClick={() => chooseScreen(screen === 'totp' ? 'login' : 'welcome')} className="mb-6 inline-flex items-center gap-1.5 text-xs font-bold text-slate-500"><ArrowLeft className="h-3.5 w-3.5" />Back</button>
+              <h1 className="font-display text-3xl font-bold tracking-tight text-slate-900">{title}</h1>
+              <p className="mt-2 text-sm leading-6 text-slate-500">{subtitle}</p>
+
+              {screen === 'help' && (
+                <div className="mt-7 space-y-4 text-sm leading-6 text-slate-600">
+                  <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-4"><p className="font-bold text-slate-800">New member</p><p>Your name, phone, and email must match one active member record. Then choose your password and sign in.</p></div>
+                  <div className="rounded-2xl border border-slate-200 p-4"><p className="font-bold text-slate-800">Officer</p><p>The Chairman creates your account. Use the work email or phone and password they give you on the same login screen.</p></div>
+                </div>
+              )}
+
+              {screen === 'reset' && (
+                <div className="mt-7 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
+                  Ask your Chairman to reset your account password from Account Access. This avoids insecure recovery questions and does not require Firebase.
+                </div>
+              )}
+
+              {!['help', 'reset'].includes(screen) && (
+                <form className="mt-7 space-y-4" onSubmit={handleSubmit}>
+                  {(screen === 'register' || screen === 'bootstrap') && <div><label className="mb-2 block text-xs font-bold text-slate-600">Full name</label><input value={fullName} onChange={event => setFullName(sanitizePersonName(event.target.value))} autoComplete="name" className={inputClass} required /></div>}
+                  {screen === 'login' && <div><label className="mb-2 block text-xs font-bold text-slate-600">Phone or email</label><input value={identifier} onChange={event => setIdentifier(event.target.value)} autoComplete="username" className={inputClass} required /></div>}
+                  {screen === 'register' && <div><label className="mb-2 block text-xs font-bold text-slate-600">Registered phone</label><input type="tel" value={phone} onChange={event => setPhone(sanitizePhoneNumber(event.target.value))} autoComplete="tel" inputMode="tel" pattern="[+]?[0-9]{9,15}" className={inputClass} required /></div>}
+                  {(screen === 'register' || screen === 'bootstrap') && <div><label className="mb-2 block text-xs font-bold text-slate-600">Email address</label><input type="email" value={email} onChange={event => setEmail(event.target.value)} autoComplete="email" className={inputClass} required /></div>}
+                  {screen === 'bootstrap' && <div><label className="mb-2 block text-xs font-bold text-slate-600">Phone <span className="font-medium text-slate-400">(optional)</span></label><input type="tel" value={phone} onChange={event => setPhone(sanitizePhoneNumber(event.target.value))} pattern="[+]?[0-9]{9,15}" className={inputClass} /></div>}
+                  {(screen === 'login' || screen === 'register' || screen === 'bootstrap') && <div><label className="mb-2 block text-xs font-bold text-slate-600">Password</label><input type="password" value={password} onChange={event => setPassword(event.target.value)} autoComplete={screen === 'login' ? 'current-password' : 'new-password'} className={inputClass} required /></div>}
+                  {screen === 'totp' && <div>{totpEnrollment && <div className="mb-4 rounded-2xl border border-emerald-100 bg-emerald-50 p-4 text-xs text-slate-600"><p className="font-bold text-slate-800">Optional authenticator setup</p><code className="mt-3 block break-all rounded-xl bg-white px-3 py-2 text-[11px]">{totpEnrollment.manualKey}</code></div>}<label className="mb-2 block text-xs font-bold text-slate-600">Six-digit code</label><input value={code} onChange={event => setCode(event.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric" pattern="[0-9]{6}" className={inputClass} required /></div>}
+                  {error && <p className="rounded-xl bg-rose-50 px-3 py-2.5 text-xs font-medium leading-5 text-rose-700">{error}</p>}
+                  {notice && <p className="rounded-xl bg-emerald-50 px-3 py-2.5 text-xs font-medium leading-5 text-emerald-700">{notice}</p>}
+                  <button type="submit" disabled={isSubmitting} className="flex w-full items-center justify-center gap-2 rounded-2xl bg-emerald-600 px-4 py-3.5 text-sm font-bold text-white shadow-lg shadow-emerald-900/15 disabled:opacity-60">{screen === 'register' || screen === 'bootstrap' ? <UserPlus className="h-4 w-4" /> : <LogIn className="h-4 w-4" />}{isSubmitting ? 'Please wait...' : screen === 'register' ? 'Create account' : screen === 'bootstrap' ? 'Create Chairman account' : screen === 'totp' ? 'Confirm code' : 'Sign in'}</button>
+                </form>
+              )}
+
+              {screen === 'login' && <div className="mt-5 flex items-center justify-between text-xs"><button type="button" onClick={() => chooseScreen('reset')} className="font-semibold text-slate-500">Forgot password?</button><button type="button" onClick={() => chooseScreen('register')} className="font-semibold text-emerald-700">Create account</button></div>}
+              {screen === 'register' && <p className="mt-5 text-center text-xs text-slate-500">Already have an account? <button type="button" onClick={() => chooseScreen('login')} className="font-bold text-emerald-700">Log in</button></p>}
+            </section>
+          )}
+
+          <div className="mt-7 border-t border-slate-100 pt-5 text-center text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400"><CheckCircle2 className="mr-1 inline h-3.5 w-3.5 text-emerald-600" />Protected with secure account verification</div>
+        </main>
       </div>
     </div>
   );
