@@ -4,6 +4,7 @@ import { Transaction, Vehicle, Member, UserRole, VehicleClass } from '../types';
 import { PlusCircle, Search, FileDown, ShieldCheck, DollarSign, Activity, AlertCircle, ArrowUpRight, CheckCircle2, Sparkles, Minimize2, Maximize2, LayoutDashboard } from 'lucide-react';
 import { sanitizeDecimalInput, sanitizePersonName, sanitizeVehiclePlate } from '../lib/inputValidation';
 import { isExpenseTransactionCategory, requiresRegisteredMember } from '../lib/transactionPolicy';
+import { calculateDashboardMetrics, getRecentDailySeries } from '../lib/dashboardMetrics';
 
 interface SparklineProps {
   data: number[];
@@ -36,33 +37,6 @@ function Sparkline({ data, color }: SparklineProps) {
 
 interface SaccoAnalyticsChartProps {
   transactions: Transaction[];
-}
-
-function getRecentDailySeries(
-  transactions: Transaction[],
-  include: (transaction: Transaction) => boolean,
-  days: number
-) {
-  const latestTimestamp = transactions.reduce<string | null>((latest, transaction) => {
-    return !latest || transaction.timestamp > latest ? transaction.timestamp : latest;
-  }, null);
-  const baseDate = latestTimestamp ? new Date(latestTimestamp) : new Date();
-  const series = [] as { dateString: string; label: string; amount: number }[];
-
-  for (let index = days - 1; index >= 0; index--) {
-    const date = new Date(baseDate);
-    date.setDate(date.getDate() - index);
-    const dateString = date.toISOString().slice(0, 10);
-    series.push({
-      dateString,
-      label: date.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric' }),
-      amount: transactions
-        .filter(transaction => include(transaction) && transaction.timestamp.slice(0, 10) === dateString)
-        .reduce((sum, transaction) => sum + transaction.amount, 0)
-    });
-  }
-
-  return series;
 }
 
 function SaccoAnalyticsChart({ transactions }: SaccoAnalyticsChartProps) {
@@ -256,35 +230,20 @@ export default function DashboardView({
   const isExpenseEntry = isExpenseTransactionCategory(category);
   const activeVehicles = vehicles.filter(vehicle => vehicle.status === 'Active');
 
-  // Calculations
-  const todayCredits = transactions
-    .filter(t => t.type === 'Credit')
-    .reduce((acc, t) => acc + t.amount, 0);
-
-  const activeFleetCount = vehicles.filter(v => v.status === 'Active').length;
-  const pendingMembersCount = members.filter(m => m.status === 'Pending').length;
-
-  const totalMpesaDeposits = transactions
-    .filter(t => t.type === 'Credit' && t.refCode.toUpperCase().startsWith('Q'))
-    .reduce((acc, t) => acc + t.amount, 0);
-
-  const fleetSparkData = getRecentDailySeries(transactions, transaction => transaction.type === 'Credit' && transaction.tillNumber === 'VehicleTill', 6)
-    .map(day => day.amount);
-  const utilitySparkData = getRecentDailySeries(transactions, transaction => transaction.type === 'Credit' && transaction.tillNumber === 'UtilityTill', 6)
-    .map(day => day.amount);
-  const recentWeekDates = new Set(getRecentDailySeries(transactions, () => true, 7).map(day => day.dateString));
-  const weeklyCreditTotal = getRecentDailySeries(transactions, transaction => transaction.type === 'Credit', 7).reduce((sum, day) => sum + day.amount, 0);
-  const weeklySavings = transactions
-    .filter(transaction => transaction.type === 'Credit' && (transaction.savingsContribution !== undefined || transaction.category === 'Savings Contribution'))
-    .filter(transaction => recentWeekDates.has(transaction.timestamp.slice(0, 10)))
-    .reduce((sum, transaction) => sum + (transaction.category === 'Savings Contribution' ? transaction.amount : Number(transaction.savingsContribution || 0)), 0);
-  const weeklyLoanRepayments = transactions
-    .filter(transaction => transaction.type === 'Credit' && transaction.loanRepay !== undefined)
-    .filter(transaction => recentWeekDates.has(transaction.timestamp.slice(0, 10)))
-    .reduce((sum, transaction) => sum + Number(transaction.loanRepay || 0), 0);
-  const savingsShare = weeklyCreditTotal > 0 ? Math.min(100, (weeklySavings / weeklyCreditTotal) * 100) : 0;
-  const loanRepaymentShare = weeklyCreditTotal > 0 ? Math.min(100, (weeklyLoanRepayments / weeklyCreditTotal) * 100) : 0;
-  const ledgerEntryCount = transactions.length;
+  const dashboardMetrics = calculateDashboardMetrics(transactions, vehicles, members);
+  const {
+    totalCredits: todayCredits,
+    activeFleetCount,
+    pendingMembersCount,
+    totalMpesaDeposits,
+    fleetSparkData,
+    utilitySparkData,
+    weeklySavings,
+    weeklyLoanRepayments,
+    savingsShare,
+    loanRepaymentShare,
+    ledgerEntryCount
+  } = dashboardMetrics;
 
   // Auto set Type & Till depending on category
   const handleCategoryChange = (cat: typeof category) => {

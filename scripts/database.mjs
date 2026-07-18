@@ -2,11 +2,11 @@ import 'dotenv/config';
 import { spawnSync } from 'node:child_process';
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { Pool } from 'pg';
+import { createDatabasePool, databaseUrl as configuredDatabaseUrl } from '../database-config.mjs';
 
 const CONTAINER_NAME = 'matatu-sacco-postgres';
 const IMAGE = process.env.POSTGRES_IMAGE || 'postgres:18-alpine';
-const databaseUrl = process.env.DATABASE_URL;
+const databaseUrl = configuredDatabaseUrl();
 
 if (!databaseUrl) {
   throw new Error('DATABASE_URL is missing. Configure it in .env before running database commands.');
@@ -95,7 +95,8 @@ async function migrate(pool) {
 }
 
 async function withPool(action) {
-  const pool = new Pool({ connectionString: databaseUrl });
+  const pool = createDatabasePool();
+  if (!pool) throw new Error('DATABASE_URL is missing. Configure it before running database commands.');
   try {
     await waitForDatabase(pool);
     await action(pool);

@@ -1,6 +1,6 @@
 # Database Migration Plan
 
-This runbook moves the app from local mock data and Firestore-style documents to the production PostgreSQL schema.
+This runbook moves the app from local mock data to the production PostgreSQL schema hosted by Supabase.
 
 ## Current Data Sources
 
@@ -8,7 +8,7 @@ The app currently has three possible data sources:
 
 - In-memory fallback data seeded from `server.ts`.
 - Browser/local development state.
-- Optional Firestore collections when Google credentials are configured.
+- Disposable in-memory data when explicitly enabled for local tests.
 
 The production target is PostgreSQL/Supabase using SQL migrations under `database/migrations`.
 
@@ -79,7 +79,7 @@ Source fields:
 
 ```text
 Legacy user id     -> external legacy reference only, not UUID primary key
-Firebase user uid  -> users.firebase_uid
+Legacy identity id -> users.firebase_uid (historical import only; unused by runtime authentication)
 Official name      -> users.full_name
 Official email     -> users.email
 Official phone     -> users.phone
@@ -90,8 +90,7 @@ Rules:
 
 - Firebase Auth is the login identity provider.
 - PostgreSQL `users` stores SACCO role, status, phone, and audit relationships.
-- Backfill `users.firebase_uid` from Firebase Auth export where possible.
-- If `firebase_uid` is temporarily empty, the API can link the row by matching verified Firebase email on first login.
+- Preserve any imported `users.firebase_uid` values for audit/history only. New and existing sessions use server-issued JWTs backed by the `users` table.
 - Never store role security keys or JWT secrets in the database.
 - Never store Firebase passwords or refresh tokens in the database.
 

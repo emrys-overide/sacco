@@ -3,6 +3,7 @@ import type { Transaction, Vehicle, Member, User, UserRole } from '../types';
 import { canRole } from '../lib/auth';
 import { sanitizeDecimalInput, sanitizeReferenceCode } from '../lib/inputValidation';
 import { isExpenseTransactionCategory, requiresRegisteredMember } from '../lib/transactionPolicy';
+import { calculateReportFinancials, SOWETAMU_AUDIT_REFERENCE } from '../lib/reportFinancials';
 import { 
   FileText, 
   Download, 
@@ -113,79 +114,12 @@ export default function ReportsView({
   const [saccoRegNo, setSaccoRegNo] = useState('CS/NO. 22239');
   const [saccoCustomName, setSaccoCustomName] = useState('SOWETAMU SAVINGS & CREDIT');
 
-  // Math aggregates (Live Data)
-  const totalCredits = transactions.filter(t => t.type === 'Credit').reduce((acc, t) => acc + t.amount, 0);
-  const totalDebits = transactions.filter(t => t.type === 'Debit').reduce((acc, t) => acc + t.amount, 0);
-  const netBalance = totalCredits - totalDebits;
-
-  // Account 1: Operations / Daily Collection (48277)
-  const vehicleTx = transactions.filter(t => t.tillNumber === 'VehicleTill');
-  const vehicleCredits = vehicleTx.filter(t => t.type === 'Credit').reduce((acc, t) => acc + t.amount, 0);
-  const vehicleDebits = vehicleTx.filter(t => t.type === 'Debit').reduce((acc, t) => acc + t.amount, 0);
-  const vehicleNet = vehicleCredits - vehicleDebits;
-
-  // Account 2: Member Savings (871671)
-  const utilityTx = transactions.filter(t => t.tillNumber === 'UtilityTill');
-  const utilityCredits = utilityTx.filter(t => t.type === 'Credit').reduce((acc, t) => acc + t.amount, 0);
-  const utilityDebits = utilityTx.filter(t => t.type === 'Debit').reduce((acc, t) => acc + t.amount, 0);
-  const utilityNet = utilityCredits - utilityDebits;
-
-  // Petty cash / Unassigned drawer
-  const cashTx = transactions.filter(t => t.tillNumber === 'None');
-  const cashCredits = cashTx.filter(t => t.type === 'Credit').reduce((acc, t) => acc + t.amount, 0);
-  const cashDebits = cashTx.filter(t => t.type === 'Debit').reduce((acc, t) => acc + t.amount, 0);
-  const cashNet = cashCredits - cashDebits;
-
-  // Category summary
-  const categorySummary: { [key: string]: number } = {};
-  transactions.forEach(t => {
-    categorySummary[t.category] = (categorySummary[t.category] || 0) + t.amount;
-  });
-
-  // Calculate live members count
-  const liveActiveCount = members.filter(m => m.status === 'Active').length;
-  const liveDormantCount = members.filter(m => m.status !== 'Active').length;
-  const liveTotalMembers = members.length;
-
-  // Live Sacco Financial Sheet Data Mapping
-  const liveMembersDeposits = members.reduce((acc, m) => acc + Number(m.savingsAmount || 0), 0);
-  const liveCashEquiv = netBalance;
-  const liveLoansToMembers = 0; // No loan-advance register exists yet.
-  const livePPECarrying = transactions
-    .filter(t => t.category === 'Equipment')
-    .reduce((sum, t) => sum + (t.type === 'Debit' ? t.amount : -t.amount), 0);
-  const liveReceivables = 0; // No receivables register exists yet.
-
-  // Live total Assets formula to balance
-  const liveTotalAssets = liveCashEquiv + liveReceivables + liveLoansToMembers + livePPECarrying;
-  const liveTradePayables = 0; // No payables register exists yet.
-  const liveTotalLiabilities = liveMembersDeposits + liveTradePayables;
-  
-  // Balanced Reserve deficit/surplus
-  const liveReserves = 0;
-
-  // Sowetamu Audit Reference Data (Static Copy for perfect match of provided PDF)
-  const sowetamuData = {
-    saccoName: 'SOWETAMU SAVINGS & CREDIT',
-    regNo: 'CS/NO. 22239',
-    year: '2024',
-    auditFee: 25500,
-    members: { active: 17, dormant: 11, total: 28 },
-    financials: {
-      membersDeposits: 194250,
-      statutoryReserve: -10483.85,
-      retainedEarnings: -41935.40, // Sums to -52,419.25 reserves
-      totalAssets: 621830.75,
-      loansToMembers: 171740, // Page 9 Balance Sheet
-      cashAndEquiv: 138990.75, // Page 9 Note 6
-      otherReceivables: 138850, // Page 9
-      ppeCarrying: 172250, // Page 9 carrying value
-      tradePayables: 45000, // Page 9
-      totalLiabilities: 239250, // Page 9
-      netSurplus: -52419.25, // Page 5 deficit
-      revenue: 6977416.00 // Page 6 revenue
-    }
-  };
+  const reportMetrics = calculateReportFinancials(transactions, members);
+  const { totalCredits, totalDebits, netBalance, categorySummary } = reportMetrics;
+  const { entries: vehicleTx, credits: vehicleCredits, debits: vehicleDebits, net: vehicleNet } = reportMetrics.vehicle;
+  const { entries: utilityTx, credits: utilityCredits, debits: utilityDebits, net: utilityNet } = reportMetrics.utility;
+  const { entries: cashTx, credits: cashCredits, debits: cashDebits, net: cashNet } = reportMetrics.cash;
+  const sowetamuData = SOWETAMU_AUDIT_REFERENCE;
 
   // Select dataset depending on switcher state
   const reportSaccoName = reportDataSource === 'sowetamu' ? sowetamuData.saccoName : saccoCustomName;
@@ -195,24 +129,11 @@ export default function ReportsView({
   
   const reportMembers = reportDataSource === 'sowetamu' 
     ? sowetamuData.members 
-    : { active: liveActiveCount, dormant: liveDormantCount, total: liveTotalMembers };
+    : reportMetrics.liveMembers;
 
   const reportFinancials = reportDataSource === 'sowetamu' 
     ? sowetamuData.financials 
-    : {
-        membersDeposits: liveMembersDeposits,
-        statutoryReserve: liveReserves * 0.2 > 0 ? liveReserves * 0.2 : 0,
-        retainedEarnings: 0,
-        totalAssets: liveTotalAssets,
-        loansToMembers: liveLoansToMembers,
-        cashAndEquiv: liveCashEquiv,
-        otherReceivables: liveReceivables,
-        ppeCarrying: livePPECarrying,
-        tradePayables: liveTradePayables,
-        totalLiabilities: liveTotalLiabilities,
-        netSurplus: totalCredits - totalDebits,
-        revenue: totalCredits
-      };
+    : reportMetrics.liveFinancials;
 
   const filteredLedgerTransactions = transactions.filter(t => {
     const normalizedSearch = ledgerSearch.toLowerCase();

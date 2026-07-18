@@ -102,7 +102,8 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
   assert.equal(health.database, databaseUrl ? 'postgres_configured' : 'local_fallback');
   const onboardingBeforeBootstrap = await request<{ needsFirstAdmin: boolean }>('/api/auth/onboarding-status', 200);
   assert.equal(onboardingBeforeBootstrap.needsFirstAdmin, true);
-  await request('/api/auth/officer-recovery', 401, {
+  // The retired Firebase recovery surface must not be registered.
+  await request('/api/auth/officer-recovery', 404, {
     method: 'POST',
     body: { password: 'not-a-recovery' }
   });
@@ -160,7 +161,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
   assert.equal(treasurerLogin.user.role, 'Treasurer');
   assert.ok(treasurerLogin.token);
   await request('/api/members', 401);
-  await request('/api/member-activation/request', 410, {
+  await request('/api/member-activation/request', 200, {
     method: 'POST',
     body: { phone: '0711111111' }
   });

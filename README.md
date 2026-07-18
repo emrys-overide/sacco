@@ -13,7 +13,7 @@ Prerequisites: Node.js and Docker.
 
 The first-Chairman setup link appears only while no administrator exists. After that, members and officers share one login screen and use a phone/email plus password. Member account creation succeeds only when the submitted full name, phone, and email match one active `members` row; the server creates a password profile linked to that `members.id`. Roles and member scope are enforced on every API request.
 
-The Chairman creates officer accounts and resets member/officer passwords from **Account Access**. Optional officer TOTP can be enabled later with `OFFICER_TOTP_REQUIRED=true`; it is off by default. Legacy Firebase routes remain only for migration compatibility and are not required by the normal UI.
+The Chairman creates officer accounts and resets member/officer passwords from **Account Access**. Optional officer TOTP can be enabled later with `OFFICER_TOTP_REQUIRED=true`; it is off by default.
 
 Database commands:
 
@@ -35,3 +35,14 @@ The backend callback is `POST /api/integrations/coop/ipn`. Configure it using th
 - `git diff --check`
 
 Production requests fail closed when persistent storage is unavailable. Raw bank payloads and integration credentials remain server-side. Posted PostgreSQL ledger entries are corrected through reversals rather than mutation.
+
+## Zero-cost test deployment and PWA
+
+Use a free Supabase PostgreSQL project and the included free Render Blueprint
+(`render.yaml`) to host the React
+PWA and Express API together. See
+[`docs/supabase-render-test-deployment.md`](docs/supabase-render-test-deployment.md).
+This free path is for acceptance testing because the web service can sleep and
+must not receive live Co-op Bank callbacks. Android Chrome and desktop Chrome or
+Edge can install the HTTPS deployment; financial API data is always network-only
+and is never stored by the service worker.

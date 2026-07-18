@@ -1,0 +1,31 @@
+{
+  "id": "/",
+  "name": "Sowetamu Matatu SACCO Pro",
+  "short_name": "Sowetamu Pro",
+  "description": "Secure Matatu SACCO member, vehicle, collection, and financial ledger operations.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
+  "orientation": "any",
+  "background_color": "#f8fafc",
+  "theme_color": "#052e2b",
+  "categories": ["business", "finance", "productivity"],
+  "icons": [
+    {
+      "src": "/icons/sacco-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/sacco-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    { "name": "Open dashboard", "short_name": "Dashboard", "url": "/" }
+  ]
+}

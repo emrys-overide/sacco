@@ -50,7 +50,7 @@ Stores non-secret tenant settings such as SACCO name, currency, and fiscal year 
 
 `users`
 
-Stores officials and staff SACCO profiles. Firebase Auth owns the login identity; `users.firebase_uid` links that Firebase account to local role, status, audit, and ownership records. `users.is_active` is the server-side account switch for disabling a SACCO profile without deleting the Firebase user.
+Stores officials, staff, and member SACCO profiles. PostgreSQL owns the account, role, password hash, status, audit, and ownership link. `users.is_active` is the server-side switch for disabling access. The nullable `firebase_uid` column is retained only so older database imports remain non-destructive; application code no longer uses it for authentication.
 
 `members`
 

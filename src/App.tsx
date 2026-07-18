@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { lazy, Suspense, useState, useEffect } from 'react';
 import type { MemberPortalData, User, Member, Vehicle, Transaction, UserRole } from './types';
 import { Menu, ShieldAlert, Search, X } from 'lucide-react';
 import { canRole, STORAGE_KEYS } from './lib/auth';
@@ -6,18 +6,20 @@ import { fetchSaccoJson, postSaccoJson } from './lib/api';
 
 // Subcomponents
 import LoginModal from './components/LoginModal';
-import GlobalSearchResultsView from './components/GlobalSearchResultsView';
 import Sidebar from './components/Sidebar';
-import DashboardView from './components/DashboardView';
-import MembersView from './components/MembersView';
-import VehiclesView from './components/VehiclesView';
-import ReportsView from './components/ReportsView';
-import DailyCollectionsView from './components/DailyCollectionsView';
-import BlueprintView from './components/BlueprintView';
-import ExpensesView from './components/ExpensesView';
-import CoopBankView from './components/CoopBankView';
-import MemberPortal from './components/MemberPortal';
-import OfficerAccountsView from './components/OfficerAccountsView';
+import PwaInstallPrompt from './components/PwaInstallPrompt';
+
+const GlobalSearchResultsView = lazy(() => import('./components/GlobalSearchResultsView'));
+const DashboardView = lazy(() => import('./components/DashboardView'));
+const MembersView = lazy(() => import('./components/MembersView'));
+const VehiclesView = lazy(() => import('./components/VehiclesView'));
+const ReportsView = lazy(() => import('./components/ReportsView'));
+const DailyCollectionsView = lazy(() => import('./components/DailyCollectionsView'));
+const BlueprintView = lazy(() => import('./components/BlueprintView'));
+const ExpensesView = lazy(() => import('./components/ExpensesView'));
+const CoopBankView = lazy(() => import('./components/CoopBankView'));
+const MemberPortal = lazy(() => import('./components/MemberPortal'));
+const OfficerAccountsView = lazy(() => import('./components/OfficerAccountsView'));
 
 const MEMBER_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary', 'Treasurer'];
 const VEHICLE_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary'];
@@ -293,7 +295,12 @@ export default function App() {
   }
 
   if (!currentUser || !authToken) {
-    return <LoginModal onLoginSuccess={handleLogin} />;
+    return (
+      <>
+        <LoginModal onLoginSuccess={handleLogin} />
+        <PwaInstallPrompt />
+      </>
+    );
   }
 
   // Render correct view based on navigation tab
@@ -421,6 +428,7 @@ export default function App() {
 
   return (
     <div className="app-shell w-full h-screen flex flex-col md:flex-row overflow-hidden font-sans text-slate-900 relative">
+      <PwaInstallPrompt />
       {/* Mobile Top Navigation Bar */}
       <div className="app-topbar md:hidden h-14 bg-white text-slate-800 border-b border-slate-200 flex items-center justify-between px-4 shrink-0 z-30">
         <button
@@ -538,7 +546,13 @@ export default function App() {
 
         {/* Dynamic Inner Viewport */}
         <div className="app-view flex-1 flex flex-col overflow-hidden">
-          {renderViewContent()}
+          <Suspense fallback={(
+            <div className="flex flex-1 items-center justify-center bg-slate-50 text-xs font-bold uppercase tracking-widest text-slate-500">
+              Loading secure workspace...
+            </div>
+          )}>
+            {renderViewContent()}
+          </Suspense>
         </div>
 
         {/* Global Footer */}
