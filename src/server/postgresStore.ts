@@ -196,7 +196,12 @@ export async function listPostgresMembers(pool: Pool): Promise<Member[]> {
        assigned_vehicle.plate_number AS vehicle_assigned,
        COALESCE(fin.shares_amount, 0) AS shares_amount,
        COALESCE(fin.savings_amount, 0) AS savings_amount,
-       GREATEST(0, m.initial_loan_amount - COALESCE(fin.loan_repaid, 0)) AS derived_loan_balance
+       GREATEST(0, m.initial_loan_amount - COALESCE(fin.loan_repaid, 0) + COALESCE((
+         SELECT SUM(GREATEST(0, l.principal_amount * (1 + l.interest_rate / 100) - COALESCE(repaid.amount, 0)))
+         FROM loans l
+         LEFT JOIN LATERAL (SELECT SUM(lr.amount) AS amount FROM loan_repayments lr WHERE lr.loan_id = l.id) repaid ON TRUE
+         WHERE l.member_id = m.id AND l.status IN ('Approved', 'Active', 'Defaulted')
+       ), 0)) AS derived_loan_balance
      FROM members m
      LEFT JOIN LATERAL (
        SELECT v.plate_number FROM vehicles v
@@ -233,7 +238,12 @@ export async function getPostgresMember(pool: Pool, memberId: string): Promise<M
        assigned_vehicle.plate_number AS vehicle_assigned,
        COALESCE(fin.shares_amount, 0) AS shares_amount,
        COALESCE(fin.savings_amount, 0) AS savings_amount,
-       GREATEST(0, m.initial_loan_amount - COALESCE(fin.loan_repaid, 0)) AS derived_loan_balance
+       GREATEST(0, m.initial_loan_amount - COALESCE(fin.loan_repaid, 0) + COALESCE((
+         SELECT SUM(GREATEST(0, l.principal_amount * (1 + l.interest_rate / 100) - COALESCE(repaid.amount, 0)))
+         FROM loans l
+         LEFT JOIN LATERAL (SELECT SUM(lr.amount) AS amount FROM loan_repayments lr WHERE lr.loan_id = l.id) repaid ON TRUE
+         WHERE l.member_id = m.id AND l.status IN ('Approved', 'Active', 'Defaulted')
+       ), 0)) AS derived_loan_balance
      FROM members m
      LEFT JOIN LATERAL (
        SELECT v.plate_number FROM vehicles v
@@ -720,7 +730,7 @@ export async function listPostgresPaymentsByMember(pool: Pool, memberId: string)
 
 export async function listPostgresLoansByMember(pool: Pool, memberId: string): Promise<MemberLoanSummary[]> {
   const result = await pool.query(
-    `SELECT l.id, l.principal_amount, l.issue_date, l.due_date, l.status,
+    `SELECT l.id, l.principal_amount, l.interest_rate, l.issue_date, l.due_date, l.status, l.notes,
        COALESCE(SUM(lr.amount), 0) AS repaid_amount,
        COALESCE(
          json_agg(
@@ -739,10 +749,13 @@ export async function listPostgresLoansByMember(pool: Pool, memberId: string): P
   return result.rows.map(row => ({
     id: String(row.id),
     principalAmount: toNumber(row.principal_amount),
-    outstandingBalance: Math.max(0, toNumber(row.principal_amount) - toNumber(row.repaid_amount)),
+    outstandingBalance: Math.max(0, toNumber(row.principal_amount) * (1 + toNumber(row.interest_rate) / 100) - toNumber(row.repaid_amount)),
     issueDate: String(row.issue_date).slice(0, 10),
     dueDate: row.due_date ? String(row.due_date).slice(0, 10) : undefined,
     status: row.status,
+    interestRate: toNumber(row.interest_rate),
+    totalPayable: toNumber(row.principal_amount) * (1 + toNumber(row.interest_rate) / 100),
+    notes: row.notes || undefined,
     repayments: row.repayments.map((repayment: any) => ({
       id: String(repayment.id),
       repaymentDate: String(repayment.repaymentDate).slice(0, 10),

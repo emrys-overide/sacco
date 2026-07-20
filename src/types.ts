@@ -52,8 +52,13 @@ export interface MemberLoanSummary {
   issueDate: string;
   dueDate?: string;
   status: string;
+  interestRate?: number;
+  totalPayable?: number;
+  notes?: string;
   repayments: Array<{ id: string; repaymentDate: string; amount: number }>;
 }
+
+export type LoanStatus = 'Applied' | 'Approved' | 'Active' | 'Cleared' | 'Defaulted' | 'Rejected' | 'WrittenOff';
 
 export interface Vehicle {
   id: string;

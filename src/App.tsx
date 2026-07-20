@@ -20,6 +20,7 @@ const ExpensesView = lazy(() => import('./components/ExpensesView'));
 const CoopBankView = lazy(() => import('./components/CoopBankView'));
 const MemberPortal = lazy(() => import('./components/MemberPortal'));
 const OfficerAccountsView = lazy(() => import('./components/OfficerAccountsView'));
+const LoansView = lazy(() => import('./components/LoansView'));
 
 const MEMBER_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary', 'Treasurer'];
 const VEHICLE_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary'];
@@ -320,7 +321,7 @@ export default function App() {
     }
 
     if (currentUser.role === 'Member') {
-      return memberPortal ? <MemberPortal data={memberPortal} /> : (
+      return memberPortal ? <MemberPortal data={memberPortal} token={authToken} onApplicationCreated={handleRefreshData} /> : (
         <div className="flex-1 flex items-center justify-center bg-slate-50 text-sm text-slate-600">Loading your member account...</div>
       );
     }
@@ -363,6 +364,8 @@ export default function App() {
             transactions={transactions}
           />
         );
+      case 'Loans':
+        return <LoansView role={currentUser.role} token={authToken} members={members} />;
       case 'Daily Collections':
         return (
           <DailyCollectionsView

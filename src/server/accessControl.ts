@@ -20,7 +20,10 @@ export type SaccoPermission =
   | 'reports.export'
   | 'system.read.all'
   | 'banking.manage'
-  | 'member.portal.read';
+  | 'member.portal.read'
+  | 'loans.read.all'
+  | 'loans.write'
+  | 'loans.approve';
 
 export type AccountStatus = 'PendingActivation' | 'Active' | 'Suspended' | 'Disabled' | 'Rejected' | 'Locked';
 
@@ -47,7 +50,10 @@ const ALL_ADMIN_PERMISSIONS: readonly SaccoPermission[] = [
   'reports.read.all',
   'reports.export',
   'system.read.all',
-  'banking.manage'
+  'banking.manage',
+  'loans.read.all',
+  'loans.write',
+  'loans.approve'
 ];
 
 export const ROLE_PERMISSION_MATRIX: Readonly<Record<UserRole, readonly SaccoPermission[]>> = {
@@ -63,7 +69,9 @@ export const ROLE_PERMISSION_MATRIX: Readonly<Record<UserRole, readonly SaccoPer
     'payments.read.all',
     'reports.read.all',
     'reports.export',
-    'system.read.all'
+    'system.read.all',
+    'loans.read.all',
+    'loans.write'
   ],
   Treasurer: [
     'members.read.all',
@@ -75,7 +83,9 @@ export const ROLE_PERMISSION_MATRIX: Readonly<Record<UserRole, readonly SaccoPer
     'reports.read.all',
     'reports.export',
     'system.read.all',
-    'banking.manage'
+    'banking.manage',
+    'loans.read.all',
+    'loans.write'
   ],
   Accountant: [
     'members.read.all',
@@ -86,7 +96,9 @@ export const ROLE_PERMISSION_MATRIX: Readonly<Record<UserRole, readonly SaccoPer
     'payments.reconcile',
     'reports.read.all',
     'reports.export',
-    'system.read.all'
+    'system.read.all',
+    'loans.read.all',
+    'loans.write'
   ],
   Auditor: [
     'users.read',
@@ -96,7 +108,8 @@ export const ROLE_PERMISSION_MATRIX: Readonly<Record<UserRole, readonly SaccoPer
     'payments.read.all',
     'reports.read.all',
     'reports.export',
-    'system.read.all'
+    'system.read.all',
+    'loans.read.all'
   ],
   Member: ['member.portal.read']
 };

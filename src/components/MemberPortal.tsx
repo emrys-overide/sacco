@@ -1,15 +1,21 @@
+import React, { useState } from 'react';
 import { Download, ShieldCheck, WalletCards } from 'lucide-react';
 import type { MemberPortalData } from '../types';
+import { postSaccoJson } from '../lib/api';
 
 interface MemberPortalProps {
   data: MemberPortalData;
+  token: string;
+  onApplicationCreated: () => void;
 }
 
 function formatKes(amount: number): string {
   return new Intl.NumberFormat('en-KE', { style: 'currency', currency: 'KES', maximumFractionDigits: 2 }).format(amount);
 }
 
-export default function MemberPortal({ data }: MemberPortalProps) {
+export default function MemberPortal({ data, token, onApplicationCreated }: MemberPortalProps) {
+  const [amount,setAmount]=useState(''); const [dueDate,setDueDate]=useState(''); const [notes,setNotes]=useState(''); const [loanMessage,setLoanMessage]=useState('');
+  const applyForLoan=async(event:React.FormEvent)=>{event.preventDefault();setLoanMessage('');try{await postSaccoJson('/api/loans',{principalAmount:Number(amount),dueDate,notes},token);setAmount('');setDueDate('');setNotes('');setLoanMessage('Application submitted to the Secretary for eligibility review.');onApplicationCreated();}catch(error){setLoanMessage(error instanceof Error?error.message:'Application could not be submitted.');}};
   const downloadStatement = () => {
     const lines = [
       'SACCO MEMBER STATEMENT',
@@ -106,6 +112,8 @@ export default function MemberPortal({ data }: MemberPortalProps) {
           </div>
         </div>
       </section>
+
+      <section className="rounded-2xl border border-slate-200 bg-white p-5"><h2 className="text-sm font-black text-slate-900">Apply for a loan</h2><p className="mt-1 text-xs text-slate-500">The Chairman’s current interest rate is applied automatically. Your request goes to the Secretary, then Treasurer, then Chairman.</p><form onSubmit={applyForLoan} className="mt-4 grid gap-3 sm:grid-cols-3"><input type="number" min="1" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="Amount requested (KES)" className="rounded-xl border px-3 py-2.5 text-sm" required/><input type="date" value={dueDate} onChange={e=>setDueDate(e.target.value)} className="rounded-xl border px-3 py-2.5 text-sm"/><input value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Purpose / notes" className="rounded-xl border px-3 py-2.5 text-sm"/><button className="rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white sm:col-span-3">Submit application</button></form>{loanMessage&&<p className="mt-3 rounded-xl bg-slate-50 p-3 text-xs text-slate-700">{loanMessage}</p>}</section>
 
       <section className="rounded-2xl border border-slate-200 bg-white p-5">
         <div className="flex items-center gap-2"><WalletCards className="w-4 h-4 text-emerald-700" /><h2 className="text-sm font-black text-slate-900">My transaction history</h2></div>

@@ -31,6 +31,18 @@ services:
         value: "false"
       - key: OFFICER_TOTP_REQUIRED
         value: "false"
+      - key: MEMBER_OTP_PEPPER
+        generateValue: true
+      - key: SMTP_HOST
+        value: "smtp.gmail.com"
+      - key: SMTP_PORT
+        value: "465"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
       - key: COOP_IPN_ENABLED
         value: "false"
       - key: COOP_OBSERVE_ONLY

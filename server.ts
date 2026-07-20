@@ -58,6 +58,8 @@ import { COOP_BANK_NAME } from './src/lib/collectionAccounts';
 import { startBackgroundProcessor } from './src/server/backgroundProcessor';
 import { configureProxyTrust, securityHeaders } from './src/server/securityMiddleware';
 import { registerSystemRoutes } from './src/server/systemRoutes';
+import { sendRecoveryCode } from './src/server/emailService';
+import { canReviewLoanStage } from './src/server/loanWorkflow';
 import {
   CoopIpnError,
   assertCoopIpnAuthentication,
@@ -105,6 +107,8 @@ type AuthorizedUser = {
   devPassword?: string;
   totpSecret?: string;
   totpEnabledAt?: string;
+  mustChangePassword?: boolean;
+  temporaryPasswordExpiresAt?: string;
 };
 
 type PasswordAuthenticatedUser = AuthorizedUser & {
@@ -134,7 +138,9 @@ function mapDbUser(row: any): AuthorizedUser {
     phone: row.phone || '',
     isActive: row.is_active !== false,
     accountStatus: (row.account_status || 'Active') as AccountStatus,
-    linkedMemberId: row.linked_member_id ? String(row.linked_member_id) : undefined
+    linkedMemberId: row.linked_member_id ? String(row.linked_member_id) : undefined,
+    mustChangePassword: row.must_change_password === true,
+    temporaryPasswordExpiresAt: row.temporary_password_expires_at ? new Date(row.temporary_password_expires_at).toISOString() : undefined
   };
 }
 
@@ -422,7 +428,8 @@ async function findDevelopmentUserByEmail(email: string): Promise<AuthorizedUser
 async function findSaccoUserById(id: string): Promise<AuthorizedUser | null> {
   if (postgresPool) {
     const result = await postgresPool.query(
-      `SELECT id, full_name, email, phone, role, is_active, account_status, linked_member_id
+      `SELECT id, full_name, email, phone, role, is_active, account_status, linked_member_id,
+              must_change_password, temporary_password_expires_at
        FROM users WHERE id = $1 LIMIT 1`,
       [id]
     );
@@ -444,7 +451,8 @@ async function authenticatePasswordUser(identifierValue: unknown, password: stri
   if (postgresPool) {
     const result = await postgresPool.query(
       `SELECT id, full_name, email, phone, role, is_active, account_status, linked_member_id,
-              totp_secret_ciphertext, totp_enabled_at
+              totp_secret_ciphertext, totp_enabled_at, must_change_password,
+              temporary_password_expires_at
        FROM users
        WHERE (($1 <> '' AND regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = $1)
           OR ($2 LIKE '%@%' AND lower(COALESCE(email, '')) = $2))
@@ -1033,6 +1041,9 @@ async function completePasswordAuthentication(user: PasswordAuthenticatedUser): 
   if (isMemberUser(user)) {
     requireLinkedMember(user);
   }
+  if (user.mustChangePassword && user.temporaryPasswordExpiresAt && new Date(user.temporaryPasswordExpiresAt).getTime() <= Date.now()) {
+    throw new HttpError(401, 'The temporary password has expired. Ask the Chairman to issue another one.', 'TEMPORARY_PASSWORD_EXPIRED');
+  }
   if (requiresTotp(user)) {
     return { user: publicUser(user), ...(await startOfficerTotpChallenge(user)) };
   }
@@ -1043,7 +1054,8 @@ async function completePasswordAuthentication(user: PasswordAuthenticatedUser): 
     token: signed.token,
     expiresAt: signed.expiresAt,
     tokenType: 'Bearer',
-    authProvider: 'password'
+    authProvider: 'password',
+    passwordChangeRequired: user.mustChangePassword === true
   };
 }
 
@@ -1444,6 +1456,9 @@ const authenticateSaccoUser = async (req: express.Request, res: express.Response
       (req as any).user = await verifyJwt(token);
       requireActiveAccount((req as any).user);
       if (isMemberUser((req as any).user)) requireLinkedMember((req as any).user);
+      if ((req as any).user.mustChangePassword && req.path !== '/api/auth/change-temporary-password') {
+        throw new HttpError(403, 'Change the temporary password before using the SACCO application.', 'PASSWORD_CHANGE_REQUIRED');
+      }
       (req as any).authContext = { provider: 'password-jwt', userId: (req as any).user.id };
       await recordAuditLog(req, 'API_AUTHORIZED', req.path);
       return next();
@@ -1572,6 +1587,13 @@ function genericMemberOtpResponse(requestId = crypto.randomUUID()) {
   return {
     requestId,
     message: 'If the submitted details match an eligible SACCO member, a verification code has been sent to the registered phone number.'
+  };
+}
+
+function genericEmailRecoveryResponse(requestId = crypto.randomUUID()) {
+  return {
+    requestId,
+    message: 'If the email matches an eligible SACCO member account, a recovery code has been sent.'
   };
 }
 
@@ -1711,23 +1733,23 @@ async function verifyMemberActivation(req: express.Request, requestIdValue: unkn
   }
 }
 
-async function requestMemberPasswordReset(phoneValue: unknown, requestIp?: string): Promise<{ requestId: string; message: string }> {
+async function requestMemberPasswordReset(emailValue: unknown, requestIp?: string): Promise<{ requestId: string; message: string }> {
   const requestId = crypto.randomUUID();
-  if (!postgresPool) return genericMemberOtpResponse(requestId);
-  const phone = normalizedPhone(phoneValue);
-  if (!phone) return genericMemberOtpResponse(requestId);
+  if (!postgresPool) return genericEmailRecoveryResponse(requestId);
+  const email = normalizedEmail(emailValue);
+  if (!/^\S+@\S+\.\S+$/.test(email)) return genericEmailRecoveryResponse(requestId);
   try {
     getActivationOtpPepper();
     const candidate = await postgresPool.query(
-      `SELECT u.linked_member_id AS member_id, m.phone
+      `SELECT u.linked_member_id AS member_id, COALESCE(NULLIF(u.email, ''), m.email) AS email
        FROM users u
        JOIN members m ON m.id = u.linked_member_id
        WHERE u.role = 'Member' AND u.is_active = TRUE AND u.account_status = 'Active'
-         AND regexp_replace(COALESCE(NULLIF(u.phone, ''), m.phone, ''), '\\D', '', 'g') = $1
+         AND lower(COALESCE(NULLIF(u.email, ''), m.email, '')) = $1
        LIMIT 1`,
-      [phone]
+      [email]
     );
-    if (!candidate.rowCount || !candidate.rows[0].phone) return genericMemberOtpResponse(requestId);
+    if (!candidate.rowCount || !candidate.rows[0].email) return genericEmailRecoveryResponse(requestId);
     const memberId = String(candidate.rows[0].member_id);
     const rateLimit = await postgresPool.query(
       `SELECT COUNT(*)::int AS count
@@ -1737,22 +1759,22 @@ async function requestMemberPasswordReset(phoneValue: unknown, requestIp?: strin
          AND (member_id = $1 OR ($2 <> '' AND requested_ip = $2))`,
       [memberId, requestIp || '']
     );
-    if (Number(rateLimit.rows[0]?.count || 0) >= 3) return genericMemberOtpResponse(requestId);
+    if (Number(rateLimit.rows[0]?.count || 0) >= 3) return genericEmailRecoveryResponse(requestId);
     const otp = String(crypto.randomInt(100000, 1_000_000));
     await postgresPool.query(
-      `INSERT INTO member_activation_challenges (id, member_id, otp_hash, expires_at, requested_ip, purpose)
-       VALUES ($1, $2, $3, now() + interval '10 minutes', NULLIF($4, ''), 'PasswordReset')`,
-      [requestId, memberId, hashActivationOtp(requestId, otp), requestIp || '']
+      `INSERT INTO member_activation_challenges (id, member_id, otp_hash, expires_at, requested_ip, purpose, delivery_address)
+       VALUES ($1, $2, $3, now() + interval '10 minutes', NULLIF($4, ''), 'PasswordReset', $5)`,
+      [requestId, memberId, hashActivationOtp(requestId, otp), requestIp || '', email]
     );
     try {
-      await deliverMemberOtp(String(candidate.rows[0].phone), otp, 'PasswordReset');
+      await sendRecoveryCode(String(candidate.rows[0].email), otp);
     } catch {
       await postgresPool.query('DELETE FROM member_activation_challenges WHERE id = $1', [requestId]);
     }
   } catch {
     // Keep the response generic for all failure and eligibility states.
   }
-  return genericMemberOtpResponse(requestId);
+  return genericEmailRecoveryResponse(requestId);
 }
 
 async function verifyMemberPasswordReset(requestIdValue: unknown, otpValue: unknown, passwordValue: unknown): Promise<void> {
@@ -1787,7 +1809,8 @@ async function verifyMemberPasswordReset(requestIdValue: unknown, otpValue: unkn
     }
     const updated = await client.query(
       `UPDATE users
-       SET password_hash = crypt($1, gen_salt('bf')), updated_at = now()
+       SET password_hash = crypt($1, gen_salt('bf')), must_change_password = FALSE,
+           temporary_password_expires_at = NULL, updated_at = now()
        WHERE linked_member_id = $2 AND role = 'Member' AND is_active = TRUE AND account_status = 'Active'`,
       [password, challenge.member_id]
     );
@@ -1950,7 +1973,7 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
 
   app.post('/api/auth/member-password-reset/request', async (req, res) => {
     try {
-      res.json(await requestMemberPasswordReset(req.body?.phone ?? req.body?.identifier, req.ip));
+      res.json(await requestMemberPasswordReset(req.body?.email ?? req.body?.identifier, req.ip));
     } catch (error: any) {
       sendApiError(res, error);
     }
@@ -1960,6 +1983,26 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
     try {
       await verifyMemberPasswordReset(req.body?.requestId, req.body?.code, req.body?.password);
       res.json({ passwordUpdated: true });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.post('/api/auth/change-temporary-password', authenticateSaccoUser, async (req, res) => {
+    try {
+      const user = requireAuthenticatedUser(req);
+      const password = String(req.body?.password || '');
+      if (!user.mustChangePassword) throw new HttpError(409, 'This account does not require a password change.', 'PASSWORD_CHANGE_NOT_REQUIRED');
+      if (password.length < 8) throw new HttpError(400, 'Choose a new password of at least 8 characters.', 'PASSWORD_INVALID');
+      if (!postgresPool) throw new HttpError(503, 'Password changes require PostgreSQL.', 'PASSWORD_CHANGE_UNAVAILABLE');
+      await postgresPool.query(
+        `UPDATE users SET password_hash = crypt($1, gen_salt('bf')), must_change_password = FALSE,
+           temporary_password_expires_at = NULL, updated_at = now() WHERE id = $2`,
+        [password, user.id]
+      );
+      await recordAuditLog(req, 'TEMPORARY_PASSWORD_CHANGED', 'users', user.id);
+      const updated = { ...user, mustChangePassword: false, temporaryPasswordExpiresAt: undefined };
+      res.json({ user: publicUser(updated), ...signJwt(updated), passwordUpdated: true });
     } catch (error: any) {
       sendApiError(res, error);
     }
@@ -2009,6 +2052,7 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
   app.use('/api/payments', authenticateSaccoUser);
   app.use('/api/system', authenticateSaccoUser);
   app.use('/api/member-portal', authenticateSaccoUser);
+  app.use('/api/loans', authenticateSaccoUser);
 
   // API 2: Get Users
   app.get('/api/users', requirePermission('users.read'), async (req, res) => {
@@ -2082,6 +2126,8 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
           `UPDATE users SET password_hash = crypt($1, gen_salt('bf')),
              totp_secret_ciphertext = CASE WHEN $2 THEN NULL ELSE totp_secret_ciphertext END,
              totp_enabled_at = CASE WHEN $2 THEN NULL ELSE totp_enabled_at END,
+             must_change_password = TRUE,
+             temporary_password_expires_at = now() + interval '24 hours',
              updated_at = now()
            WHERE id = $3 AND is_active = TRUE
            RETURNING id, full_name, email, phone, role, is_active, account_status, linked_member_id`,
@@ -2100,6 +2146,195 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
     } catch (error: any) {
       sendApiError(res, error);
     }
+  });
+
+  app.get('/api/loans/member/:memberId', async (req, res) => {
+    try {
+      const user = requireAuthenticatedUser(req);
+      const memberId = isMemberUser(user) ? requireLinkedMember(user) : req.params.memberId;
+      if (!isMemberUser(user) && !hasPermission(user.role, 'loans.read.all')) throw new HttpError(403, 'Access denied.', 'ACCESS_DENIED');
+      if (!postgresPool) throw new HttpError(503, 'Loan records require PostgreSQL.', 'LOANS_UNAVAILABLE');
+      res.json(await listPostgresLoansByMember(postgresPool, memberId));
+    } catch (error: any) { sendApiError(res, error); }
+  });
+
+  app.get('/api/loans', requirePermission('loans.read.all'), async (req, res) => {
+    try {
+      if (!postgresPool) throw new HttpError(503, 'Loan records require PostgreSQL.', 'LOANS_UNAVAILABLE');
+      const result = await postgresPool.query(
+        `SELECT l.*, m.full_name AS member_name, m.status AS member_status,
+           COALESCE(fin.savings, 0) AS member_savings,
+           CURRENT_DATE - COALESCE(m.date_registered, CURRENT_DATE) AS membership_days
+         FROM loans l JOIN members m ON m.id = l.member_id
+         LEFT JOIN LATERAL (
+           SELECT SUM(CASE WHEN le.account_type IN ('Savings','DailyContribution') AND le.transaction_type = 'Credit' THEN
+             CASE WHEN le.account_type = 'Savings' THEN le.amount ELSE COALESCE((le.metadata->>'savingsContribution')::numeric, le.amount * .70) END ELSE 0 END) AS savings
+           FROM ledger_entries le WHERE le.member_id = m.id AND le.status = 'Posted'
+         ) fin ON TRUE ORDER BY l.created_at DESC`
+      );
+      res.json(result.rows);
+    } catch (error: any) { sendApiError(res, error); }
+  });
+
+  app.get('/api/loans-policy', authenticateSaccoUser, async (req, res) => {
+    try {
+      const user = requireAuthenticatedUser(req);
+      if (!hasPermission(user.role, 'loans.read.all') && !isMemberUser(user)) throw new HttpError(403, 'Access denied.', 'ACCESS_DENIED');
+      if (!postgresPool) throw new HttpError(503, 'Loan policy requires PostgreSQL.', 'LOANS_UNAVAILABLE');
+      const result = await postgresPool.query('SELECT * FROM loan_policy WHERE id = TRUE');
+      res.json(result.rows[0]);
+    } catch (error: any) { sendApiError(res, error); }
+  });
+
+  app.put('/api/loans-policy', authenticateSaccoUser, requirePermission('loans.approve'), async (req, res) => {
+    try {
+      if (!postgresPool) throw new HttpError(503, 'Loan policy requires PostgreSQL.', 'LOANS_UNAVAILABLE');
+      const rate = Number(req.body?.defaultInterestRate);
+      const maximum = req.body?.maximumPrincipal === '' || req.body?.maximumPrincipal == null ? null : Number(req.body.maximumPrincipal);
+      const minimumSavings = Number(req.body?.minimumSavings || 0);
+      const minimumDays = Number(req.body?.minimumMembershipDays || 0);
+      if (!Number.isFinite(rate) || rate < 0 || rate > 100 || (maximum !== null && (!Number.isFinite(maximum) || maximum <= 0)) || minimumSavings < 0 || !Number.isInteger(minimumDays) || minimumDays < 0) {
+        throw new HttpError(400, 'Enter valid loan policy values.', 'LOAN_POLICY_INVALID');
+      }
+      const result = await postgresPool.query(
+        `UPDATE loan_policy SET default_interest_rate=$1, maximum_principal=$2, minimum_savings=$3,
+          minimum_membership_days=$4, require_active_membership=$5, updated_by=$6, updated_at=now()
+         WHERE id=TRUE RETURNING *`,
+        [rate, maximum, minimumSavings, minimumDays, req.body?.requireActiveMembership !== false, requireAuthenticatedUser(req).id]
+      );
+      await recordAuditLog(req, 'LOAN_POLICY_UPDATED', 'loan_policy', undefined, undefined, result.rows[0]);
+      res.json(result.rows[0]);
+    } catch (error: any) { sendApiError(res, error); }
+  });
+
+  app.post('/api/loans', async (req, res) => {
+    try {
+      const user = requireAuthenticatedUser(req);
+      const memberId = isMemberUser(user) ? requireLinkedMember(user) : String(req.body?.memberId || '');
+      if (!isMemberUser(user) && !hasPermission(user.role, 'loans.write')) throw new HttpError(403, 'Access denied.', 'ACCESS_DENIED');
+      const principal = Number(req.body?.principalAmount);
+      const dueDate = String(req.body?.dueDate || '').trim() || null;
+      const notes = String(req.body?.notes || '').trim().slice(0, 1000) || null;
+      if (!memberId.match(/^[0-9a-f-]{36}$/i) || !Number.isFinite(principal) || principal <= 0) {
+        throw new HttpError(400, 'Select a member and enter a valid principal.', 'LOAN_INPUT_INVALID');
+      }
+      if (!postgresPool) throw new HttpError(503, 'Loan records require PostgreSQL.', 'LOANS_UNAVAILABLE');
+      const policy = await postgresPool.query('SELECT * FROM loan_policy WHERE id = TRUE');
+      const interestRate = Number(policy.rows[0]?.default_interest_rate || 0);
+      if (policy.rows[0]?.maximum_principal && principal > Number(policy.rows[0].maximum_principal)) throw new HttpError(400, 'The requested amount exceeds the Chairman’s loan limit.', 'LOAN_ABOVE_POLICY_LIMIT');
+      const existing = await postgresPool.query(`SELECT 1 FROM loans WHERE member_id=$1 AND status IN ('Applied','SecretaryReview','TreasurerReview','ChairmanReview','Approved','Active','Defaulted') LIMIT 1`, [memberId]);
+      if (existing.rowCount) throw new HttpError(409, 'This member already has a pending or active loan.', 'LOAN_ALREADY_OPEN');
+      const result = await postgresPool.query(
+        `INSERT INTO loans (member_id, principal_amount, interest_rate, application_date, issue_date, due_date, status, notes)
+         SELECT id, $2, $3, CURRENT_DATE, CURRENT_DATE, $4, 'SecretaryReview', $5 FROM members WHERE id = $1 AND status = 'Active'
+         RETURNING id, member_id, principal_amount, interest_rate, application_date, due_date, status, notes`,
+        [memberId, principal, interestRate, dueDate, notes]
+      );
+      if (!result.rowCount) throw new HttpError(404, 'Active member was not found.', 'MEMBER_NOT_FOUND');
+      await recordAuditLog(req, 'LOAN_APPLICATION_CREATED', 'loans', String(result.rows[0].id), undefined, result.rows[0]);
+      res.status(201).json(result.rows[0]);
+    } catch (error: any) { sendApiError(res, error); }
+  });
+
+  app.post('/api/loans/:id/secretary-review', async (req, res) => {
+    try {
+      const user = requireAuthenticatedUser(req);
+      if (!canReviewLoanStage(user.role, 'SecretaryReview')) throw new HttpError(403, 'The Secretary must complete this review.', 'SECRETARY_REVIEW_REQUIRED');
+      if (!postgresPool) throw new HttpError(503, 'Loan records require PostgreSQL.', 'LOANS_UNAVAILABLE');
+      const eligible = req.body?.eligible === true;
+      const notes = String(req.body?.notes || '').trim().slice(0, 1000);
+      const status = eligible ? 'TreasurerReview' : 'Rejected';
+      const result = await postgresPool.query(
+        `UPDATE loans SET status=$1, secretary_reviewed_by=$2, secretary_reviewed_at=now(), secretary_eligible=$3,
+          secretary_notes=$4, rejected_at=CASE WHEN $3 THEN rejected_at ELSE now() END, updated_at=now()
+         WHERE id=$5 AND status='SecretaryReview' RETURNING *`, [status, user.id, eligible, notes, req.params.id]
+      );
+      if (!result.rowCount) throw new HttpError(409, 'This loan is not awaiting Secretary review.', 'LOAN_STAGE_MISMATCH');
+      await recordAuditLog(req, eligible ? 'LOAN_SECRETARY_APPROVED' : 'LOAN_SECRETARY_REJECTED', 'loans', req.params.id, undefined, result.rows[0]);
+      res.json(result.rows[0]);
+    } catch (error: any) { sendApiError(res, error); }
+  });
+
+  app.post('/api/loans/:id/treasurer-review', async (req, res) => {
+    try {
+      const user = requireAuthenticatedUser(req);
+      if (!canReviewLoanStage(user.role, 'TreasurerReview')) throw new HttpError(403, 'The Treasurer must complete this review.', 'TREASURER_REVIEW_REQUIRED');
+      if (!postgresPool) throw new HttpError(503, 'Loan records require PostgreSQL.', 'LOANS_UNAVAILABLE');
+      const approved = req.body?.approved === true;
+      const notes = String(req.body?.notes || '').trim().slice(0, 1000);
+      const result = await postgresPool.query(
+        `UPDATE loans SET status=$1, treasurer_reviewed_by=$2, treasurer_reviewed_at=now(), treasurer_notes=$3,
+          rejected_at=CASE WHEN $4 THEN rejected_at ELSE now() END, updated_at=now()
+         WHERE id=$5 AND status='TreasurerReview' RETURNING *`,
+        [approved ? 'ChairmanReview' : 'Rejected', user.id, notes, approved, req.params.id]
+      );
+      if (!result.rowCount) throw new HttpError(409, 'This loan is not awaiting Treasurer review.', 'LOAN_STAGE_MISMATCH');
+      await recordAuditLog(req, approved ? 'LOAN_TREASURER_APPROVED' : 'LOAN_TREASURER_REJECTED', 'loans', req.params.id, undefined, result.rows[0]);
+      res.json(result.rows[0]);
+    } catch (error: any) { sendApiError(res, error); }
+  });
+
+  app.post('/api/loans/:id/approve', requirePermission('loans.approve'), async (req, res) => {
+    try {
+      if (!postgresPool) throw new HttpError(503, 'Loan records require PostgreSQL.', 'LOANS_UNAVAILABLE');
+      const user = requireAuthenticatedUser(req);
+      const result = await postgresPool.query(
+        `UPDATE loans SET status = 'Active', approved_by = $1, approved_at = now(),
+           disbursed_at = now(), issue_date = CURRENT_DATE, updated_at = now()
+         WHERE id = $2 AND status = 'ChairmanReview'
+         RETURNING id, member_id, principal_amount, interest_rate, issue_date, due_date, status`,
+        [user.id, req.params.id]
+      );
+      if (!result.rowCount) throw new HttpError(409, 'Only an applied loan can be approved.', 'LOAN_NOT_APPROVABLE');
+      await recordAuditLog(req, 'LOAN_APPROVED_AND_DISBURSED', 'loans', String(result.rows[0].id), undefined, result.rows[0]);
+      res.json(result.rows[0]);
+    } catch (error: any) { sendApiError(res, error); }
+  });
+
+  app.post('/api/loans/:id/reject', requirePermission('loans.approve'), async (req, res) => {
+    try {
+      if (!postgresPool) throw new HttpError(503, 'Loan records require PostgreSQL.', 'LOANS_UNAVAILABLE');
+      const result = await postgresPool.query(
+        `UPDATE loans SET status = 'Rejected', rejected_at = now(), notes = concat_ws(E'\n', notes, NULLIF($1, '')), updated_at = now()
+         WHERE id = $2 AND status = 'ChairmanReview' RETURNING id, member_id, status`,
+        [String(req.body?.reason || '').trim().slice(0, 500), req.params.id]
+      );
+      if (!result.rowCount) throw new HttpError(409, 'Only an applied loan can be rejected.', 'LOAN_NOT_REJECTABLE');
+      await recordAuditLog(req, 'LOAN_REJECTED', 'loans', String(result.rows[0].id), undefined, result.rows[0]);
+      res.json(result.rows[0]);
+    } catch (error: any) { sendApiError(res, error); }
+  });
+
+  app.post('/api/loans/:id/repayments', requirePermission('loans.write'), async (req, res) => {
+    const client = postgresPool ? await postgresPool.connect() : null;
+    try {
+      if (!client) throw new HttpError(503, 'Loan records require PostgreSQL.', 'LOANS_UNAVAILABLE');
+      const amount = Number(req.body?.amount);
+      const repaymentDate = String(req.body?.repaymentDate || new Date().toISOString().slice(0, 10));
+      if (!Number.isFinite(amount) || amount <= 0) throw new HttpError(400, 'Enter a valid repayment amount.', 'REPAYMENT_INVALID');
+      await client.query('BEGIN');
+      const loan = await client.query(
+        `SELECT l.*, l.principal_amount * (1 + l.interest_rate / 100) -
+           COALESCE((SELECT SUM(lr.amount) FROM loan_repayments lr WHERE lr.loan_id = l.id), 0) AS outstanding
+         FROM loans l WHERE l.id = $1 FOR UPDATE`, [req.params.id]
+      );
+      if (!loan.rowCount || !['Active', 'Defaulted'].includes(loan.rows[0].status)) throw new HttpError(409, 'Select an active loan.', 'LOAN_NOT_ACTIVE');
+      const outstanding = Number(loan.rows[0].outstanding);
+      if (amount > outstanding + 0.005) throw new HttpError(400, `Repayment exceeds the outstanding balance of KES ${outstanding.toFixed(2)}.`, 'REPAYMENT_EXCEEDS_BALANCE');
+      const repayment = await client.query(
+        `INSERT INTO loan_repayments (loan_id, repayment_date, amount, recorded_by) VALUES ($1, $2, $3, $4)
+         RETURNING id, loan_id, repayment_date, amount`,
+        [req.params.id, repaymentDate, amount, requireAuthenticatedUser(req).id]
+      );
+      const cleared = outstanding - amount <= 0.005;
+      if (cleared) await client.query(`UPDATE loans SET status = 'Cleared', updated_at = now() WHERE id = $1`, [req.params.id]);
+      await client.query('COMMIT');
+      await recordAuditLog(req, 'LOAN_REPAYMENT_RECORDED', 'loans', req.params.id, undefined, { ...repayment.rows[0], cleared });
+      res.status(201).json({ ...repayment.rows[0], outstandingBalance: Math.max(0, outstanding - amount), loanStatus: cleared ? 'Cleared' : loan.rows[0].status });
+    } catch (error: any) {
+      if (client) await client.query('ROLLBACK').catch(() => undefined);
+      sendApiError(res, error);
+    } finally { client?.release(); }
   });
 
   // API 3: Get Sacco Members
