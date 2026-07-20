@@ -218,7 +218,10 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
             </section>
           )}
 
-          <div className="mt-7 border-t border-slate-100 pt-5 text-center text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400"><CheckCircle2 className="mr-1 inline h-3.5 w-3.5 text-emerald-600" />Protected with secure account verification</div>
+          <div className="mt-7 border-t border-slate-100 pt-5 text-center">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400"><CheckCircle2 className="mr-1 inline h-3.5 w-3.5 text-emerald-600" />Protected with secure account verification</p>
+            <a href="/about" className="mt-2 inline-block text-xs font-semibold text-emerald-700 underline decoration-emerald-200 underline-offset-4">About Sowetamu Sacco</a>
+          </div>
         </main>
       </div>
     </div>

@@ -48,6 +48,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       GCLOUD_PROJECT: '',
       FIRESTORE_DATABASE_ID: '',
       PORT: String(port),
+      APP_URL: baseUrl,
       NODE_ENV: 'development',
       ALLOW_IN_MEMORY_DB: 'true',
       ALLOW_DEV_AUTH_FALLBACK: 'true',
@@ -100,6 +101,18 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
 
   const health = await waitForHealth(baseUrl, server, () => logs);
   assert.equal(health.database, databaseUrl ? 'postgres_configured' : 'local_fallback');
+  const robots = await fetch(`${baseUrl}/robots.txt`);
+  assert.equal(robots.status, 200);
+  assert.match(await robots.text(), new RegExp(`Sitemap: ${baseUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/sitemap\\.xml`));
+  const sitemap = await fetch(`${baseUrl}/sitemap.xml`);
+  assert.equal(sitemap.status, 200);
+  assert.match(await sitemap.text(), /<loc>http:\/\/127\.0\.0\.1:\d+\/about<\/loc>/);
+  const about = await fetch(`${baseUrl}/about`);
+  assert.equal(about.status, 200);
+  assert.match(await about.text(), /<h1>Secure management for SACCO members, vehicles, collections, and reporting\.<\/h1>/);
+  const healthResponse = await fetch(`${baseUrl}/api/health`);
+  assert.equal(healthResponse.headers.get('x-robots-tag'), 'noindex, nofollow');
+  assert.equal(healthResponse.headers.get('cache-control'), 'no-store');
   const onboardingBeforeBootstrap = await request<{ needsFirstAdmin: boolean }>('/api/auth/onboarding-status', 200);
   assert.equal(onboardingBeforeBootstrap.needsFirstAdmin, true);
   // The retired Firebase recovery surface must not be registered.
