@@ -471,7 +471,7 @@ export default function App() {
         </button>
         <div className="flex items-center space-x-2">
           <span className="font-bold uppercase tracking-tight text-sm text-slate-900 font-display">Sowetamu</span>
-          <span className="text-blue-600 text-xs font-black">Pro</span>
+          <span className="text-blue-600 text-xs font-black">Sacco</span>
         </div>
         <div className="topbar-avatar w-8 h-8 rounded-xl bg-blue-50 flex items-center justify-center font-bold text-[10px] text-blue-600 font-display">
           {currentUser.name.split(' ').map(n => n[0]).join('')}
@@ -588,7 +588,7 @@ export default function App() {
 
         {/* Global Footer */}
         <footer className="app-footer app-topbar h-auto min-h-12 py-3 sm:py-0 bg-white border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between px-4 sm:px-8 text-[10px] text-slate-500 font-medium shrink-0 gap-2">
-          <div className="text-center sm:text-left">&copy; 2026 Matatu Sacco Financial OS. Built for scalability &amp; auditability.</div>
+          <div className="text-center sm:text-left">&copy; 2026 Sowetamu Sacco. Built for scalability &amp; auditability.</div>
           <div className="flex flex-wrap justify-center gap-4 uppercase tracking-wider font-mono">
             <span className="flex items-center">
               <span className="w-1.5 h-1.5 bg-blue-500 rounded-full mr-2 animate-pulse"></span>

@@ -25,7 +25,7 @@ export async function sendRecoveryCode(email: string, code: string): Promise<voi
   await transport.sendMail({
     from: process.env.EMAIL_FROM,
     to: email,
-    subject: 'Your Matatu SACCO password recovery code',
+    subject: 'Your Sowetamu Sacco password recovery code',
     text: `Your password recovery code is ${code}. It expires in 10 minutes. If you did not request it, ignore this email.`,
     html: `<p>Your password recovery code is:</p><p style="font-size:28px;font-weight:700;letter-spacing:6px">${code}</p><p>It expires in 10 minutes. If you did not request it, ignore this email.</p>`
   });

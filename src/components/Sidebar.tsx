@@ -88,7 +88,7 @@ export default function Sidebar({
             <div>
               <h1 className="text-sm font-bold font-display uppercase tracking-wider text-slate-900 flex items-center space-x-1">
                 <span>Sowetamu</span>
-                <span className="text-blue-600">Pro</span>
+                <span className="text-blue-600">Sacco</span>
               </h1>
               <p className="text-[9px] text-slate-400 font-mono tracking-wider font-semibold">
                 FINANCIAL OS V1.0
@@ -96,7 +96,7 @@ export default function Sidebar({
             </div>
           </div>
         ) : (
-          <div className="flex flex-col items-center md:items-center space-y-1.5 md:block hidden" title="Sowetamu Pro Sacco OS">
+          <div className="flex flex-col items-center md:items-center space-y-1.5 md:block hidden" title="Sowetamu Sacco OS">
             <div className="brand-mark w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center shadow-sm shadow-blue-200">
               <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
@@ -109,7 +109,7 @@ export default function Sidebar({
         <div className="md:hidden block">
           <h1 className="text-sm font-bold font-display uppercase tracking-wider text-slate-900 flex items-center space-x-1">
             <span>Sowetamu</span>
-            <span className="text-blue-600 font-black">Pro</span>
+            <span className="text-blue-600 font-black">Sacco</span>
           </h1>
         </div>
         

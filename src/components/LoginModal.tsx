@@ -157,7 +157,7 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
       <div className="mx-auto flex min-h-[calc(100vh-5rem)] w-full max-w-md flex-col justify-center">
         <div className="mb-7 flex items-center justify-center gap-3 text-white">
           <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-emerald-300/30 bg-emerald-400/15 shadow-lg"><span className="font-display text-lg font-bold text-emerald-300">M</span></div>
-          <div><p className="font-display text-xl font-bold tracking-tight">MatatuSacco</p><p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-emerald-200/80">Member access</p></div>
+          <div><p className="font-display text-xl font-bold tracking-tight">Sowetamu Sacco</p><p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-emerald-200/80">Member access</p></div>
         </div>
 
         <main className="auth-card rounded-[2rem] px-6 py-7 sm:px-9 sm:py-9">

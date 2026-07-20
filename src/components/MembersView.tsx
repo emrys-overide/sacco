@@ -148,7 +148,7 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
 
   const triggerMemberReportDownload = (member: Member, txs: Transaction[]) => {
     let content = `======================================================\n`;
-    content += `         SOWETAMU TRAVELLERS SACCO MEMBER ACCOUNT REPORT\n`;
+    content += `         SOWETAMU SACCO MEMBER ACCOUNT REPORT\n`;
     content += `         MEMBER: ${member.name.toUpperCase()}\n`;
     content += `         Generated on: ${new Date().toLocaleString()}\n`;
     content += `======================================================\n\n`;

@@ -50,7 +50,7 @@ export default function PwaInstallPrompt() {
         <X className="h-4 w-4" />
       </button>
       <div className="pr-7">
-        <p className="text-sm font-black text-slate-900">{updateAvailable ? 'Update available' : 'Install Sowetamu Pro'}</p>
+        <p className="text-sm font-black text-slate-900">{updateAvailable ? 'Update available' : 'Install Sowetamu Sacco'}</p>
         <p className="mt-1 text-xs leading-relaxed text-slate-600">
           {updateAvailable ? 'Reload to use the newest secure application version.' : 'Add the SACCO application to this device. Financial records still require a secure internet connection.'}
         </p>

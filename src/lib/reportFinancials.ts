@@ -1,7 +1,7 @@
 import type { Member, Transaction } from '../types';
 
 export const SOWETAMU_AUDIT_REFERENCE = {
-  saccoName: 'SOWETAMU SAVINGS & CREDIT',
+  saccoName: 'SOWETAMU SACCO',
   regNo: 'CS/NO. 22239',
   year: '2024',
   auditFee: 25500,

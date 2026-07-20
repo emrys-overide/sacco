@@ -1,6 +1,6 @@
 # SACCO Production Database Schema
 
-This document defines the relational database contract for the Matatu SACCO management system. The target database is PostgreSQL or Supabase PostgreSQL.
+This document defines the relational database contract for Sowetamu Sacco. The target database is PostgreSQL or Supabase PostgreSQL.
 
 The executable migrations live in:
 

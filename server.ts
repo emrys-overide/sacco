@@ -935,7 +935,7 @@ function publicUser(user: AuthorizedUser): AuthorizedUser {
 }
 
 function createTotpEnrollmentDetails(user: AuthorizedUser, secret: string) {
-  const issuer = String(process.env.TOTP_ISSUER || 'Matatu SACCO').trim() || 'Matatu SACCO';
+  const issuer = String(process.env.TOTP_ISSUER || 'Sowetamu Sacco').trim() || 'Sowetamu Sacco';
   return {
     manualKey: secret,
     otpauthUri: createTotpUri(issuer, user.email || user.phone || user.name, secret)

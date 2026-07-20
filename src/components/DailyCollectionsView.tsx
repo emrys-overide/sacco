@@ -414,7 +414,7 @@ export default function DailyCollectionsView({
           </div>
           <h2 className="text-lg font-bold font-display text-slate-100 mt-1 flex items-center">
             <ClipboardList className="w-5 h-5 text-emerald-400 mr-2" />
-            Sowetamu Travellers Sacco — Field Collection Sheet
+            Sowetamu Sacco — Field Collection Sheet
           </h2>
           <p className="text-xs text-slate-400 max-w-2xl leading-normal">
             This component replicates the physical daily field sheets filled at stages (such as <strong className="text-white">Stage 17 &amp; Cabanas</strong>). Under the hood, we digitize these entries, compute dynamic vertical sums, account for daily on-route expenses, and allow one-click ledger synchronization to post transactions seamlessly to the centralized dual-till vault.
@@ -516,7 +516,7 @@ export default function DailyCollectionsView({
             </div>
 
             <div>
-              <h1 className="text-2xl font-black font-display tracking-tight text-emerald-950">SOWETAMU</h1>
+              <h1 className="text-2xl font-black font-display tracking-tight text-emerald-950">SOWETAMU SACCO</h1>
               <p className="text-[10px] text-emerald-800 font-bold uppercase tracking-[1.5px] font-mono leading-none">TRAVELLERS SACCO</p>
               <p className="text-[9px] text-slate-500 mt-1 italic">"We Serve with Courtesy, Discipline &amp; Dignity"</p>
             </div>

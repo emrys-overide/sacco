@@ -1,4 +1,4 @@
-# Matatu SACCO Management System
+# Sowetamu Sacco
 
 A full-stack financial operations app for members, vehicles, daily collections, Co-operative Bank event reconciliation, and ledger reporting.
 

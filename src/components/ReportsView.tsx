@@ -112,7 +112,7 @@ export default function ReportsView({
   const [treasurerName, setTreasurerName] = useState('Tobias Taabu Obiero');
   const [bankName, setBankName] = useState('Co-operative Bank of Kenya Ltd, Kayole Branch');
   const [saccoRegNo, setSaccoRegNo] = useState('CS/NO. 22239');
-  const [saccoCustomName, setSaccoCustomName] = useState('SOWETAMU SAVINGS & CREDIT');
+  const [saccoCustomName, setSaccoCustomName] = useState('SOWETAMU SACCO');
 
   const reportMetrics = calculateReportFinancials(transactions, members);
   const { totalCredits, totalDebits, netBalance, categorySummary } = reportMetrics;
@@ -164,7 +164,7 @@ export default function ReportsView({
   // Cashless till download
   const triggerDownload = (format: 'TXT' | 'CSV') => {
     let content = `======================================================\n`;
-    content += `         SOWETAMU TRAVELLERS SACCO FINANCIAL BLUEPRINT REPORT\n`;
+    content += `         SOWETAMU SACCO FINANCIAL BLUEPRINT REPORT\n`;
     content += `         Scope: ${reportType} Combined & Segregated Tills Statement\n`;
     content += `              Generated on: ${new Date().toLocaleString()}\n`;
     content += `======================================================\n\n`;
@@ -231,7 +231,7 @@ export default function ReportsView({
     link.click();
     document.body.removeChild(link);
 
-    setDownloadSuccessMessage(`Success! Sowetamu Dual-Till Financial Statement exported in ${format} format.`);
+    setDownloadSuccessMessage(`Success! Sowetamu Sacco dual-till financial statement exported in ${format} format.`);
     setTimeout(() => setDownloadSuccessMessage(''), 5000);
   };
 
@@ -447,9 +447,9 @@ export default function ReportsView({
                   <div className="p-6 space-y-6">
                     <div className="border-l-4 border-amber-500 bg-amber-50/50 p-4 rounded text-xs text-slate-700 leading-normal">
                       <strong className="text-amber-950 block mb-1 flex items-center">
-                        <Sparkles className="w-4 h-4 mr-1 text-amber-600" /> Sowetamu Dual-Till Segregation Policy
+                        <Sparkles className="w-4 h-4 mr-1 text-amber-600" /> Sowetamu Sacco Dual-Till Segregation Policy
                       </strong>
-                      To separate fleet collections from operations, Sowetamu runs isolated tills. While transaction streams are separate, this automated conjunction ledger merges them to evaluate total capital reserves.
+                      To separate fleet collections from operations, Sowetamu Sacco runs isolated tills. While transaction streams are separate, this automated conjunction ledger merges them to evaluate total capital reserves.
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -729,7 +729,7 @@ export default function ReportsView({
                   Export Ledger Services
                 </h3>
                 <p className="text-[11px] text-slate-600 leading-normal font-medium">
-                  Sowetamu's cashless dual-till transactions can be merged into unified statements instantly for AGM compliance and state auditors. Select a format below:
+                  Sowetamu Sacco's cashless dual-till transactions can be merged into unified statements instantly for AGM compliance and state auditors. Select a format below:
                 </p>
 
                 <div className="space-y-2 pt-2">

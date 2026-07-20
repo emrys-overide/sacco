@@ -15,7 +15,7 @@ test('creates six-digit time-based codes accepted only in the bounded verificati
 test('creates a Base32 secret and standard Google Authenticator provisioning URI', () => {
   const secret = createBase32Secret();
   assert.match(secret, /^[A-Z2-7]+$/);
-  const uri = createTotpUri('Matatu SACCO', 'chair@example.test', secret);
+  const uri = createTotpUri('Sowetamu Sacco', 'chair@example.test', secret);
   assert.match(uri, /^otpauth:\/\/totp\//);
-  assert.match(uri, /issuer=Matatu%20SACCO/);
+  assert.match(uri, /issuer=Sowetamu%20Sacco/);
 });

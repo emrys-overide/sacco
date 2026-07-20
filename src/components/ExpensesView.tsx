@@ -682,7 +682,7 @@ export default function ExpensesView({
           return (
             <div id="print-voucher-billboard" className="hidden border border-dashed border-slate-400 p-8 rounded-2xl max-w-md bg-white font-mono text-slate-800 text-xs shadow-lg space-y-4">
               <div className="text-center border-b-2 border-dashed border-slate-300 pb-4">
-                <h2 className="text-base font-black uppercase">Sowetamu Matatu Sacco Ltd</h2>
+                <h2 className="text-base font-black uppercase">Sowetamu Sacco</h2>
                 <p className="text-[9px] text-slate-500 mt-1 uppercase">CS/NO. 22239 &bull; Nairobi, Kenya</p>
                 <p className="text-[10px] font-black uppercase tracking-wider text-slate-700 mt-2 bg-slate-100 p-1 rounded">
                   OFFICIAL DEBIT DISBURSEMENT VOUCHER

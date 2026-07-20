@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "Sowetamu Matatu SACCO Pro",
-  "short_name": "Sowetamu Pro",
-  "description": "Secure Matatu SACCO member, vehicle, collection, and financial ledger operations.",
+  "name": "Sowetamu Sacco",
+  "short_name": "Sowetamu",
+  "description": "Secure Sowetamu Sacco member, vehicle, collection, and financial ledger operations.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
