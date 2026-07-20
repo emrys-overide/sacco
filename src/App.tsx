@@ -26,6 +26,8 @@ const MEMBER_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary', 'Treas
 const VEHICLE_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary'];
 const TRANSACTION_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Treasurer', 'Accountant'];
 const CLEAN_START_VERSION = 'secure-session-v2';
+const SESSION_IDLE_TIMEOUT_MS = 60 * 60 * 1000;
+const SESSION_HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
 
 function prepareCleanStartStorage() {
   if (localStorage.getItem(STORAGE_KEYS.installVersion) === CLEAN_START_VERSION) return;
@@ -146,6 +148,32 @@ export default function App() {
     setCurrentUser(null);
     setAuthToken('');
   };
+
+  useEffect(() => {
+    if (!currentUser || !authToken) return;
+    let idleTimer = window.setTimeout(handleLogout, SESSION_IDLE_TIMEOUT_MS);
+    let lastHeartbeat = Date.now();
+
+    const recordActivity = () => {
+      window.clearTimeout(idleTimer);
+      idleTimer = window.setTimeout(handleLogout, SESSION_IDLE_TIMEOUT_MS);
+      if (Date.now() - lastHeartbeat < SESSION_HEARTBEAT_INTERVAL_MS) return;
+      lastHeartbeat = Date.now();
+      void fetch('/api/auth/activity', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${authToken}` }
+      }).then(response => {
+        if (response.status === 401 || response.status === 403) handleLogout();
+      }).catch(() => undefined);
+    };
+
+    const events: Array<keyof WindowEventMap> = ['pointerdown', 'keydown', 'scroll', 'focus'];
+    events.forEach(event => window.addEventListener(event, recordActivity, { passive: true }));
+    return () => {
+      window.clearTimeout(idleTimer);
+      events.forEach(event => window.removeEventListener(event, recordActivity));
+    };
+  }, [currentUser, authToken]);
 
   const handleApproveBlueprint = () => {
     if (currentUser) {

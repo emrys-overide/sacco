@@ -60,6 +60,7 @@ import { configureProxyTrust, securityHeaders } from './src/server/securityMiddl
 import { registerSystemRoutes } from './src/server/systemRoutes';
 import { sendRecoveryCode } from './src/server/emailService';
 import { canReviewLoanStage } from './src/server/loanWorkflow';
+import { isSessionIdle } from './src/server/sessionPolicy';
 import {
   CoopIpnError,
   assertCoopIpnAuthentication,
@@ -109,6 +110,7 @@ type AuthorizedUser = {
   totpEnabledAt?: string;
   mustChangePassword?: boolean;
   temporaryPasswordExpiresAt?: string;
+  lastActivityAt?: string;
 };
 
 type PasswordAuthenticatedUser = AuthorizedUser & {
@@ -140,7 +142,8 @@ function mapDbUser(row: any): AuthorizedUser {
     accountStatus: (row.account_status || 'Active') as AccountStatus,
     linkedMemberId: row.linked_member_id ? String(row.linked_member_id) : undefined,
     mustChangePassword: row.must_change_password === true,
-    temporaryPasswordExpiresAt: row.temporary_password_expires_at ? new Date(row.temporary_password_expires_at).toISOString() : undefined
+    temporaryPasswordExpiresAt: row.temporary_password_expires_at ? new Date(row.temporary_password_expires_at).toISOString() : undefined,
+    lastActivityAt: row.last_activity_at ? new Date(row.last_activity_at).toISOString() : undefined
   };
 }
 
@@ -429,7 +432,7 @@ async function findSaccoUserById(id: string): Promise<AuthorizedUser | null> {
   if (postgresPool) {
     const result = await postgresPool.query(
       `SELECT id, full_name, email, phone, role, is_active, account_status, linked_member_id,
-              must_change_password, temporary_password_expires_at
+              must_change_password, temporary_password_expires_at, last_activity_at
        FROM users WHERE id = $1 LIMIT 1`,
       [id]
     );
@@ -452,7 +455,7 @@ async function authenticatePasswordUser(identifierValue: unknown, password: stri
     const result = await postgresPool.query(
       `SELECT id, full_name, email, phone, role, is_active, account_status, linked_member_id,
               totp_secret_ciphertext, totp_enabled_at, must_change_password,
-              temporary_password_expires_at
+              temporary_password_expires_at, last_activity_at
        FROM users
        WHERE (($1 <> '' AND regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = $1)
           OR ($2 LIKE '%@%' AND lower(COALESCE(email, '')) = $2))
@@ -509,6 +512,13 @@ async function verifyJwt(token: string): Promise<AuthorizedUser> {
 
   if (isMemberUser(user) && !user.linkedMemberId) {
     throw new HttpError(401, 'Authentication token user is no longer authorized.', 'JWT_USER_REVOKED');
+  }
+  if (isSessionIdle(user.lastActivityAt)) {
+    throw new HttpError(401, 'Your session expired after one hour of inactivity. Sign in again.', 'SESSION_IDLE_TIMEOUT');
+  }
+  if (postgresPool) {
+    await postgresPool.query('UPDATE users SET last_activity_at = now() WHERE id = $1', [user.id]);
+    user.lastActivityAt = new Date().toISOString();
   }
   return user;
 }
@@ -920,7 +930,7 @@ type TotpChallengeStart = {
 };
 
 function publicUser(user: AuthorizedUser): AuthorizedUser {
-  const { devPassword: _devPassword, totpSecret: _totpSecret, ...safeUser } = user;
+  const { devPassword: _devPassword, totpSecret: _totpSecret, lastActivityAt: _lastActivityAt, ...safeUser } = user;
   return safeUser;
 }
 
@@ -1047,7 +1057,7 @@ async function completePasswordAuthentication(user: PasswordAuthenticatedUser): 
   if (requiresTotp(user)) {
     return { user: publicUser(user), ...(await startOfficerTotpChallenge(user)) };
   }
-  if (postgresPool) await postgresPool.query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
+  if (postgresPool) await postgresPool.query('UPDATE users SET last_login_at = now(), last_activity_at = now() WHERE id = $1', [user.id]);
   const signed = signJwt(user);
   return {
     user: publicUser(user),
@@ -2006,6 +2016,10 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
     } catch (error: any) {
       sendApiError(res, error);
     }
+  });
+
+  app.post('/api/auth/activity', authenticateSaccoUser, (_req, res) => {
+    res.status(204).end();
   });
 
   // Test-only fixture endpoint. It is not registered unless the integration
