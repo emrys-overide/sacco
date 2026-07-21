@@ -128,6 +128,7 @@ const localLoginRateLimits = new Map<string, { attempts: number; windowStartedAt
 const localClientErrorReportLimits = new Map<string, { count: number; windowStartedAt: number }>();
 const localPasswordResetRequests: Array<{ id: string; userId: string; status: 'Pending' | 'Completed' | 'Cancelled'; createdAt: string; reviewedAt?: string; reviewedBy?: string }> = [];
 const localAppNotifications: Array<{ id: string; recipientUserId: string; category: string; title: string; message: string; destination?: string; createdAt: string; readAt?: string }> = [];
+const liveNotificationStreams = new Map<string, Set<express.Response>>();
 const localApplicationErrorLogs: Array<{
   id: string;
   occurred_at: string;
@@ -410,6 +411,30 @@ type AppNotificationInput = {
   destination?: string;
 };
 
+type DeliveredNotification = {
+  id: string;
+  category: string;
+  title: string;
+  message: string;
+  destination?: string | null;
+  created_at: string;
+  read_at?: string | null;
+};
+
+function broadcastNotification(userId: string, notification: DeliveredNotification): void {
+  const streams = liveNotificationStreams.get(userId);
+  if (!streams?.size) return;
+  const packet = `event: notification\ndata: ${JSON.stringify(notification)}\n\n`;
+  for (const stream of streams) {
+    try {
+      stream.write(packet);
+    } catch {
+      streams.delete(stream);
+    }
+  }
+  if (!streams.size) liveNotificationStreams.delete(userId);
+}
+
 function normalizedNotification(input: AppNotificationInput): AppNotificationInput {
   return {
     category: String(input.category || 'SYSTEM').slice(0, 80),
@@ -424,14 +449,18 @@ async function notifyUser(userId: string, input: AppNotificationInput): Promise<
   try {
     if (postgresPool) {
       if (!userId.match(/^[0-9a-f-]{36}$/i)) return;
-      await postgresPool.query(
+      const result = await postgresPool.query(
         `INSERT INTO app_notifications (recipient_user_id, category, title, message, destination)
-         VALUES ($1, $2, $3, $4, $5)`,
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, category, title, message, destination, created_at, read_at`,
         [userId, notification.category, notification.title, notification.message, notification.destination || null]
       );
+      if (result.rowCount) broadcastNotification(userId, result.rows[0] as DeliveredNotification);
       return;
     }
-    localAppNotifications.unshift({ id: crypto.randomUUID(), recipientUserId: userId, ...notification, createdAt: new Date().toISOString() });
+    const local = { id: crypto.randomUUID(), recipientUserId: userId, ...notification, createdAt: new Date().toISOString() };
+    localAppNotifications.unshift(local);
+    broadcastNotification(userId, { id: local.id, category: local.category, title: local.title, message: local.message, destination: local.destination, created_at: local.createdAt, read_at: null });
     localAppNotifications.splice(500);
   } catch {
     console.error('[Sacco Notifications] Notification persistence failed.');
@@ -442,17 +471,23 @@ async function notifyRole(role: UserRole, input: AppNotificationInput): Promise<
   const notification = normalizedNotification(input);
   try {
     if (postgresPool) {
-      await postgresPool.query(
+      const result = await postgresPool.query(
         `INSERT INTO app_notifications (recipient_user_id, category, title, message, destination)
          SELECT id, $2, $3, $4, $5
          FROM users
-         WHERE role = $1 AND is_active = TRUE AND account_status = 'Active'`,
+         WHERE role = $1 AND is_active = TRUE AND account_status = 'Active'
+         RETURNING recipient_user_id, id, category, title, message, destination, created_at, read_at`,
         [role, notification.category, notification.title, notification.message, notification.destination || null]
       );
+      result.rows.forEach(row => broadcastNotification(String(row.recipient_user_id), row as DeliveredNotification));
       return;
     }
     localStore.users.filter(user => user.role === role && user.isActive !== false && user.accountStatus === 'Active')
-      .forEach(user => localAppNotifications.unshift({ id: crypto.randomUUID(), recipientUserId: user.id, ...notification, createdAt: new Date().toISOString() }));
+      .forEach(user => {
+        const local = { id: crypto.randomUUID(), recipientUserId: user.id, ...notification, createdAt: new Date().toISOString() };
+        localAppNotifications.unshift(local);
+        broadcastNotification(user.id, { id: local.id, category: local.category, title: local.title, message: local.message, destination: local.destination, created_at: local.createdAt, read_at: null });
+      });
     localAppNotifications.splice(500);
   } catch {
     console.error('[Sacco Notifications] Role notification persistence failed.');
@@ -1889,7 +1924,7 @@ function genericMemberOtpResponse(requestId = crypto.randomUUID()) {
 
 function genericChairmanResetResponse() {
   return {
-    message: 'If the submitted details match an active member account, the Chairman will review the password reset request.'
+    message: 'If the submitted details match an active member account, the Chairman or SACCO Administrator will receive the request. Contact them directly to confirm your identity.'
   };
 }
 
@@ -2243,8 +2278,8 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       if (result.created) {
         await notifyRole('Chairman', {
           category: 'PASSWORD_RESET_REQUEST',
-          title: 'Member password reset requested',
-          message: 'A member has requested a password reset. Verify their identity and issue a temporary password from Account Access.',
+          title: 'Member password reset needs Chairman review',
+          message: 'A member has requested a password reset and has been told to contact the SACCO Administrator. Verify their identity and issue a temporary password from Account Access.',
           destination: 'Account Access'
         });
       }
@@ -2260,12 +2295,19 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       const password = String(req.body?.password || '');
       if (!user.mustChangePassword) throw new HttpError(409, 'This account does not require a password change.', 'PASSWORD_CHANGE_NOT_REQUIRED');
       if (password.length < 8) throw new HttpError(400, 'Choose a new password of at least 8 characters.', 'PASSWORD_INVALID');
-      if (!postgresPool) throw new HttpError(503, 'Password changes require PostgreSQL.', 'PASSWORD_CHANGE_UNAVAILABLE');
-      await postgresPool.query(
-        `UPDATE users SET password_hash = crypt($1, gen_salt('bf')), must_change_password = FALSE,
-           temporary_password_expires_at = NULL, updated_at = now() WHERE id = $2`,
-        [password, user.id]
-      );
+      if (postgresPool) {
+        await postgresPool.query(
+          `UPDATE users SET password_hash = crypt($1, gen_salt('bf')), must_change_password = FALSE,
+             temporary_password_expires_at = NULL, updated_at = now() WHERE id = $2`,
+          [password, user.id]
+        );
+      } else {
+        const localUser = localStore.users.find(item => item.id === user.id);
+        if (!localUser) throw new HttpError(404, 'Account was not found.', 'USER_NOT_FOUND');
+        localUser.devPassword = password;
+        localUser.mustChangePassword = false;
+        localUser.temporaryPasswordExpiresAt = undefined;
+      }
       await recordAuditLog(req, 'TEMPORARY_PASSWORD_CHANGED', 'users', user.id);
       const updated = { ...user, mustChangePassword: false, temporaryPasswordExpiresAt: undefined };
       res.json({ user: publicUser(updated), ...signJwt(updated), passwordUpdated: true });
@@ -2409,6 +2451,9 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
 
   app.get('/api/password-reset-requests', requirePermission('users.write'), async (req, res) => {
     try {
+      if (requireAuthenticatedUser(req).role !== 'Chairman') {
+        throw new HttpError(403, 'Only the Chairman can review password reset requests.', 'PASSWORD_RESET_CHAIRMAN_ONLY');
+      }
       if (postgresPool) {
         const result = await postgresPool.query(
           `SELECT r.id, r.user_id, r.status, r.created_at,
@@ -2463,6 +2508,36 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
     } catch (error: any) {
       return sendApiError(res, error);
     }
+  });
+
+  app.get('/api/notifications/stream', (req, res) => {
+    const user = requireAuthenticatedUser(req);
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+    res.write('event: connected\ndata: {}\n\n');
+    const streams = liveNotificationStreams.get(user.id) || new Set<express.Response>();
+    streams.add(res);
+    liveNotificationStreams.set(user.id, streams);
+    const keepalive = setInterval(() => {
+      try { res.write(': keepalive\n\n'); } catch { /* close handler removes the stream */ }
+    }, 25_000);
+    req.on('close', () => {
+      clearInterval(keepalive);
+      streams.delete(res);
+      if (!streams.size) liveNotificationStreams.delete(user.id);
+    });
+  });
+
+  // This heartbeat is sent only while an authenticated browser is actively
+  // using the live notification stream. It gives a free Render service normal
+  // inbound activity during an active session; it is not an external uptime ping.
+  app.post('/api/notifications/heartbeat', (req, res) => {
+    requireAuthenticatedUser(req);
+    res.json({ active: true });
   });
 
   app.post('/api/notifications/read-all', async (req, res) => {
@@ -2649,6 +2724,9 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
 
   app.post('/api/users/:id/password', requirePermission('users.write'), async (req, res) => {
     try {
+      if (requireAuthenticatedUser(req).role !== 'Chairman') {
+        throw new HttpError(403, 'Only the Chairman can issue a temporary password.', 'PASSWORD_RESET_CHAIRMAN_ONLY');
+      }
       const password = String(req.body?.password || '');
       if (password.length < 8) throw new HttpError(400, 'Choose a temporary password of at least 8 characters.', 'PASSWORD_INVALID');
       const resetRequestId = String(req.body?.resetRequestId || '').trim();
@@ -2706,6 +2784,8 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
         const request = resetRequestId ? localPasswordResetRequests.find(item => item.id === resetRequestId && item.userId === user.id && item.status === 'Pending') : undefined;
         if (resetRequestId && !request) throw new HttpError(409, 'This password reset request is no longer pending.', 'PASSWORD_RESET_REQUEST_NOT_PENDING');
         user.devPassword = password;
+        user.mustChangePassword = true;
+        user.temporaryPasswordExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
         if (request) {
           request.status = 'Completed';
           request.reviewedAt = new Date().toISOString();

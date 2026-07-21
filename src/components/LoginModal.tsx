@@ -143,7 +143,7 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
     : screen === 'register' ? 'Use the same details already saved on your active member record.'
       : screen === 'bootstrap' ? 'This private setup is available only while no Chairman exists.'
         : screen === 'totp' ? 'This extra step is enabled by your SACCO administrator.'
-          : screen === 'reset-request' ? 'The Chairman will verify the request and issue a temporary password.'
+          : screen === 'reset-request' ? 'Contact the Chairman or SACCO Administrator directly; the system also sends them a reset notification.'
             : screen === 'force-change' ? 'Replace the temporary password before continuing.'
             : 'Choose the option that matches your account.';
 
@@ -179,15 +179,16 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
                 <div className="mt-7 space-y-4 text-sm leading-6 text-slate-600">
                   <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-4"><p className="font-bold text-slate-800">New member</p><p>Your name, phone, and email must match one active member record. Then choose your password and sign in.</p></div>
                   <div className="rounded-2xl border border-slate-200 p-4"><p className="font-bold text-slate-800">Officer</p><p>The Chairman creates your account. Use the work email or phone and password they give you on the same login screen.</p></div>
+                  <div className="rounded-2xl border border-slate-200 p-4"><p className="font-bold text-slate-800">Documentation and technical help</p><p className="mt-1">Read the <a href="/documentation" className="font-bold text-emerald-700 underline underline-offset-2">SACCO user guide</a> or contact the Technical Department at <a href="mailto:emryspaul7@gmail.com" className="font-bold text-emerald-700 underline underline-offset-2">emryspaul7@gmail.com</a> / <a href="tel:+254759670456" className="font-bold text-emerald-700 underline underline-offset-2">0759670456</a>.</p></div>
                 </div>
               )}
 
               {screen === 'reset-request' && (
                 <form className="mt-7 space-y-4" onSubmit={handleSubmit}>
                   <div><label className="mb-2 block text-xs font-bold text-slate-600">Registered phone or email</label><input value={identifier} onChange={event => setIdentifier(event.target.value)} autoComplete="username" className={inputClass} required /></div>
-                  <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-900">For your protection, the Chairman must confirm this request. They will give you a temporary password, which you must replace immediately after signing in.</p>
+                  <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-900">For your protection, contact the Chairman or SACCO Administrator directly after submitting this request. The system sends them an in-app notification. They will give you a temporary password, which you must replace immediately after signing in.</p>
                   {error && <p className="rounded-xl bg-rose-50 px-3 py-2.5 text-xs text-rose-700">{error}</p>}{notice && <p className="rounded-xl bg-emerald-50 px-3 py-2.5 text-xs text-emerald-700">{notice}</p>}
-                  <button type="submit" disabled={isSubmitting} className="w-full rounded-2xl bg-emerald-600 px-4 py-3.5 text-sm font-bold text-white">Request Chairman review</button>
+                  <button type="submit" disabled={isSubmitting} className="w-full rounded-2xl bg-emerald-600 px-4 py-3.5 text-sm font-bold text-white">Notify Chairman / Administrator</button>
                 </form>
               )}
 
@@ -215,7 +216,7 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
 
           <div className="mt-7 border-t border-slate-100 pt-5 text-center">
             <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400"><CheckCircle2 className="mr-1 inline h-3.5 w-3.5 text-emerald-600" />Protected with secure account verification</p>
-            <a href="/about" className="mt-2 inline-block text-xs font-semibold text-emerald-700 underline decoration-emerald-200 underline-offset-4">About Sowetamu Sacco</a>
+            <div className="mt-2 flex items-center justify-center gap-3 text-xs font-semibold text-emerald-700"><a href="/about" className="underline decoration-emerald-200 underline-offset-4">About Sowetamu Sacco</a><a href="/documentation" className="underline decoration-emerald-200 underline-offset-4">Documentation &amp; Help</a></div>
           </div>
         </main>
       </div>

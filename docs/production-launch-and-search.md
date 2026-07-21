@@ -21,19 +21,22 @@ site appear more complete in search.
    domain, add it in Render, and point its DNS record to Render. Use the final
    HTTPS address, not a temporary `onrender.com` address. Render's Custom
    Domains panel gives the exact DNS record and verification step.
-2. **Set production secrets in Render.** Create a paid, always-on web service
-   from the merged `main` branch. Set `APP_URL` to the exact final HTTPS domain,
-   `TRUST_PROXY=true`, the production Supabase `DATABASE_URL`,
-   `DATABASE_SSL=true`, SMTP credentials, and long unique secrets for
-   `JWT_SECRET` and `MEMBER_OTP_PEPPER`. Keep development fallback variables
-   false.
+2. **Set production secrets in Render.** Deploy from the merged `main` branch.
+   Set `APP_URL` to the exact final HTTPS domain, `TRUST_PROXY=true`, the
+   production Supabase `DATABASE_URL`, `DATABASE_SSL=true`, and long unique
+   secrets for `JWT_SECRET` and `MEMBER_OTP_PEPPER`. Keep development fallback
+   variables false. Password resets are Chairman-confirmed in the app; SMTP is
+   not part of this recovery flow.
 3. **Use a separate production database.** Apply all migrations through
-   `022`, verify `npm run db:status`, and enable database backups. Do not use
-   test data or seed records as live SACCO data.
+   `022`, verify `npm run db:status`, and follow the backup-and-restore routine
+   in [Free-tier operations](./free-tier-operations.md). Do not use test data
+   or seed records as live SACCO data.
 4. **Test the deployed URL.** Check `/api/health`, sign in as each role, create
-   a non-sensitive test member, test recovery email, and repeat the UAT list.
-   Delete or deactivate test accounts through normal SACCO controls when done.
-5. **Keep Co-op Bank IPN disabled until bank onboarding is complete.** A bank
+   a non-sensitive test member, test a Chairman-confirmed password reset, and
+   repeat the UAT list. Delete or deactivate test accounts through normal SACCO
+   controls when done.
+5. **Keep Co-op Bank IPN disabled until bank onboarding is complete and the
+   application is always on.** A bank
    callback requires the SACCO's approved account numbers, final credentials,
    authentication rules, a controlled callback test, and an always-on host.
 6. **Restrict developer diagnostics.** If you need the private Developer
@@ -66,7 +69,7 @@ site appear more complete in search.
 - In Search Console, inspect the homepage and `/about`; request indexing after
   the domain and content are final.
 - Run Lighthouse on mobile and prioritise the reported Core Web Vitals issues.
-- Check Render health alerts, database backups, recovery-email delivery, and
+- Check Render health alerts, database backups, Chairman reset handling, and
   error logs at least weekly during the first month.
 
 ## Official guides

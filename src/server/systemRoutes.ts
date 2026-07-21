@@ -1,5 +1,5 @@
 import type { Express } from 'express';
-import { buildAboutPage, buildRobotsTxt, buildSitemapXml, getPublicSiteUrl } from './publicSeo';
+import { buildAboutPage, buildDocumentationPage, buildRobotsTxt, buildSitemapXml, getPublicSiteUrl } from './publicSeo';
 
 type SystemRouteContext = {
   databaseStatus(): string;
@@ -22,6 +22,11 @@ export function registerSystemRoutes(app: Express, context: SystemRouteContext) 
 
   app.get('/about', (_req, res) => {
     res.type('html').send(buildAboutPage(publicSiteUrl));
+  });
+
+  app.get('/documentation', (_req, res) => {
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+    res.type('html').send(buildDocumentationPage(publicSiteUrl));
   });
 
   app.get('/api/health', (_req, res) => {

@@ -19,6 +19,7 @@ import {
   UserRoundPlus,
   Landmark,
   BookOpenCheck,
+  CircleHelp,
   CalendarClock,
   Bug
 } from 'lucide-react';
@@ -269,6 +270,16 @@ export default function Sidebar({
       <div className={`sidebar-profile p-4 border-t border-slate-100 bg-white flex flex-col transition-all duration-300 ${
         displayCollapsed ? 'md:space-y-4 md:items-center md:justify-center' : 'space-y-3'
       }`}>
+        <a
+          href="/documentation"
+          target="_blank"
+          rel="noopener noreferrer"
+          className={`flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 ${displayCollapsed ? 'md:justify-center' : ''}`}
+          title="Documentation and Technical Help"
+        >
+          <CircleHelp className="h-4 w-4 shrink-0" />
+          {(!displayCollapsed || window.innerWidth < 768) && <span>Documentation &amp; Help</span>}
+        </a>
         <div className={`flex items-center justify-between pt-2 border-t border-slate-100 w-full ${
           displayCollapsed ? 'md:flex-col md:space-y-3' : 'space-x-3'
         }`}>

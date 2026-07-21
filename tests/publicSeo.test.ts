@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildAboutPage, buildRobotsTxt, buildSitemapXml, getPublicSiteUrl } from '../src/server/publicSeo';
+import { buildAboutPage, buildDocumentationPage, buildRobotsTxt, buildSitemapXml, getPublicSiteUrl } from '../src/server/publicSeo';
 
 test('normalizes a public site URL without retaining a deployment path or query', () => {
   assert.equal(getPublicSiteUrl('https://sowetamu.example/app?preview=true#top'), 'https://sowetamu.example');
@@ -25,4 +25,13 @@ test('creates a public about page without member or financial record data', () =
   assert.match(page, /<link rel="canonical" href="https:\/\/sowetamu\.example\/about"/);
   assert.match(page, /"@type":"WebSite"/);
   assert.doesNotMatch(page, /api\/members|transaction id|account number/i);
+});
+
+test('creates a non-indexed user guide with the Technical Department contact', () => {
+  const page = buildDocumentationPage('https://sowetamu.example');
+  assert.match(page, /<meta name="robots" content="noindex,nofollow"/);
+  assert.match(page, /href="https:\/\/sowetamu\.example\/documentation"/);
+  assert.match(page, /mailto:emryspaul7@gmail\.com/);
+  assert.match(page, /0759670456/);
+  assert.doesNotMatch(page, /database_url|jwt_secret|account number/i);
 });

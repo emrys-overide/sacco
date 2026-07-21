@@ -29,6 +29,32 @@ async function waitForHealth(baseUrl: string, server: ChildProcess, getLogs: () 
   throw new Error(`E2E server did not become healthy.\n${getLogs()}`);
 }
 
+async function waitForLiveNotification(reader: ReadableStreamDefaultReader<Uint8Array>, timeoutMs = 5_000): Promise<any> {
+  const decoder = new TextDecoder();
+  let buffered = '';
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const expires = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => reject(new Error('Timed out waiting for a live notification.')), timeoutMs);
+  });
+  try {
+    while (true) {
+      const next = await Promise.race([reader.read(), expires]);
+      if (next.done) throw new Error('The live notification stream closed before an event arrived.');
+      buffered += decoder.decode(next.value, { stream: true });
+      const events = buffered.split('\n\n');
+      buffered = events.pop() || '';
+      for (const eventText of events) {
+        const event = eventText.match(/^event:\s*(.+)$/m)?.[1];
+        const data = eventText.match(/^data:\s*(.+)$/m)?.[1];
+        if (event !== 'notification' || !data) continue;
+        return JSON.parse(data);
+      }
+    }
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, async t => {
   const databaseUrl = process.env.E2E_DATABASE_URL || '';
   const port = 4400 + (process.pid % 500);
@@ -110,6 +136,12 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
   const about = await fetch(`${baseUrl}/about`);
   assert.equal(about.status, 200);
   assert.match(await about.text(), /<h1>Secure management for SACCO members, vehicles, collections, and reporting\.<\/h1>/);
+  const documentation = await fetch(`${baseUrl}/documentation`);
+  assert.equal(documentation.status, 200);
+  assert.equal(documentation.headers.get('x-robots-tag'), 'noindex, nofollow');
+  const documentationText = await documentation.text();
+  assert.match(documentationText, /Technical Department/);
+  assert.match(documentationText, /emryspaul7@gmail\.com/);
   const healthResponse = await fetch(`${baseUrl}/api/health`);
   assert.equal(healthResponse.headers.get('x-robots-tag'), 'noindex, nofollow');
   assert.equal(healthResponse.headers.get('cache-control'), 'no-store');
@@ -173,6 +205,26 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
   });
   assert.equal(treasurerLogin.user.role, 'Treasurer');
   assert.ok(treasurerLogin.token);
+  const secretary = await request('/api/users', 201, {
+    method: 'POST',
+    token,
+    body: {
+      fullName: 'E Two E Secretary',
+      email: 'secretary.e2e@example.com',
+      phone: '0700000002',
+      role: 'Secretary',
+      password: 'secretary-password'
+    }
+  });
+  assert.equal(secretary.user.role, 'Secretary');
+  const secretaryLogin = await request('/api/auth/login', 200, {
+    method: 'POST',
+    body: { identifier: 'secretary.e2e@example.com', password: 'secretary-password' }
+  });
+  await request('/api/password-reset-requests', 403, { token: secretaryLogin.token });
+  await request('/api/users/not-a-real-user/password', 403, {
+    method: 'POST', token: secretaryLogin.token, body: { password: 'another-temporary-password' }
+  });
   await request('/api/members', 401);
   await request('/api/member-activation/request', 200, {
     method: 'POST',
@@ -440,5 +492,62 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       body: { driverName: 'Blocked Driver', driverPhone: '0712345678' }
     });
     await request('/api/coop-bank/events', 403, { token: memberToken });
+
+    // Password reset requests are private, Chairman-confirmed, and delivered
+    // live to a connected Chairman before the normal durable bell refresh.
+    const streamController = new AbortController();
+    const stream = await fetch(`${baseUrl}/api/notifications/stream`, {
+      headers: { Authorization: `Bearer ${loginToken}` },
+      signal: streamController.signal
+    });
+    assert.equal(stream.status, 200);
+    assert.equal(stream.headers.get('content-type')?.startsWith('text/event-stream'), true);
+    assert.ok(stream.body);
+    const streamReader = stream.body.getReader();
+    const liveNotification = waitForLiveNotification(streamReader);
+    const resetRequest = await request<{ message: string }>('/api/auth/password-reset-request', 200, {
+      method: 'POST',
+      body: { identifier: firstMember.phoneNumber }
+    });
+    const unknownResetRequest = await request<{ message: string }>('/api/auth/password-reset-request', 200, {
+      method: 'POST',
+      body: { identifier: '0799999999' }
+    });
+    assert.equal(resetRequest.message, unknownResetRequest.message);
+    assert.match(resetRequest.message, /Contact them directly to confirm your identity\./);
+    const delivered = await liveNotification;
+    assert.equal(delivered.category, 'PASSWORD_RESET_REQUEST');
+    assert.match(delivered.message, /contact the SACCO Administrator/i);
+    streamController.abort();
+    await streamReader.cancel().catch(() => undefined);
+
+    const chairmanNotifications = await request<{ items: Array<{ category: string }>; unreadCount: number }>('/api/notifications', 200, { token: loginToken });
+    assert.ok(chairmanNotifications.items.some(notification => notification.category === 'PASSWORD_RESET_REQUEST'));
+    assert.ok(chairmanNotifications.unreadCount >= 1);
+    const resetRequests = await request<Array<{ id: string; user_id: string }>>('/api/password-reset-requests', 200, { token: loginToken });
+    const pendingReset = resetRequests.find(reset => reset.user_id === memberLogin.user.id);
+    assert.ok(pendingReset);
+
+    await request(`/api/users/${memberLogin.user.id}/password`, 200, {
+      method: 'POST', token: loginToken,
+      body: { password: 'member-temporary-password', resetRequestId: pendingReset.id }
+    });
+    const temporaryLogin = await request('/api/auth/login', 200, {
+      method: 'POST',
+      body: { identifier: firstMember.phoneNumber, password: 'member-temporary-password' }
+    });
+    assert.equal(temporaryLogin.passwordChangeRequired, true);
+    await request('/api/notifications', 403, { token: temporaryLogin.token });
+    const completedChange = await request('/api/auth/change-temporary-password', 200, {
+      method: 'POST', token: temporaryLogin.token,
+      body: { password: 'member-private-password' }
+    });
+    assert.equal(completedChange.passwordUpdated, true);
+    const updatedMemberLogin = await request('/api/auth/login', 200, {
+      method: 'POST',
+      body: { identifier: firstMember.phoneNumber, password: 'member-private-password' }
+    });
+    assert.equal(updatedMemberLogin.passwordChangeRequired, false);
+    await request('/api/member-portal', 200, { token: updatedMemberLogin.token });
   }
 });
