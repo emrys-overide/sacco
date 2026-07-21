@@ -7,7 +7,7 @@ interface LoginModalProps {
   onLoginSuccess: (user: User, token: string) => void;
 }
 
-type AuthScreen = 'welcome' | 'help' | 'login' | 'register' | 'reset-request' | 'force-change' | 'bootstrap' | 'totp';
+type AuthScreen = 'welcome' | 'help' | 'login' | 'register' | 'reset-request' | 'chairman-recovery' | 'force-change' | 'bootstrap' | 'totp';
 type TotpEnrollment = { manualKey: string; otpauthUri: string };
 
 const inputClass = 'w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-600 focus:ring-4 focus:ring-emerald-100';
@@ -117,6 +117,10 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
         if (!identifier) throw new Error('Enter the phone number or email on your SACCO account.');
         const result = await api('/api/auth/password-reset-request', { identifier });
         setNotice(result.message);
+      } else if (screen === 'chairman-recovery') {
+        if (!identifier) throw new Error('Enter the Chairman account phone number or email.');
+        const result = await api('/api/auth/chairman-recovery-request', { identifier });
+        setNotice(result.message);
       } else if (screen === 'force-change') {
         if (password.length < 8) throw new Error('Choose a private password of at least 8 characters.');
         if (password !== confirmPassword) throw new Error('The new password and confirmation do not match.');
@@ -137,14 +141,16 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
       : screen === 'bootstrap' ? 'Set up your SACCO'
         : screen === 'totp' ? 'Confirm your secure code'
           : screen === 'reset-request' ? 'Request a password reset'
-            : screen === 'force-change' ? 'Create a private password'
+            : screen === 'chairman-recovery' ? 'Request Chairman recovery'
+              : screen === 'force-change' ? 'Create a private password'
             : 'Getting started';
   const subtitle = screen === 'login' ? 'Sign in to access your SACCO account.'
     : screen === 'register' ? 'Use the same details already saved on your active member record.'
       : screen === 'bootstrap' ? 'This private setup is available only while no Chairman exists.'
         : screen === 'totp' ? 'This extra step is enabled by your SACCO administrator.'
           : screen === 'reset-request' ? 'Contact the Chairman or SACCO Administrator directly; the system also sends them a reset notification.'
-            : screen === 'force-change' ? 'Replace the temporary password before continuing.'
+            : screen === 'chairman-recovery' ? 'This exceptional request is sent only to the Secretary for identity verification.'
+              : screen === 'force-change' ? 'Replace the temporary password before continuing.'
             : 'Choose the option that matches your account.';
 
   return (
@@ -179,6 +185,7 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
                 <div className="mt-7 space-y-4 text-sm leading-6 text-slate-600">
                   <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-4"><p className="font-bold text-slate-800">New member</p><p>Your name, phone, and email must match one active member record. Then choose your password and sign in.</p></div>
                   <div className="rounded-2xl border border-slate-200 p-4"><p className="font-bold text-slate-800">Officer</p><p>The Chairman creates your account. Use the work email or phone and password they give you on the same login screen.</p></div>
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4"><p className="font-bold text-slate-800">Chairman account recovery</p><p>If the Chairman cannot sign in, submit a Chairman recovery request. It is sent only to the Secretary, who must verify the Chairman’s identity before issuing a temporary recovery password.</p><button type="button" onClick={() => chooseScreen('chairman-recovery')} className="mt-2 font-bold text-amber-800 underline underline-offset-2">Request Chairman recovery</button></div>
                   <div className="rounded-2xl border border-slate-200 p-4"><p className="font-bold text-slate-800">Documentation and technical help</p><p className="mt-1">Read the <a href="/documentation" className="font-bold text-emerald-700 underline underline-offset-2">SACCO user guide</a> or contact the Technical Department at <a href="mailto:emryspaul7@gmail.com" className="font-bold text-emerald-700 underline underline-offset-2">emryspaul7@gmail.com</a> / <a href="tel:+254759670456" className="font-bold text-emerald-700 underline underline-offset-2">0759670456</a>.</p></div>
                 </div>
               )}
@@ -192,9 +199,18 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
                 </form>
               )}
 
+              {screen === 'chairman-recovery' && (
+                <form className="mt-7 space-y-4" onSubmit={handleSubmit}>
+                  <div><label className="mb-2 block text-xs font-bold text-slate-600">Chairman’s registered phone or email</label><input value={identifier} onChange={event => setIdentifier(event.target.value)} autoComplete="username" className={inputClass} required /></div>
+                  <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-900">For security, the result is the same whether or not an account is found. Contact the Secretary directly and complete the SACCO’s identity-verification process. The Secretary can reset only a pending Chairman recovery request.</p>
+                  {error && <p className="rounded-xl bg-rose-50 px-3 py-2.5 text-xs text-rose-700">{error}</p>}{notice && <p className="rounded-xl bg-emerald-50 px-3 py-2.5 text-xs text-emerald-700">{notice}</p>}
+                  <button type="submit" disabled={isSubmitting} className="w-full rounded-2xl bg-amber-700 px-4 py-3.5 text-sm font-bold text-white disabled:opacity-60">Notify Secretary</button>
+                </form>
+              )}
+
               {screen === 'force-change' && <form className="mt-7 space-y-4" onSubmit={handleSubmit}><div><label className="mb-2 block text-xs font-bold text-slate-600">New private password</label><input type="password" value={password} onChange={event => setPassword(event.target.value)} autoComplete="new-password" minLength={8} className={inputClass} required /></div><div><label className="mb-2 block text-xs font-bold text-slate-600">Confirm new password</label><input type="password" value={confirmPassword} onChange={event => setConfirmPassword(event.target.value)} autoComplete="new-password" minLength={8} className={inputClass} required /></div><p className="text-xs leading-5 text-slate-500">Your temporary password is only for first access. Choose a private password before the application opens.</p>{error && <p className="rounded-xl bg-rose-50 px-3 py-2.5 text-xs text-rose-700">{error}</p>}<button type="submit" disabled={isSubmitting} className="w-full rounded-2xl bg-emerald-600 px-4 py-3.5 text-sm font-bold text-white">Change password and continue</button></form>}
 
-              {!['help', 'reset-request', 'force-change'].includes(screen) && (
+              {!['help', 'reset-request', 'chairman-recovery', 'force-change'].includes(screen) && (
                 <form className="mt-7 space-y-4" onSubmit={handleSubmit}>
                   {(screen === 'register' || screen === 'bootstrap') && <div><label className="mb-2 block text-xs font-bold text-slate-600">Full name</label><input value={fullName} onChange={event => setFullName(sanitizePersonName(event.target.value))} autoComplete="name" className={inputClass} required /></div>}
                   {screen === 'login' && <div><label className="mb-2 block text-xs font-bold text-slate-600">Phone or email</label><input value={identifier} onChange={event => setIdentifier(event.target.value)} autoComplete="username" className={inputClass} required /></div>}
@@ -209,7 +225,7 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
                 </form>
               )}
 
-              {screen === 'login' && <div className="mt-5 flex items-center justify-between text-xs"><button type="button" onClick={() => chooseScreen('reset-request')} className="font-semibold text-slate-500">Request password reset</button><button type="button" onClick={() => chooseScreen('register')} className="font-semibold text-emerald-700">Create account</button></div>}
+              {screen === 'login' && <div className="mt-5 flex flex-wrap items-center justify-between gap-3 text-xs"><button type="button" onClick={() => chooseScreen('reset-request')} className="font-semibold text-slate-500">Request password reset</button><button type="button" onClick={() => chooseScreen('chairman-recovery')} className="font-semibold text-amber-700">Chairman recovery</button><button type="button" onClick={() => chooseScreen('register')} className="font-semibold text-emerald-700">Create account</button></div>}
               {screen === 'register' && <p className="mt-5 text-center text-xs text-slate-500">Already have an account? <button type="button" onClick={() => chooseScreen('login')} className="font-bold text-emerald-700">Log in</button></p>}
             </section>
           )}

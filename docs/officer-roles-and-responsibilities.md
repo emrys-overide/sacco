@@ -7,7 +7,7 @@ for every officer; officers must not share passwords.
 | Role | Main responsibility | Can do | Cannot do |
 | --- | --- | --- | --- |
 | Chairman | Governance and final accountability | Create and reset officer accounts; register members and vehicles; post and correct ledger entries; manage loan policy; record a loan for a member; finally approve or reject loans; close a completed accounting month; view and reconcile bank events; access reports. | Delegate the final loan approval or month close to another role. |
-| Secretary | Member records and eligibility | Register and update members and vehicles; assign drivers; view ledger, banking, and reports; perform the first loan eligibility review and either pass it to the Treasurer or reject it with a reason. | Post daily collections or expenses; reconcile payments; create accounts; set loan policy; approve/disburse a loan; close a month. |
+| Secretary | Member records and eligibility | Register and update members and vehicles; assign drivers; view ledger, banking, and reports; perform the first loan eligibility review and either pass it to the Treasurer or reject it with a reason. In the exceptional case of a pending Chairman recovery request, verify the Chairman and issue that Chairman's temporary recovery password. | Post daily collections or expenses; reconcile payments; create accounts; reset member or other officer accounts; set loan policy; approve/disburse a loan; close a month. |
 | Treasurer | Financial review | View members, fleet, ledger, payments, banking, and reports; post ledger entries and expenses; reconcile payments; perform the second loan financial review; record authorised loan repayments. | Register members; manage accounts; make the Chairman's final loan decision; close a month. |
 | Accountant | Day-to-day accounting | View members and fleet; post/correct/reverse ledger entries and expenses; reconcile payments; view and export reports; record authorised loan repayments. | Register members; manage accounts; complete a loan review or final approval; close a month. |
 | Auditor | Independent read-only oversight | View users, members, vehicles, ledger, banking/payment records, loans, system status, and reports. | Create, edit, reverse, approve, reconcile, reset passwords, or close a month. |
@@ -24,6 +24,14 @@ Every rejection must include a clear reason. The member sees that reason in
 their portal and can correct the issue and submit a new application. The due
 date is calculated only when the Chairman approves the loan, from the selected
 repayment period.
+
+## Chairman recovery exception
+
+The Secretary's recovery authority is limited to a public recovery request
+that matches an active Chairman account. It is not a general password-reset
+right. The Secretary must verify identity before issuing the 24-hour temporary
+password; the action is audit-logged and the Chairman must create a new private
+password at first sign-in.
 
 ## Maximum principal
 

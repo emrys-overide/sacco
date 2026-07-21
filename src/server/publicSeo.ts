@@ -195,6 +195,7 @@ export function buildDocumentationPage(publicSiteUrl: string | null) {
 
       <h2>Passwords and account access</h2>
       <p>If you forget your password, select <strong>Request password reset</strong> on the sign-in screen, then contact the Chairman or SACCO Administrator directly. The system sends them an in-app notification for a valid request. After identity verification, sign in with the temporary password and immediately choose a private replacement password.</p>
+      <p>If the Chairman cannot sign in, select <strong>Chairman recovery</strong>. A valid request is delivered only to the Secretary, who must verify the Chairman's identity before issuing a 24-hour temporary recovery password.</p>
       <p class="note">Do not send passwords, one-time codes, bank details, or a full ID number to anyone by email, SMS, or WhatsApp. The Technical Department will not ask for your password.</p>
 
       <h2>Notifications and records</h2>

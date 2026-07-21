@@ -152,7 +152,8 @@ test('red-team checks deny token forgery, privilege escalation, and cross-member
     request('/api/transactions', { method: 'POST', token: memberAToken, body: { description: 'Injected ledger record', refCode: 'INJECTED-1', type: 'Credit', category: 'Daily Contribution', amount: 1, tillNumber: 'VehicleTill' } }),
     request('/api/coop-bank/events', { token: memberAToken }),
     request('/api/developer-errors?status=all', { token: memberAToken }),
-    request('/api/password-reset-requests', { token: memberAToken })
+    request('/api/password-reset-requests', { token: memberAToken }),
+    request('/api/chairman-recovery-requests', { token: memberAToken })
   ]);
   assert.ok(escalationAttempts.every(result => result.status === 403));
 

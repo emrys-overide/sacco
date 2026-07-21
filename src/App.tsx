@@ -21,6 +21,7 @@ const ExpensesView = lazy(() => import('./components/ExpensesView'));
 const CoopBankView = lazy(() => import('./components/CoopBankView'));
 const MemberPortal = lazy(() => import('./components/MemberPortal'));
 const OfficerAccountsView = lazy(() => import('./components/OfficerAccountsView'));
+const ChairmanRecoveryView = lazy(() => import('./components/ChairmanRecoveryView'));
 const LoansView = lazy(() => import('./components/LoansView'));
 const RoleGuideView = lazy(() => import('./components/RoleGuideView'));
 const MonthEndCloseView = lazy(() => import('./components/MonthEndCloseView'));
@@ -513,6 +514,10 @@ export default function App() {
         return currentUser.role === 'Chairman'
           ? <OfficerAccountsView fallbackAuthToken={authToken} />
           : <div className="flex-1 p-8 text-sm text-slate-600">Only the Chairman can manage account access.</div>;
+      case 'Chairman Recovery':
+        return currentUser.role === 'Secretary'
+          ? <ChairmanRecoveryView token={authToken} />
+          : <div className="flex-1 p-8 text-sm text-slate-600">Only the Secretary can manage Chairman recovery.</div>;
       default:
         return <div className="p-8">View not found</div>;
     }

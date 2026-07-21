@@ -33,5 +33,6 @@ test('creates a non-indexed user guide with the Technical Department contact', (
   assert.match(page, /href="https:\/\/sowetamu\.example\/documentation"/);
   assert.match(page, /mailto:emryspaul7@gmail\.com/);
   assert.match(page, /0759670456/);
+  assert.match(page, /Chairman recovery/);
   assert.doesNotMatch(page, /database_url|jwt_secret|account number/i);
 });

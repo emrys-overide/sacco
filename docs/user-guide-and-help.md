@@ -28,6 +28,14 @@ for a valid request. After they verify the member's identity, they supply a
 temporary password. The member must use that password only to sign in and
 immediately create a new private password.
 
+## Chairman recovery
+
+If the Chairman cannot sign in, choose **Chairman recovery** on the sign-in
+screen and contact the Secretary directly. The request is private and is sent
+only to active Secretary accounts. After the Secretary completes the SACCO's
+identity-verification process, they can issue a 24-hour temporary recovery
+password. This exceptional authority cannot reset any other account.
+
 ## Notifications
 
 The bell delivers workflow notifications while the application is online. An

@@ -22,8 +22,9 @@ boundary.
   fifteen minutes.
 - Server-side role permissions and member ownership checks; menus are not used
   as the security control.
-- Chairman-only password reset approval and forced replacement of temporary
-  passwords.
+- Chairman-only member/officer password reset approval, plus a narrowly scoped
+  Secretary-only Chairman-recovery approval; both force replacement of
+  temporary passwords and are audit-logged.
 - Optional authenticator-app verification for officers.
 - Parameterized PostgreSQL queries, input validation, request-body size limit,
   malformed JSON handling, security headers, anti-framing, and no-store API
@@ -78,8 +79,10 @@ penetration-test certification.
    This network restriction is not currently built into the application.
 5. Keep the active member register accurate. Current self-registration matches
    name, phone, and email against that register; it is not a replacement for
-   in-person identity verification. Use the Chairman reset process for account
-   recovery and review suspicious registrations.
+   in-person identity verification. Use the Chairman reset process for member
+   account recovery and review suspicious registrations. Agree and document the
+   Secretary's in-person identity-verification process for the exceptional
+   Chairman recovery flow.
 6. Follow the backup and restore routine in
    [Free-tier operations](./free-tier-operations.md), and keep Co-op Bank IPN
    disabled while using a sleeping free web service.

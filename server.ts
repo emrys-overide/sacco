@@ -127,6 +127,7 @@ const initialTransactions: Transaction[] = [];
 const localLoginRateLimits = new Map<string, { attempts: number; windowStartedAt: number; lockedUntil?: number }>();
 const localClientErrorReportLimits = new Map<string, { count: number; windowStartedAt: number }>();
 const localPasswordResetRequests: Array<{ id: string; userId: string; status: 'Pending' | 'Completed' | 'Cancelled'; createdAt: string; reviewedAt?: string; reviewedBy?: string }> = [];
+const localChairmanRecoveryRequests: Array<{ id: string; userId: string; status: 'Pending' | 'Completed' | 'Cancelled'; requestedIp?: string; createdAt: string; reviewedAt?: string; reviewedBy?: string }> = [];
 const localAppNotifications: Array<{ id: string; recipientUserId: string; category: string; title: string; message: string; destination?: string; createdAt: string; readAt?: string }> = [];
 const liveNotificationStreams = new Map<string, Set<express.Response>>();
 const localApplicationErrorLogs: Array<{
@@ -1287,7 +1288,8 @@ async function verifyOfficerTotpChallenge(challengeIdValue: unknown, codeValue: 
     const result = await client.query(
       `SELECT c.id AS challenge_id, c.purpose, c.expires_at, c.attempt_count, c.max_attempts, c.used_at,
               u.id, u.full_name, u.email, u.phone, u.role, u.is_active, u.account_status,
-              u.linked_member_id, u.totp_secret_ciphertext, u.totp_enabled_at
+              u.linked_member_id, u.totp_secret_ciphertext, u.totp_enabled_at,
+              u.must_change_password, u.temporary_password_expires_at
        FROM auth_mfa_challenges c
        JOIN users u ON u.id = c.user_id
        WHERE c.id = $1
@@ -1928,6 +1930,12 @@ function genericChairmanResetResponse() {
   };
 }
 
+function genericChairmanRecoveryResponse() {
+  return {
+    message: 'If the submitted details match an active Chairman account, the Secretary will receive the recovery request. Contact the Secretary directly to confirm your identity.'
+  };
+}
+
 async function requestMemberActivation(identifierValue: unknown, requestIp?: string): Promise<{ requestId: string; message: string }> {
   const requestId = crypto.randomUUID();
   if (!postgresPool) return genericMemberOtpResponse(requestId);
@@ -2113,6 +2121,63 @@ async function requestChairmanPasswordReset(identifierValue: unknown, requestIp?
   return { ...response, created: false };
 }
 
+/**
+ * A narrow break-glass path: the public response is privacy-safe, only an
+ * active Chairman can create the request, and only a Secretary can resolve it.
+ */
+async function requestChairmanAccountRecovery(identifierValue: unknown, requestIp?: string): Promise<{ message: string; created: boolean }> {
+  const response = genericChairmanRecoveryResponse();
+  const identifier = String(identifierValue || '').trim();
+  const phone = normalizedPhone(identifier);
+  const email = normalizedEmail(identifier);
+  if (!identifier || (!phone && !email.includes('@'))) return { ...response, created: false };
+
+  try {
+    if (postgresPool) {
+      const candidate = await postgresPool.query(
+        `SELECT id FROM users
+         WHERE role = 'Chairman' AND is_active = TRUE AND account_status = 'Active'
+           AND (($1 <> '' AND regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = $1)
+             OR ($2 LIKE '%@%' AND lower(COALESCE(email, '')) = $2))
+         LIMIT 1`,
+        [phone, email]
+      );
+      if (!candidate.rowCount) return { ...response, created: false };
+      const userId = String(candidate.rows[0].id);
+      const recent = await postgresPool.query(
+        `SELECT COUNT(*)::int AS count FROM chairman_recovery_requests
+         WHERE created_at > now() - interval '15 minutes'
+           AND (user_id = $1 OR ($2 <> '' AND requested_ip = $2))`,
+        [userId, requestIp || '']
+      );
+      if (Number(recent.rows[0]?.count || 0) >= 3) return { ...response, created: false };
+      const inserted = await postgresPool.query(
+        `INSERT INTO chairman_recovery_requests (user_id, requested_ip)
+         VALUES ($1, NULLIF($2, ''))
+         ON CONFLICT DO NOTHING
+         RETURNING id`,
+        [userId, requestIp || '']
+      );
+      return { ...response, created: Boolean(inserted.rowCount) };
+    }
+
+    const user = localStore.users.find(item => item.role === 'Chairman' && item.isActive !== false && item.accountStatus === 'Active' && (
+      (phone && normalizedPhone(item.phone) === phone) || (email.includes('@') && normalizedEmail(item.email) === email)
+    ));
+    const cutoff = Date.now() - 15 * 60_000;
+    const recent = user ? localChairmanRecoveryRequests.filter(request => new Date(request.createdAt).getTime() > cutoff && (
+      request.userId === user.id || (Boolean(requestIp) && request.requestedIp === requestIp)
+    )).length : 0;
+    if (user && recent < 3 && !localChairmanRecoveryRequests.some(request => request.userId === user.id && request.status === 'Pending')) {
+      localChairmanRecoveryRequests.unshift({ id: crypto.randomUUID(), userId: user.id, status: 'Pending', requestedIp: requestIp || undefined, createdAt: new Date().toISOString() });
+      return { ...response, created: true };
+    }
+  } catch {
+    // Keep this public response identical whether or not a Chairman exists.
+  }
+  return { ...response, created: false };
+}
+
 // Verify the selected persistence adapter before accepting requests.
 async function seedDatabaseIfEmpty() {
   if (postgresPool) {
@@ -2249,7 +2314,7 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       (req as any).authContext = { provider: 'password-totp', userId: user.id };
       await recordAuditLog(req, 'USER_LOGIN_TOTP', 'users', user.id, undefined, { role: user.role });
       const signed = signJwt(user);
-      res.json({ user: publicUser(user), token: signed.token, expiresAt: signed.expiresAt, tokenType: 'Bearer', authProvider: 'password-totp' });
+      res.json({ user: publicUser(user), token: signed.token, expiresAt: signed.expiresAt, tokenType: 'Bearer', authProvider: 'password-totp', passwordChangeRequired: user.mustChangePassword === true });
     } catch (error: any) {
       sendApiError(res, error);
     }
@@ -2281,6 +2346,23 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
           title: 'Member password reset needs Chairman review',
           message: 'A member has requested a password reset and has been told to contact the SACCO Administrator. Verify their identity and issue a temporary password from Account Access.',
           destination: 'Account Access'
+        });
+      }
+      res.json({ message: result.message });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.post('/api/auth/chairman-recovery-request', async (req, res) => {
+    try {
+      const result = await requestChairmanAccountRecovery(req.body?.identifier, req.ip);
+      if (result.created) {
+        await notifyRole('Secretary', {
+          category: 'CHAIRMAN_RECOVERY_REQUEST',
+          title: 'Chairman recovery needs Secretary review',
+          message: 'A Chairman recovery request is pending. Verify their identity, then issue a temporary recovery password from Chairman Recovery.',
+          destination: 'Chairman Recovery'
         });
       }
       res.json({ message: result.message });
@@ -2442,6 +2524,7 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
   app.use('/api/monthly-closings', authenticateSaccoUser);
   app.use('/api/developer-errors', authenticateSaccoUser);
   app.use('/api/password-reset-requests', authenticateSaccoUser);
+  app.use('/api/chairman-recovery-requests', authenticateSaccoUser);
   app.use('/api/notifications', authenticateSaccoUser);
 
   app.get('/api/developer-errors/access', (req, res) => {
@@ -2479,6 +2562,134 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
           phone: user?.phone || ''
         };
       }));
+    } catch (error: any) {
+      return sendApiError(res, error);
+    }
+  });
+
+  app.get('/api/chairman-recovery-requests', async (req, res) => {
+    try {
+      if (requireAuthenticatedUser(req).role !== 'Secretary') {
+        throw new HttpError(403, 'Only the Secretary can review Chairman recovery requests.', 'CHAIRMAN_RECOVERY_SECRETARY_ONLY');
+      }
+      if (postgresPool) {
+        const result = await postgresPool.query(
+          `SELECT r.id, r.user_id, r.status, r.created_at, u.full_name, u.email, u.phone
+           FROM chairman_recovery_requests r
+           JOIN users u ON u.id = r.user_id
+           WHERE r.status = 'Pending' AND u.role = 'Chairman'
+           ORDER BY r.created_at ASC`
+        );
+        return res.json(result.rows);
+      }
+      const users = new Map(localStore.users.map(user => [user.id, user]));
+      return res.json(localChairmanRecoveryRequests
+        .filter(request => request.status === 'Pending' && users.get(request.userId)?.role === 'Chairman')
+        .map(request => {
+          const user = users.get(request.userId);
+          return {
+            id: request.id,
+            user_id: request.userId,
+            status: request.status,
+            created_at: request.createdAt,
+            full_name: user?.name || 'Chairman',
+            email: user?.email || '',
+            phone: user?.phone || ''
+          };
+        }));
+    } catch (error: any) {
+      return sendApiError(res, error);
+    }
+  });
+
+  app.post('/api/chairman-recovery-requests/:id/approve', async (req, res) => {
+    try {
+      const secretary = requireAuthenticatedUser(req);
+      if (secretary.role !== 'Secretary') {
+        throw new HttpError(403, 'Only the Secretary can approve Chairman recovery.', 'CHAIRMAN_RECOVERY_SECRETARY_ONLY');
+      }
+      const recoveryRequestId = String(req.params.id || '').trim();
+      const password = String(req.body?.password || '');
+      if (!recoveryRequestId.match(/^[0-9a-f-]{36}$/i)) {
+        throw new HttpError(400, 'The Chairman recovery request is invalid.', 'CHAIRMAN_RECOVERY_REQUEST_INVALID');
+      }
+      if (password.length < 8) {
+        throw new HttpError(400, 'Choose a temporary recovery password of at least 8 characters.', 'PASSWORD_INVALID');
+      }
+
+      let updated: AuthorizedUser | undefined;
+      if (postgresPool) {
+        const client = await postgresPool.connect();
+        let committed = false;
+        try {
+          await client.query('BEGIN');
+          const request = await client.query(
+            `SELECT r.id, r.user_id
+             FROM chairman_recovery_requests r
+             JOIN users u ON u.id = r.user_id
+             WHERE r.id = $1 AND r.status = 'Pending' AND u.role = 'Chairman'
+               AND u.is_active = TRUE AND u.account_status = 'Active'
+             FOR UPDATE`,
+            [recoveryRequestId]
+          );
+          if (!request.rowCount) {
+            throw new HttpError(409, 'This Chairman recovery request is no longer pending.', 'CHAIRMAN_RECOVERY_REQUEST_NOT_PENDING');
+          }
+          const userId = String(request.rows[0].user_id);
+          const result = await client.query(
+            `UPDATE users SET password_hash = crypt($1, gen_salt('bf')),
+               totp_secret_ciphertext = CASE WHEN $2 THEN NULL ELSE totp_secret_ciphertext END,
+               totp_enabled_at = CASE WHEN $2 THEN NULL ELSE totp_enabled_at END,
+               must_change_password = TRUE,
+               temporary_password_expires_at = now() + interval '24 hours',
+               updated_at = now()
+             WHERE id = $3 AND role = 'Chairman' AND is_active = TRUE
+             RETURNING id, full_name, email, phone, role, is_active, account_status, linked_member_id`,
+            [password, process.env.OFFICER_TOTP_REQUIRED !== 'true', userId]
+          );
+          if (!result.rowCount) throw new HttpError(404, 'Chairman account was not found.', 'CHAIRMAN_RECOVERY_ACCOUNT_NOT_FOUND');
+          await client.query(
+            `UPDATE chairman_recovery_requests
+             SET status = 'Completed', reviewed_at = now(), reviewed_by = $2
+             WHERE id = $1`,
+            [recoveryRequestId, secretary.id]
+          );
+          await client.query('COMMIT');
+          committed = true;
+          updated = mapDbUser(result.rows[0]);
+        } catch (error) {
+          if (!committed) await client.query('ROLLBACK');
+          throw error;
+        } finally {
+          client.release();
+        }
+      } else {
+        const request = localChairmanRecoveryRequests.find(item => item.id === recoveryRequestId && item.status === 'Pending');
+        const chairman = request && localStore.users.find(user => user.id === request.userId && user.role === 'Chairman' && user.isActive !== false && user.accountStatus === 'Active');
+        if (!request || !chairman) {
+          throw new HttpError(409, 'This Chairman recovery request is no longer pending.', 'CHAIRMAN_RECOVERY_REQUEST_NOT_PENDING');
+        }
+        chairman.devPassword = password;
+        chairman.mustChangePassword = true;
+        chairman.temporaryPasswordExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+        if (process.env.OFFICER_TOTP_REQUIRED !== 'true') {
+          chairman.totpSecret = undefined;
+          chairman.totpEnabledAt = undefined;
+        }
+        request.status = 'Completed';
+        request.reviewedAt = new Date().toISOString();
+        request.reviewedBy = secretary.id;
+        updated = chairman;
+      }
+
+      await recordAuditLog(req, 'CHAIRMAN_RECOVERY_APPROVED_BY_SECRETARY', 'users', updated.id, undefined, { recoveryRequestId });
+      await notifyUser(updated.id, {
+        category: 'CHAIRMAN_RECOVERY_APPROVED',
+        title: 'Chairman recovery was approved',
+        message: 'The Secretary issued a temporary recovery password. Sign in and immediately create a new private password.',
+        destination: 'Dashboard'
+      });
+      res.json({ recoveryApproved: true });
     } catch (error: any) {
       return sendApiError(res, error);
     }

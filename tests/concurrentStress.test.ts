@@ -79,6 +79,17 @@ test('keeps concurrent member workflows consistent and rejects security abuse', 
   assert.equal(bootstrap.status, 201, logs);
   const chairmanToken = bootstrap.data.token as string;
 
+  const secretary = await request('/api/users', {
+    method: 'POST', token: chairmanToken,
+    body: { fullName: 'Stress Test Secretary', email: 'secretary.stress@example.com', phone: '0700000005', role: 'Secretary', password: 'secretary-stress-password' }
+  });
+  assert.equal(secretary.status, 201, JSON.stringify(secretary.data));
+  const secretaryLogin = await request('/api/auth/login', {
+    method: 'POST', body: { identifier: 'secretary.stress@example.com', password: 'secretary-stress-password' }
+  });
+  assert.equal(secretaryLogin.status, 200, JSON.stringify(secretaryLogin.data));
+  const secretaryToken = secretaryLogin.data.token as string;
+
   const member = await request('/api/members', {
     method: 'POST', token: chairmanToken,
     body: { id: 'member-stress-one', name: 'Stress Member', idNumber: '55556666', email: 'member.stress@example.com', phoneNumber: '0711000000', status: 'Active' }
@@ -125,6 +136,21 @@ test('keeps concurrent member workflows consistent and rejects security abuse', 
   const chairmanNotifications = await request('/api/notifications', { token: chairmanToken });
   assert.equal(chairmanNotifications.status, 200);
   assert.equal(chairmanNotifications.data.items.filter((item: any) => item.category === 'PASSWORD_RESET_REQUEST').length, 1);
+
+  // Chairman recovery uses the same bounded public-request protection, but its
+  // one durable request and notification belong only to the Secretary.
+  const recoveryBurst = await Promise.all(Array.from({ length: 30 }, () => request('/api/auth/chairman-recovery-request', {
+    method: 'POST', body: { identifier: 'chair.stress@example.com' }
+  })));
+  assert.ok(recoveryBurst.every(result => result.status === 200));
+  assert.equal(new Set(recoveryBurst.map(result => result.data.message)).size, 1);
+  const pendingRecoveries = await request('/api/chairman-recovery-requests', { token: secretaryToken });
+  assert.equal(pendingRecoveries.status, 200);
+  assert.equal(pendingRecoveries.data.length, 1);
+  const secretaryNotifications = await request('/api/notifications', { token: secretaryToken });
+  assert.equal(secretaryNotifications.status, 200);
+  assert.equal(secretaryNotifications.data.items.filter((item: any) => item.category === 'CHAIRMAN_RECOVERY_REQUEST').length, 1);
+  assert.equal((await request('/api/chairman-recovery-requests', { token: chairmanToken })).status, 403);
 
   // Parallel authorization and malformed-token attempts must never become a
   // successful privileged request or expose a server error.

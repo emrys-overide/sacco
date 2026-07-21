@@ -21,7 +21,8 @@ import {
   BookOpenCheck,
   CircleHelp,
   CalendarClock,
-  Bug
+  Bug,
+  KeyRound
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -67,7 +68,7 @@ export default function Sidebar({
   ];
   const officerMenus: Record<Exclude<User['role'], 'Member'>, Array<{ name: string; icon: React.ReactNode }>> = {
     Chairman: [...administratorMenuItems, { name: 'Month-end Close', icon: <CalendarClock className="w-4 h-4" /> }, { name: 'Account Access', icon: <UserRoundPlus className="w-4 h-4" /> }],
-    Secretary: administratorMenuItems.filter(item => !['Daily Collections', 'Expenses'].includes(item.name)),
+    Secretary: [...administratorMenuItems.filter(item => !['Daily Collections', 'Expenses'].includes(item.name)), { name: 'Chairman Recovery', icon: <KeyRound className="w-4 h-4" /> }],
     Treasurer: administratorMenuItems,
     Accountant: administratorMenuItems,
     Auditor: administratorMenuItems.filter(item => !['Daily Collections', 'Expenses'].includes(item.name))

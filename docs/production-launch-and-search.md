@@ -28,13 +28,13 @@ site appear more complete in search.
    variables false. Password resets are Chairman-confirmed in the app; SMTP is
    not part of this recovery flow.
 3. **Use a separate production database.** Apply all migrations through
-   `022`, verify `npm run db:status`, and follow the backup-and-restore routine
+   `023`, verify `npm run db:status`, and follow the backup-and-restore routine
    in [Free-tier operations](./free-tier-operations.md). Do not use test data
    or seed records as live SACCO data.
 4. **Test the deployed URL.** Check `/api/health`, sign in as each role, create
-   a non-sensitive test member, test a Chairman-confirmed password reset, and
-   repeat the UAT list. Delete or deactivate test accounts through normal SACCO
-   controls when done.
+   a non-sensitive test member, test a Chairman-confirmed password reset and a
+   Secretary-confirmed Chairman recovery request, then repeat the UAT list.
+   Delete or deactivate test accounts through normal SACCO controls when done.
 5. **Keep Co-op Bank IPN disabled until bank onboarding is complete and the
    application is always on.** A bank
    callback requires the SACCO's approved account numbers, final credentials,

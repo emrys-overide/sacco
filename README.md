@@ -15,6 +15,12 @@ The first-Chairman setup link appears only while no administrator exists. After 
 
 The Chairman creates officer accounts and resets member/officer passwords from **Account Access**. Optional officer TOTP can be enabled later with `OFFICER_TOTP_REQUIRED=true`; it is off by default.
 
+If the Chairman cannot sign in, they can submit **Chairman recovery** from the
+sign-in screen. Only an active Secretary receives that request and can issue a
+24-hour temporary recovery password after identity verification. This is a
+single exceptional permission, not general Secretary account management. See
+[the recovery procedure](docs/chairman-recovery.md).
+
 Members request a password reset using their registered phone number or email. The request appears only in the Chairman’s **Account Access** page, where the Chairman verifies the member and issues a 24-hour temporary password. The member must replace it before the account can use functional APIs; no recovery email or code is sent.
 
 The bell icon provides private in-app workflow reminders. Password reset requests notify every active Chairman, and loan review/decision steps notify the next responsible officer or the affected member. See [in-app notification details](docs/in-app-notifications.md).
@@ -39,6 +45,9 @@ The backend callback is `POST /api/integrations/coop/ipn`. Configure it using th
 - `npm test`
 - `npm run build`
 - `git diff --check`
+
+For tomorrow's handover or assessment, use the
+[submission readiness checklist](docs/submission-readiness-checklist.md).
 
 Production requests fail closed when persistent storage is unavailable. Raw bank payloads and integration credentials remain server-side. Posted PostgreSQL ledger entries are corrected through reversals rather than mutation.
 

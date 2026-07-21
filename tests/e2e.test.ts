@@ -549,5 +549,58 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
     });
     assert.equal(updatedMemberLogin.passwordChangeRequired, false);
     await request('/api/member-portal', 200, { token: updatedMemberLogin.token });
+
+    // A locked-out Chairman has a separate break-glass path. The public
+    // request is privacy-safe, reaches only the Secretary, and does not give
+    // the Secretary general account-reset authority.
+    const secretaryStreamController = new AbortController();
+    const secretaryStream = await fetch(`${baseUrl}/api/notifications/stream`, {
+      headers: { Authorization: `Bearer ${secretaryLogin.token}` },
+      signal: secretaryStreamController.signal
+    });
+    assert.equal(secretaryStream.status, 200);
+    assert.ok(secretaryStream.body);
+    const secretaryStreamReader = secretaryStream.body.getReader();
+    const secretaryRecoveryNotification = waitForLiveNotification(secretaryStreamReader);
+    const recoveryRequest = await request<{ message: string }>('/api/auth/chairman-recovery-request', 200, {
+      method: 'POST',
+      body: { identifier: 'chairman.e2e@example.com' }
+    });
+    const unknownRecoveryRequest = await request<{ message: string }>('/api/auth/chairman-recovery-request', 200, {
+      method: 'POST',
+      body: { identifier: 'not-chairman@example.com' }
+    });
+    assert.equal(recoveryRequest.message, unknownRecoveryRequest.message);
+    assert.match(recoveryRequest.message, /Secretary will receive the recovery request/i);
+    const secretaryDelivered = await secretaryRecoveryNotification;
+    assert.equal(secretaryDelivered.category, 'CHAIRMAN_RECOVERY_REQUEST');
+    assert.equal(secretaryDelivered.destination, 'Chairman Recovery');
+    secretaryStreamController.abort();
+    await secretaryStreamReader.cancel().catch(() => undefined);
+
+    await request('/api/chairman-recovery-requests', 403, { token: loginToken });
+    await request('/api/chairman-recovery-requests', 403, { token: updatedMemberLogin.token });
+    const recoveryRequests = await request<Array<{ id: string; user_id: string }>>('/api/chairman-recovery-requests', 200, { token: secretaryLogin.token });
+    const pendingChairmanRecovery = recoveryRequests.find(recovery => recovery.user_id === bootstrap.user.id);
+    assert.ok(pendingChairmanRecovery);
+    await request(`/api/chairman-recovery-requests/${pendingChairmanRecovery.id}/approve`, 403, {
+      method: 'POST', token: loginToken, body: { password: 'chairman-recovery-password' }
+    });
+    await request(`/api/chairman-recovery-requests/${pendingChairmanRecovery.id}/approve`, 200, {
+      method: 'POST', token: secretaryLogin.token, body: { password: 'chairman-recovery-password' }
+    });
+    const chairmanRecoveryLogin = await request('/api/auth/login', 200, {
+      method: 'POST', body: { identifier: 'chairman.e2e@example.com', password: 'chairman-recovery-password' }
+    });
+    assert.equal(chairmanRecoveryLogin.passwordChangeRequired, true);
+    await request('/api/members', 403, { token: chairmanRecoveryLogin.token });
+    const chairmanChangedPassword = await request('/api/auth/change-temporary-password', 200, {
+      method: 'POST', token: chairmanRecoveryLogin.token, body: { password: 'chairman-new-private-password' }
+    });
+    assert.equal(chairmanChangedPassword.passwordUpdated, true);
+    const restoredChairmanLogin = await request('/api/auth/login', 200, {
+      method: 'POST', body: { identifier: 'chairman.e2e@example.com', password: 'chairman-new-private-password' }
+    });
+    assert.equal(restoredChairmanLogin.passwordChangeRequired, false);
   }
 });
