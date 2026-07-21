@@ -7,6 +7,11 @@ security configuration.
 
 ## Getting started
 
+- **First Chairman:** while the SACCO has no Chairman, select **Set up the
+  first Chairman** on the welcome screen. At the first Chairman sign-in, the
+  application opens a five-step handover guide covering the blueprint, officer
+  accounts, members, fleet records, and daily collections. It can be skipped,
+  resumed, or reopened from the Dashboard while the member registry is empty.
 - **Members:** create an account only with the name, phone number, and email
   already recorded on your active SACCO member record. Then sign in using the
   registered phone number or email and your password.

@@ -429,6 +429,7 @@ export default function App() {
             members={members}
             onAddTransaction={handleAddTransaction}
             currentUserRole={currentUser.role}
+            currentUserId={currentUser.id}
             currentUserName={currentUser.name}
             onNavigateToTab={setCurrentTab}
           />

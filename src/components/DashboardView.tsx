@@ -5,6 +5,7 @@ import { PlusCircle, Search, FileDown, ShieldCheck, DollarSign, Activity, AlertC
 import { sanitizeDecimalInput, sanitizePersonName, sanitizeVehiclePlate } from '../lib/inputValidation';
 import { isExpenseTransactionCategory, requiresRegisteredMember } from '../lib/transactionPolicy';
 import { calculateDashboardMetrics, getRecentDailySeries } from '../lib/dashboardMetrics';
+import ChairmanOnboardingTour from './ChairmanOnboardingTour';
 
 interface SparklineProps {
   data: number[];
@@ -189,6 +190,7 @@ interface DashboardViewProps {
   members: Member[];
   onAddTransaction: (newTx: Omit<Transaction, 'id' | 'timestamp' | 'recorderName'>) => void;
   currentUserRole: UserRole;
+  currentUserId: string;
   currentUserName: string;
   onNavigateToTab: (tab: string) => void;
 }
@@ -199,6 +201,7 @@ export default function DashboardView({
   members,
   onAddTransaction,
   currentUserRole,
+  currentUserId,
   currentUserName,
   onNavigateToTab
 }: DashboardViewProps) {
@@ -367,6 +370,13 @@ export default function DashboardView({
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
+          {currentUserRole === 'Chairman' && members.length === 0 && (
+            <ChairmanOnboardingTour
+              currentUserId={currentUserId}
+              isEligible
+              onNavigateToTab={onNavigateToTab}
+            />
+          )}
           {isTreasurer ? (
             <button
               onClick={() => setShowAddModal(true)}
@@ -471,7 +481,7 @@ export default function DashboardView({
               
               <div className="space-y-2">
                 <h3 className="text-xl sm:text-2xl font-black font-display tracking-tight text-white">
-                  Start Testing the Complete Flow
+                  Set up your SACCO records
                 </h3>
                 <p className="text-xs text-blue-100/70 leading-relaxed">
                   Welcome to Sowetamu Sacco. This installation starts with empty registries, fleets, and ledgers. Follow this setup roadmap to build your live SACCO records from scratch:
