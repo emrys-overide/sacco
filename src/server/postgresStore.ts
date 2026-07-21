@@ -731,6 +731,9 @@ export async function listPostgresPaymentsByMember(pool: Pool, memberId: string)
 export async function listPostgresLoansByMember(pool: Pool, memberId: string): Promise<MemberLoanSummary[]> {
   const result = await pool.query(
     `SELECT l.id, l.principal_amount, l.interest_rate, l.issue_date, l.due_date, l.status, l.notes,
+       l.loan_type, l.repayment_period_months, l.repayment_method, l.income_source, l.monthly_income,
+       l.guarantor_details, l.collateral_details,
+       l.rejection_reason, l.rejected_at,
        COALESCE(SUM(lr.amount), 0) AS repaid_amount,
        COALESCE(
          json_agg(
@@ -750,12 +753,22 @@ export async function listPostgresLoansByMember(pool: Pool, memberId: string): P
     id: String(row.id),
     principalAmount: toNumber(row.principal_amount),
     outstandingBalance: Math.max(0, toNumber(row.principal_amount) * (1 + toNumber(row.interest_rate) / 100) - toNumber(row.repaid_amount)),
+    amountPaid: toNumber(row.repaid_amount),
     issueDate: String(row.issue_date).slice(0, 10),
     dueDate: row.due_date ? String(row.due_date).slice(0, 10) : undefined,
     status: row.status,
     interestRate: toNumber(row.interest_rate),
     totalPayable: toNumber(row.principal_amount) * (1 + toNumber(row.interest_rate) / 100),
+    loanType: row.loan_type || undefined,
+    repaymentPeriodMonths: row.repayment_period_months == null ? undefined : Number(row.repayment_period_months),
+    repaymentMethod: row.repayment_method || undefined,
+    incomeSource: row.income_source || undefined,
+    monthlyIncome: row.monthly_income == null ? undefined : toNumber(row.monthly_income),
+    guarantorDetails: row.guarantor_details || undefined,
+    collateralDetails: row.collateral_details || undefined,
     notes: row.notes || undefined,
+    rejectionReason: row.rejection_reason || undefined,
+    rejectedAt: row.rejected_at ? new Date(row.rejected_at).toISOString() : undefined,
     repayments: row.repayments.map((repayment: any) => ({
       id: String(repayment.id),
       repaymentDate: String(repayment.repaymentDate).slice(0, 10),

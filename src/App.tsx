@@ -21,6 +21,8 @@ const CoopBankView = lazy(() => import('./components/CoopBankView'));
 const MemberPortal = lazy(() => import('./components/MemberPortal'));
 const OfficerAccountsView = lazy(() => import('./components/OfficerAccountsView'));
 const LoansView = lazy(() => import('./components/LoansView'));
+const RoleGuideView = lazy(() => import('./components/RoleGuideView'));
+const MonthEndCloseView = lazy(() => import('./components/MonthEndCloseView'));
 
 const MEMBER_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary', 'Treasurer'];
 const VEHICLE_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary'];
@@ -394,6 +396,12 @@ export default function App() {
         );
       case 'Loans':
         return <LoansView role={currentUser.role} token={authToken} members={members} />;
+      case 'Roles & Responsibilities':
+        return <RoleGuideView />;
+      case 'Month-end Close':
+        return currentUser.role === 'Chairman'
+          ? <MonthEndCloseView token={authToken} />
+          : <div className="flex-1 p-8 text-sm text-slate-600">Only the Chairman can close an accounting month.</div>;
       case 'Daily Collections':
         return (
           <DailyCollectionsView

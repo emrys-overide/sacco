@@ -124,6 +124,7 @@ const initialUsers: AuthorizedUser[] = [];
 const initialMembers: Member[] = [];
 const initialVehicles: any[] = [];
 const initialTransactions: Transaction[] = [];
+const localLoginRateLimits = new Map<string, { attempts: number; windowStartedAt: number; lockedUntil?: number }>();
 
 const JWT_ISSUER = 'matatu-sacco-management-system';
 const JWT_AUDIENCE = 'sacco-api';
@@ -443,6 +444,75 @@ async function findSaccoUserById(id: string): Promise<AuthorizedUser | null> {
 
 function normalizedPhone(value: unknown): string {
   return sanitizePhoneNumber(value).replace(/\D/g, '');
+}
+
+const LOAN_TYPES = new Set(['General', 'Emergency', 'Development', 'Education', 'Business', 'Vehicle']);
+const REPAYMENT_METHODS = new Set(['SACCO collection', 'Salary deduction', 'Bank standing order', 'Mobile money', 'Other']);
+
+function requiredRejectionReason(value: unknown): string {
+  const reason = String(value || '').trim().replace(/\s+/g, ' ');
+  if (reason.length < 5) {
+    throw new HttpError(400, 'Give the member a clear rejection reason before rejecting this loan.', 'LOAN_REJECTION_REASON_REQUIRED');
+  }
+  return reason.slice(0, 1000);
+}
+
+function loginAttemptKey(requestIp: string | undefined, identifier: unknown): string {
+  const normalizedIdentifier = String(identifier || '').trim().toLowerCase().slice(0, 200);
+  return crypto.createHash('sha256').update(`${requestIp || 'unknown'}:${normalizedIdentifier}`).digest('hex');
+}
+
+async function assertLoginIsAllowed(attemptKey: string): Promise<void> {
+  const now = Date.now();
+  if (!postgresPool) {
+    const state = localLoginRateLimits.get(attemptKey);
+    if (state?.lockedUntil && state.lockedUntil > now) {
+      throw new HttpError(429, 'Too many sign-in attempts. Wait 15 minutes and try again.', 'LOGIN_RATE_LIMITED');
+    }
+    return;
+  }
+  const result = await postgresPool.query('SELECT locked_until FROM login_rate_limits WHERE attempt_key = $1', [attemptKey]);
+  const lockedUntil = result.rows[0]?.locked_until ? new Date(result.rows[0].locked_until).getTime() : 0;
+  if (lockedUntil > now) {
+    throw new HttpError(429, 'Too many sign-in attempts. Wait 15 minutes and try again.', 'LOGIN_RATE_LIMITED');
+  }
+}
+
+async function recordFailedLogin(attemptKey: string): Promise<void> {
+  const now = Date.now();
+  const windowMs = 15 * 60 * 1000;
+  const limit = 10;
+  if (!postgresPool) {
+    const previous = localLoginRateLimits.get(attemptKey);
+    const state = !previous || previous.windowStartedAt + windowMs <= now
+      ? { attempts: 1, windowStartedAt: now }
+      : { ...previous, attempts: previous.attempts + 1 };
+    if (state.attempts >= limit) state.lockedUntil = now + windowMs;
+    localLoginRateLimits.set(attemptKey, state);
+    return;
+  }
+  await postgresPool.query(
+    `INSERT INTO login_rate_limits (attempt_key, attempt_count, window_started_at, locked_until, updated_at)
+     VALUES ($1, 1, now(), NULL, now())
+     ON CONFLICT (attempt_key) DO UPDATE SET
+       attempt_count = CASE WHEN login_rate_limits.window_started_at < now() - interval '15 minutes' THEN 1 ELSE login_rate_limits.attempt_count + 1 END,
+       window_started_at = CASE WHEN login_rate_limits.window_started_at < now() - interval '15 minutes' THEN now() ELSE login_rate_limits.window_started_at END,
+       locked_until = CASE
+         WHEN login_rate_limits.window_started_at < now() - interval '15 minutes' THEN NULL
+         WHEN login_rate_limits.attempt_count + 1 >= 10 THEN now() + interval '15 minutes'
+         ELSE login_rate_limits.locked_until
+       END,
+       updated_at = now()`,
+    [attemptKey]
+  );
+}
+
+async function clearLoginFailures(attemptKey: string): Promise<void> {
+  if (!postgresPool) {
+    localLoginRateLimits.delete(attemptKey);
+    return;
+  }
+  await postgresPool.query('DELETE FROM login_rate_limits WHERE attempt_key = $1', [attemptKey]);
 }
 
 async function authenticatePasswordUser(identifierValue: unknown, password: string): Promise<PasswordAuthenticatedUser | null> {
@@ -1084,11 +1154,25 @@ function applyLocalMemberBalance(tx: Transaction) {
   member.loanBalance = Math.min(loanCeiling, Math.max(0, Number(member.loanBalance || 0) + delta.loan));
 }
 
+async function assertLedgerMonthIsOpen(timestamp: string): Promise<void> {
+  if (!postgresPool) return;
+  const result = await postgresPool.query(
+    `SELECT closing_month FROM monthly_closings
+     WHERE closing_month = date_trunc('month', $1::timestamptz)::date
+     LIMIT 1`,
+    [timestamp]
+  );
+  if (result.rowCount) {
+    throw new HttpError(409, 'This accounting month is closed. Use a Chairman-authorised corrective process before changing it.', 'ACCOUNTING_MONTH_CLOSED');
+  }
+}
+
 async function createLedgerTransaction(input: LedgerInput): Promise<Transaction> {
   const tx = normalizeTransactionInput(input);
   await validateLedgerRegistration(tx);
 
   if (postgresPool) {
+    await assertLedgerMonthIsOpen(tx.timestamp);
     return createPostgresTransaction(postgresPool, tx);
   }
 
@@ -1118,6 +1202,7 @@ async function updateLedgerTransaction(transactionId: string, input: LedgerInput
       refCode: original.refCode
     });
     await validateLedgerRegistration(candidate);
+    await assertLedgerMonthIsOpen(original.timestamp);
     return correctPostgresTransaction(postgresPool, transactionId, input);
   }
   const original = await Promise.resolve((() => localStore.transactions.find(tx => tx.id === transactionId) || null)());
@@ -1148,6 +1233,9 @@ async function updateLedgerTransaction(transactionId: string, input: LedgerInput
 
 async function reverseLedgerTransaction(transactionId: string, recorderName: string): Promise<Transaction> {
   if (postgresPool) {
+    const original = (await listPostgresTransactions(postgresPool)).find(transaction => transaction.id === transactionId);
+    if (!original) throw new HttpError(404, 'Transaction to reverse was not found.', 'TRANSACTION_NOT_FOUND');
+    await assertLedgerMonthIsOpen(original.timestamp);
     return reversePostgresTransaction(postgresPool, transactionId, recorderName);
   }
   const original = await Promise.resolve((() => localStore.transactions.find(tx => tx.id === transactionId) || null)());
@@ -1265,19 +1353,28 @@ function toMemberPortalPayment(payment: PaymentRecord): PaymentRecord {
 async function getMemberPortalData(user: AuthorizedUser): Promise<MemberPortalData> {
   const linkedMemberId = requireLinkedMember(user);
   if (postgresPool) {
-    const [member, vehicles, driverAssignments, transactions, payments, loans] = await Promise.all([
+    const [member, vehicles, driverAssignments, transactions, payments, loans, profileResult] = await Promise.all([
       getPostgresMember(postgresPool, linkedMemberId),
       listPostgresVehiclesByOwner(postgresPool, linkedMemberId),
       listPostgresDriverAssignmentsByOwner(postgresPool, linkedMemberId),
       listPostgresTransactionsByMember(postgresPool, linkedMemberId),
       listPostgresPaymentsByMember(postgresPool, linkedMemberId),
-      listPostgresLoansByMember(postgresPool, linkedMemberId)
+      listPostgresLoansByMember(postgresPool, linkedMemberId),
+      postgresPool.query('SELECT email, phone, profile_photo_data FROM users WHERE id = $1 LIMIT 1', [user.id])
     ]);
     if (!member) {
       throw new HttpError(403, 'This member account is not linked to an active SACCO member record.', 'MEMBER_LINK_INVALID');
     }
     return {
       member: toMemberPortalProfile(member),
+      profile: {
+        fullName: member.name,
+        email: String(profileResult.rows[0]?.email || member.email || ''),
+        phone: String(profileResult.rows[0]?.phone || member.phoneNumber || ''),
+        nationalId: member.idNumber,
+        membershipNumber: member.membershipNumber,
+        profilePhotoData: profileResult.rows[0]?.profile_photo_data || undefined
+      },
       vehicles,
       driverAssignments,
       transactions: transactions.map(toMemberPortalTransaction),
@@ -1303,6 +1400,13 @@ async function getMemberPortalData(user: AuthorizedUser): Promise<MemberPortalDa
   const ownedVehicles = vehicles.filter(vehicle => vehicle.ownerId === linkedMemberId);
   return {
     member: toMemberPortalProfile(member),
+    profile: {
+      fullName: member.name,
+      email: user.email || member.email || '',
+      phone: user.phone || member.phoneNumber || '',
+      nationalId: member.idNumber,
+      membershipNumber: member.membershipNumber
+    },
     vehicles: ownedVehicles,
     driverAssignments: [],
     transactions: transactions
@@ -1866,7 +1970,9 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
 
   app.disable('x-powered-by');
   app.use(securityHeaders(isProduction));
-  app.use(express.json({ limit: '64kb' }));
+  // Profile photos are deliberately small and stored only after strict data-URL
+  // validation below. Bank callbacks and every other JSON API remain bounded.
+  app.use(express.json({ limit: '300kb' }));
 
   // Run database seeding
   await seedDatabaseIfEmpty();
@@ -1941,10 +2047,15 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
   app.post('/api/auth/login', async (req, res) => {
     try {
       if (!passwordAuthenticationEnabled()) throw new HttpError(503, 'Password authentication is not enabled.', 'PASSWORD_AUTH_DISABLED');
-      const user = await authenticatePasswordUser(req.body?.identifier ?? req.body?.email, String(req.body?.password || ''));
+      const identifier = req.body?.identifier ?? req.body?.email;
+      const attemptKey = loginAttemptKey(req.ip, identifier);
+      await assertLoginIsAllowed(attemptKey);
+      const user = await authenticatePasswordUser(identifier, String(req.body?.password || ''));
       if (!user || !hasActiveAccount(user) || (isMemberUser(user) && !user.linkedMemberId)) {
+        await recordFailedLogin(attemptKey);
         return res.status(401).json({ error: 'Invalid Sacco profile or password.' });
       }
+      await clearLoginFailures(attemptKey);
       res.json(await completePasswordAuthentication(user));
     } catch (error: any) {
       sendApiError(res, error);
@@ -2018,6 +2129,80 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
     }
   });
 
+  const validateProfilePhotoData = (value: unknown): string | null => {
+    if (value == null || value === '') return null;
+    if (typeof value !== 'string') throw new HttpError(400, 'Upload a valid PNG, JPEG, or WebP profile photo.', 'PROFILE_PHOTO_INVALID');
+    const match = value.match(/^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/=]+)$/i);
+    if (!match) throw new HttpError(400, 'Upload a valid PNG, JPEG, or WebP profile photo.', 'PROFILE_PHOTO_INVALID');
+    const imageBytes = Buffer.from(match[2], 'base64');
+    if (!imageBytes.length || imageBytes.length > 180 * 1024) {
+      throw new HttpError(400, 'Profile photos must be 180 KB or smaller.', 'PROFILE_PHOTO_TOO_LARGE');
+    }
+    return value;
+  };
+
+  app.patch('/api/member-portal/profile', authenticateSaccoUser, requirePermission('member.portal.read'), async (req, res) => {
+    try {
+      const user = requireAuthenticatedUser(req);
+      const memberId = requireLinkedMember(user);
+      if (!postgresPool) throw new HttpError(503, 'Profile changes require the PostgreSQL SACCO database.', 'PROFILE_UPDATE_UNAVAILABLE');
+      const email = normalizedEmail(req.body?.email);
+      if (!/^\S+@\S+\.\S+$/.test(email)) throw new HttpError(400, 'Enter a valid email address.', 'PROFILE_EMAIL_INVALID');
+      const profilePhotoData = validateProfilePhotoData(req.body?.profilePhotoData);
+      const client = await postgresPool.connect();
+      try {
+        await client.query('BEGIN');
+        const duplicate = await client.query(
+          'SELECT 1 FROM users WHERE lower(email) = $1 AND id <> $2 LIMIT 1',
+          [email, user.id]
+        );
+        if (duplicate.rowCount) throw new HttpError(409, 'That email address is already linked to another SACCO account.', 'PROFILE_EMAIL_EXISTS');
+        await client.query(
+          `UPDATE users SET email = $1, profile_photo_data = $2, updated_at = now() WHERE id = $3`,
+          [email, profilePhotoData, user.id]
+        );
+        await client.query('UPDATE members SET email = $1, updated_at = now() WHERE id = $2', [email, memberId]);
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+      await recordAuditLog(req, 'MEMBER_PROFILE_UPDATED', 'members', memberId, undefined, {
+        emailUpdated: true,
+        profilePhotoUpdated: req.body?.profilePhotoData !== undefined
+      });
+      res.json(await getMemberPortalData({ ...user, email }));
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.post('/api/member-portal/change-password', authenticateSaccoUser, requirePermission('member.portal.read'), async (req, res) => {
+    try {
+      const user = requireAuthenticatedUser(req);
+      const currentPassword = String(req.body?.currentPassword || '');
+      const newPassword = String(req.body?.newPassword || '');
+      if (!currentPassword || newPassword.length < 8) {
+        throw new HttpError(400, 'Enter your current password and a new password of at least 8 characters.', 'PROFILE_PASSWORD_INVALID');
+      }
+      if (currentPassword === newPassword) throw new HttpError(400, 'Choose a password that is different from your current one.', 'PROFILE_PASSWORD_REUSED');
+      if (!postgresPool) throw new HttpError(503, 'Password changes require the PostgreSQL SACCO database.', 'PASSWORD_CHANGE_UNAVAILABLE');
+      const result = await postgresPool.query(
+        `UPDATE users SET password_hash = crypt($1, gen_salt('bf')), must_change_password = FALSE,
+           temporary_password_expires_at = NULL, updated_at = now()
+         WHERE id = $2 AND password_hash = crypt($3, password_hash)`,
+        [newPassword, user.id, currentPassword]
+      );
+      if (!result.rowCount) throw new HttpError(400, 'Your current password is incorrect.', 'PROFILE_PASSWORD_INCORRECT');
+      await recordAuditLog(req, 'MEMBER_PASSWORD_CHANGED', 'users', user.id);
+      res.json({ passwordUpdated: true });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
   app.post('/api/auth/activity', authenticateSaccoUser, (_req, res) => {
     res.status(204).end();
   });
@@ -2067,6 +2252,7 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
   app.use('/api/system', authenticateSaccoUser);
   app.use('/api/member-portal', authenticateSaccoUser);
   app.use('/api/loans', authenticateSaccoUser);
+  app.use('/api/monthly-closings', authenticateSaccoUser);
 
   // API 2: Get Users
   app.get('/api/users', requirePermission('users.read'), async (req, res) => {
@@ -2178,13 +2364,20 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       const result = await postgresPool.query(
         `SELECT l.*, m.full_name AS member_name, m.status AS member_status,
            COALESCE(fin.savings, 0) AS member_savings,
-           CURRENT_DATE - COALESCE(m.date_registered, CURRENT_DATE) AS membership_days
+           CURRENT_DATE - COALESCE(m.date_registered, CURRENT_DATE) AS membership_days,
+           COALESCE(repayments.amount_paid, 0) AS amount_paid,
+           l.principal_amount * (1 + l.interest_rate / 100) AS total_payable,
+           GREATEST(0, l.principal_amount * (1 + l.interest_rate / 100) - COALESCE(repayments.amount_paid, 0)) AS outstanding_balance
          FROM loans l JOIN members m ON m.id = l.member_id
          LEFT JOIN LATERAL (
            SELECT SUM(CASE WHEN le.account_type IN ('Savings','DailyContribution') AND le.transaction_type = 'Credit' THEN
              CASE WHEN le.account_type = 'Savings' THEN le.amount ELSE COALESCE((le.metadata->>'savingsContribution')::numeric, le.amount * .70) END ELSE 0 END) AS savings
            FROM ledger_entries le WHERE le.member_id = m.id AND le.status = 'Posted'
-         ) fin ON TRUE ORDER BY l.created_at DESC`
+         ) fin ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT SUM(amount) AS amount_paid FROM loan_repayments WHERE loan_id = l.id
+         ) repayments ON TRUE
+         ORDER BY l.created_at DESC`
       );
       res.json(result.rows);
     } catch (error: any) { sendApiError(res, error); }
@@ -2225,12 +2418,21 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
     try {
       const user = requireAuthenticatedUser(req);
       const memberId = isMemberUser(user) ? requireLinkedMember(user) : String(req.body?.memberId || '');
-      if (!isMemberUser(user) && !hasPermission(user.role, 'loans.write')) throw new HttpError(403, 'Access denied.', 'ACCESS_DENIED');
+      if (!isMemberUser(user) && user.role !== 'Chairman') throw new HttpError(403, 'Only a member or the Chairman can submit a loan application.', 'LOAN_APPLICATION_ACCESS_DENIED');
       const principal = Number(req.body?.principalAmount);
-      const dueDate = String(req.body?.dueDate || '').trim() || null;
+      const loanType = String(req.body?.loanType || 'General').trim();
+      const repaymentPeriodMonths = Number(req.body?.repaymentPeriodMonths);
+      const repaymentMethod = String(req.body?.repaymentMethod || '').trim();
+      const incomeSource = String(req.body?.incomeSource || '').trim().slice(0, 250) || null;
+      const monthlyIncomeValue = req.body?.monthlyIncome;
+      const monthlyIncome = monthlyIncomeValue === '' || monthlyIncomeValue == null ? null : Number(monthlyIncomeValue);
+      const guarantorDetails = String(req.body?.guarantorDetails || '').trim().slice(0, 1000) || null;
+      const collateralDetails = String(req.body?.collateralDetails || '').trim().slice(0, 1000) || null;
       const notes = String(req.body?.notes || '').trim().slice(0, 1000) || null;
-      if (!memberId.match(/^[0-9a-f-]{36}$/i) || !Number.isFinite(principal) || principal <= 0) {
-        throw new HttpError(400, 'Select a member and enter a valid principal.', 'LOAN_INPUT_INVALID');
+      if (!memberId.match(/^[0-9a-f-]{36}$/i) || !Number.isFinite(principal) || principal <= 0 ||
+        !LOAN_TYPES.has(loanType) || !Number.isInteger(repaymentPeriodMonths) || repaymentPeriodMonths < 1 || repaymentPeriodMonths > 84 ||
+        !REPAYMENT_METHODS.has(repaymentMethod) || (monthlyIncome !== null && (!Number.isFinite(monthlyIncome) || monthlyIncome < 0))) {
+        throw new HttpError(400, 'Complete the loan type, amount, repayment period, repayment method, and valid optional income details.', 'LOAN_INPUT_INVALID');
       }
       if (!postgresPool) throw new HttpError(503, 'Loan records require PostgreSQL.', 'LOANS_UNAVAILABLE');
       const policy = await postgresPool.query('SELECT * FROM loan_policy WHERE id = TRUE');
@@ -2238,13 +2440,29 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       if (policy.rows[0]?.maximum_principal && principal > Number(policy.rows[0].maximum_principal)) throw new HttpError(400, 'The requested amount exceeds the Chairman’s loan limit.', 'LOAN_ABOVE_POLICY_LIMIT');
       const existing = await postgresPool.query(`SELECT 1 FROM loans WHERE member_id=$1 AND status IN ('Applied','SecretaryReview','TreasurerReview','ChairmanReview','Approved','Active','Defaulted') LIMIT 1`, [memberId]);
       if (existing.rowCount) throw new HttpError(409, 'This member already has a pending or active loan.', 'LOAN_ALREADY_OPEN');
-      const result = await postgresPool.query(
-        `INSERT INTO loans (member_id, principal_amount, interest_rate, application_date, issue_date, due_date, status, notes)
-         SELECT id, $2, $3, CURRENT_DATE, CURRENT_DATE, $4, 'SecretaryReview', $5 FROM members WHERE id = $1 AND status = 'Active'
-         RETURNING id, member_id, principal_amount, interest_rate, application_date, due_date, status, notes`,
-        [memberId, principal, interestRate, dueDate, notes]
+      const memberResult = await postgresPool.query(
+        `SELECT full_name, member_number, national_id, phone, email
+         FROM members WHERE id = $1 AND status = 'Active' LIMIT 1`,
+        [memberId]
       );
-      if (!result.rowCount) throw new HttpError(404, 'Active member was not found.', 'MEMBER_NOT_FOUND');
+      if (!memberResult.rowCount) throw new HttpError(404, 'Active member was not found.', 'MEMBER_NOT_FOUND');
+      const member = memberResult.rows[0];
+      const applicationSnapshot = {
+        fullName: member.full_name,
+        membershipNumber: member.member_number || null,
+        nationalId: member.national_id || null,
+        phone: member.phone || null,
+        email: member.email || user.email || null
+      };
+      const result = await postgresPool.query(
+        `INSERT INTO loans (
+           member_id, principal_amount, interest_rate, application_date, issue_date, due_date, status, notes,
+           loan_type, repayment_period_months, repayment_method, income_source, monthly_income, guarantor_details, collateral_details, application_snapshot
+         ) VALUES ($1, $2, $3, CURRENT_DATE, CURRENT_DATE, NULL, 'SecretaryReview', $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
+         RETURNING id, member_id, principal_amount, interest_rate, application_date, due_date, status, notes,
+                   loan_type, repayment_period_months, repayment_method, income_source, monthly_income, guarantor_details, collateral_details`,
+        [memberId, principal, interestRate, notes, loanType, repaymentPeriodMonths, repaymentMethod, incomeSource, monthlyIncome, guarantorDetails, collateralDetails, JSON.stringify(applicationSnapshot)]
+      );
       await recordAuditLog(req, 'LOAN_APPLICATION_CREATED', 'loans', String(result.rows[0].id), undefined, result.rows[0]);
       res.status(201).json(result.rows[0]);
     } catch (error: any) { sendApiError(res, error); }
@@ -2257,11 +2475,13 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       if (!postgresPool) throw new HttpError(503, 'Loan records require PostgreSQL.', 'LOANS_UNAVAILABLE');
       const eligible = req.body?.eligible === true;
       const notes = String(req.body?.notes || '').trim().slice(0, 1000);
+      const rejectionReason = eligible ? null : requiredRejectionReason(req.body?.reason ?? notes);
       const status = eligible ? 'TreasurerReview' : 'Rejected';
       const result = await postgresPool.query(
         `UPDATE loans SET status=$1, secretary_reviewed_by=$2, secretary_reviewed_at=now(), secretary_eligible=$3,
-          secretary_notes=$4, rejected_at=CASE WHEN $3 THEN rejected_at ELSE now() END, updated_at=now()
-         WHERE id=$5 AND status='SecretaryReview' RETURNING *`, [status, user.id, eligible, notes, req.params.id]
+          secretary_notes=$4, rejection_reason=CASE WHEN $3 THEN NULL ELSE $5 END,
+          rejected_by=CASE WHEN $3 THEN NULL ELSE $2 END, rejected_at=CASE WHEN $3 THEN NULL ELSE now() END, updated_at=now()
+         WHERE id=$6 AND status='SecretaryReview' RETURNING *`, [status, user.id, eligible, notes, rejectionReason, req.params.id]
       );
       if (!result.rowCount) throw new HttpError(409, 'This loan is not awaiting Secretary review.', 'LOAN_STAGE_MISMATCH');
       await recordAuditLog(req, eligible ? 'LOAN_SECRETARY_APPROVED' : 'LOAN_SECRETARY_REJECTED', 'loans', req.params.id, undefined, result.rows[0]);
@@ -2276,11 +2496,13 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       if (!postgresPool) throw new HttpError(503, 'Loan records require PostgreSQL.', 'LOANS_UNAVAILABLE');
       const approved = req.body?.approved === true;
       const notes = String(req.body?.notes || '').trim().slice(0, 1000);
+      const rejectionReason = approved ? null : requiredRejectionReason(req.body?.reason ?? notes);
       const result = await postgresPool.query(
         `UPDATE loans SET status=$1, treasurer_reviewed_by=$2, treasurer_reviewed_at=now(), treasurer_notes=$3,
-          rejected_at=CASE WHEN $4 THEN rejected_at ELSE now() END, updated_at=now()
-         WHERE id=$5 AND status='TreasurerReview' RETURNING *`,
-        [approved ? 'ChairmanReview' : 'Rejected', user.id, notes, approved, req.params.id]
+          rejection_reason=CASE WHEN $4 THEN NULL ELSE $5 END, rejected_by=CASE WHEN $4 THEN NULL ELSE $2 END,
+          rejected_at=CASE WHEN $4 THEN NULL ELSE now() END, updated_at=now()
+         WHERE id=$6 AND status='TreasurerReview' RETURNING *`,
+        [approved ? 'ChairmanReview' : 'Rejected', user.id, notes, approved, rejectionReason, req.params.id]
       );
       if (!result.rowCount) throw new HttpError(409, 'This loan is not awaiting Treasurer review.', 'LOAN_STAGE_MISMATCH');
       await recordAuditLog(req, approved ? 'LOAN_TREASURER_APPROVED' : 'LOAN_TREASURER_REJECTED', 'loans', req.params.id, undefined, result.rows[0]);
@@ -2294,9 +2516,10 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       const user = requireAuthenticatedUser(req);
       const result = await postgresPool.query(
         `UPDATE loans SET status = 'Active', approved_by = $1, approved_at = now(),
-           disbursed_at = now(), issue_date = CURRENT_DATE, updated_at = now()
+           disbursed_at = now(), issue_date = CURRENT_DATE,
+           due_date = (CURRENT_DATE + (repayment_period_months * INTERVAL '1 month'))::date, updated_at = now()
          WHERE id = $2 AND status = 'ChairmanReview'
-         RETURNING id, member_id, principal_amount, interest_rate, issue_date, due_date, status`,
+         RETURNING id, member_id, principal_amount, interest_rate, issue_date, due_date, repayment_period_months, status`,
         [user.id, req.params.id]
       );
       if (!result.rowCount) throw new HttpError(409, 'Only an applied loan can be approved.', 'LOAN_NOT_APPROVABLE');
@@ -2308,10 +2531,13 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
   app.post('/api/loans/:id/reject', requirePermission('loans.approve'), async (req, res) => {
     try {
       if (!postgresPool) throw new HttpError(503, 'Loan records require PostgreSQL.', 'LOANS_UNAVAILABLE');
+      const user = requireAuthenticatedUser(req);
+      const reason = requiredRejectionReason(req.body?.reason);
       const result = await postgresPool.query(
-        `UPDATE loans SET status = 'Rejected', rejected_at = now(), notes = concat_ws(E'\n', notes, NULLIF($1, '')), updated_at = now()
-         WHERE id = $2 AND status = 'ChairmanReview' RETURNING id, member_id, status`,
-        [String(req.body?.reason || '').trim().slice(0, 500), req.params.id]
+        `UPDATE loans SET status = 'Rejected', rejected_at = now(), rejected_by = $1, rejection_reason = $2,
+           notes = concat_ws(E'\n', notes, $2), updated_at = now()
+         WHERE id = $3 AND status = 'ChairmanReview' RETURNING id, member_id, status, rejection_reason`,
+        [user.id, reason, req.params.id]
       );
       if (!result.rowCount) throw new HttpError(409, 'Only an applied loan can be rejected.', 'LOAN_NOT_REJECTABLE');
       await recordAuditLog(req, 'LOAN_REJECTED', 'loans', String(result.rows[0].id), undefined, result.rows[0]);
@@ -2347,6 +2573,75 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       res.status(201).json({ ...repayment.rows[0], outstandingBalance: Math.max(0, outstanding - amount), loanStatus: cleared ? 'Cleared' : loan.rows[0].status });
     } catch (error: any) {
       if (client) await client.query('ROLLBACK').catch(() => undefined);
+      sendApiError(res, error);
+    } finally { client?.release(); }
+  });
+
+  app.get('/api/monthly-closings', requirePermission('reports.read.all'), async (_req, res) => {
+    try {
+      if (!postgresPool) throw new HttpError(503, 'Month-end closing requires PostgreSQL.', 'MONTHLY_CLOSING_UNAVAILABLE');
+      const result = await postgresPool.query(
+        `SELECT c.*, u.full_name AS closed_by_name,
+           COALESCE(json_agg(json_build_object('accountType', l.account_type, 'totalCredit', l.total_credit, 'totalDebit', l.total_debit, 'netAmount', l.net_amount)
+             ORDER BY l.account_type) FILTER (WHERE l.id IS NOT NULL), '[]'::json) AS lines
+         FROM monthly_closings c
+         LEFT JOIN users u ON u.id = c.closed_by
+         LEFT JOIN monthly_closing_lines l ON l.monthly_closing_id = c.id
+         GROUP BY c.id, u.full_name
+         ORDER BY c.closing_month DESC`
+      );
+      res.json(result.rows);
+    } catch (error: any) { sendApiError(res, error); }
+  });
+
+  app.post('/api/monthly-closings', requirePermission('loans.approve'), async (req, res) => {
+    const client = postgresPool ? await postgresPool.connect() : null;
+    try {
+      const user = requireAuthenticatedUser(req);
+      if (user.role !== 'Chairman') throw new HttpError(403, 'Only the Chairman can close an accounting month.', 'MONTHLY_CLOSING_ACCESS_DENIED');
+      if (!client) throw new HttpError(503, 'Month-end closing requires PostgreSQL.', 'MONTHLY_CLOSING_UNAVAILABLE');
+      const closingMonth = String(req.body?.closingMonth || '').trim();
+      const notes = String(req.body?.notes || '').trim().slice(0, 1000) || null;
+      if (!/^\d{4}-\d{2}$/.test(closingMonth)) throw new HttpError(400, 'Choose the month to close in YYYY-MM format.', 'MONTHLY_CLOSING_MONTH_INVALID');
+      const monthStart = `${closingMonth}-01`;
+      if (new Date(`${monthStart}T00:00:00Z`).getTime() >= new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime()) {
+        throw new HttpError(400, 'Only a completed past month can be closed.', 'MONTHLY_CLOSING_MONTH_OPEN');
+      }
+      await client.query('BEGIN');
+      const totals = await client.query(
+        `SELECT
+           COALESCE(SUM(CASE WHEN transaction_type = 'Credit' THEN amount ELSE 0 END), 0) AS total_credit,
+           COALESCE(SUM(CASE WHEN transaction_type = 'Debit' THEN amount ELSE 0 END), 0) AS total_debit,
+           COALESCE(SUM(CASE WHEN till_type IN ('VehicleTill', 'UtilityTill') AND transaction_type = 'Credit' THEN amount ELSE 0 END), 0) AS mpesa_total,
+           COALESCE(SUM(CASE WHEN till_type = 'None' AND transaction_type = 'Credit' THEN amount ELSE 0 END), 0) AS cash_total
+         FROM ledger_entries
+         WHERE entry_date >= $1::date AND entry_date < ($1::date + INTERVAL '1 month') AND status = 'Posted'`,
+        [monthStart]
+      );
+      const total = totals.rows[0];
+      const created = await client.query(
+        `INSERT INTO monthly_closings (closing_month, total_credit, total_debit, net_balance, mpesa_total, cash_total, closed_by, notes)
+         VALUES ($1::date, $2, $3, $2 - $3, $4, $5, $6, $7)
+         RETURNING *`,
+        [monthStart, total.total_credit, total.total_debit, total.mpesa_total, total.cash_total, user.id, notes]
+      );
+      await client.query(
+        `INSERT INTO monthly_closing_lines (monthly_closing_id, account_type, total_credit, total_debit, net_amount)
+         SELECT $1, account_type,
+           COALESCE(SUM(CASE WHEN transaction_type = 'Credit' THEN amount ELSE 0 END), 0),
+           COALESCE(SUM(CASE WHEN transaction_type = 'Debit' THEN amount ELSE 0 END), 0),
+           COALESCE(SUM(CASE WHEN transaction_type = 'Credit' THEN amount ELSE -amount END), 0)
+         FROM ledger_entries
+         WHERE entry_date >= $2::date AND entry_date < ($2::date + INTERVAL '1 month') AND status = 'Posted'
+         GROUP BY account_type`,
+        [created.rows[0].id, monthStart]
+      );
+      await client.query('COMMIT');
+      await recordAuditLog(req, 'MONTH_CLOSED', 'monthly_closings', String(created.rows[0].id), undefined, created.rows[0]);
+      res.status(201).json(created.rows[0]);
+    } catch (error: any) {
+      if (client) await client.query('ROLLBACK').catch(() => undefined);
+      if ((error as any)?.code === '23505') return sendApiError(res, new HttpError(409, 'This accounting month has already been closed.', 'MONTHLY_CLOSING_EXISTS'));
       sendApiError(res, error);
     } finally { client?.release(); }
   });
@@ -2872,8 +3167,8 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
     next(error);
   });
 
-  // Firebase Hosting serves the SPA separately. The standalone Node runtime
-  // keeps the existing Vite development middleware and production static app.
+  // The standalone Node runtime serves the SPA with Vite in development and
+  // from its production static build in deployed environments.
   if (options.serveFrontend !== false) {
     if (!isProduction) {
       const { createServer: createViteServer } = await import('vite');

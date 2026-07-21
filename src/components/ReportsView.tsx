@@ -58,6 +58,10 @@ export default function ReportsView({
   onUpdateTransaction,
   currentUser 
 }: ReportsViewProps) {
+  // Regulatory/audited reports require a closed period and external approval.
+  // This legacy presentation remains in source only while it is rebuilt; it is
+  // intentionally not reachable in the live interface.
+  const showUnverifiedComplianceWorkspace = false;
   // Navigation
   const [activeSection, setActiveSection] = useState<'cashless' | 'compliance' | 'accountant'>('cashless');
 
@@ -309,8 +313,8 @@ export default function ReportsView({
               Cooperative Societies Act Cap 490 Registry
             </span>
           </div>
-          <h2 className="text-xl font-bold font-display text-slate-800 mt-1">Sacco Audit &amp; Reporting Central</h2>
-          <p className="text-xs text-slate-500">Generate real-time cash flow statements, dual-till ledger charts and print regulatory annual reports</p>
+          <h2 className="text-xl font-bold font-display text-slate-800 mt-1">Sacco operational reporting</h2>
+          <p className="text-xs text-slate-500">Review current ledger activity, cash flow, and internal operational summaries.</p>
         </div>
 
         {/* Outer Section Switcher */}
@@ -327,17 +331,6 @@ export default function ReportsView({
             <span>Co-op Accounts Hub</span>
           </button>
           
-          <button
-            onClick={() => setActiveSection('compliance')}
-            className={`px-3 py-2 text-xs font-bold uppercase tracking-wider rounded-md flex items-center justify-center space-x-1.5 transition-all ${
-              activeSection === 'compliance'
-                ? 'bg-slate-900 text-white shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            <BookOpen className="w-3.5 h-3.5 text-amber-500" />
-            <span>Kenyan Audit Book</span>
-          </button>
 
           <button
             onClick={() => setActiveSection('accountant')}
@@ -729,7 +722,7 @@ export default function ReportsView({
                   Export Ledger Services
                 </h3>
                 <p className="text-[11px] text-slate-600 leading-normal font-medium">
-                  Sowetamu Sacco's cashless dual-till transactions can be merged into unified statements instantly for AGM compliance and state auditors. Select a format below:
+                  Export a current operational ledger summary for internal review. This is not an audited or regulatory filing.
                 </p>
 
                 <div className="space-y-2 pt-2">
@@ -758,7 +751,7 @@ export default function ReportsView({
       )}
 
       {/* RENDER COMPLIANCE ANNUAL REPORT WORKSPACE */}
-      {activeSection === 'compliance' && (
+      {showUnverifiedComplianceWorkspace && activeSection === 'compliance' && (
         <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
           
           {/* TOBACCO/BOOK TOC SIDEBAR (4 Cols) */}

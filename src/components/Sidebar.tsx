@@ -17,7 +17,9 @@ import {
   Database,
   Building2,
   UserRoundPlus,
-  Landmark
+  Landmark,
+  BookOpenCheck,
+  CalendarClock
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -59,11 +61,16 @@ export default function Sidebar({
     { name: 'Reports', icon: <FileSpreadsheet className="w-4 h-4" /> },
     { name: 'Blueprint', icon: <FileCode className="w-4 h-4" /> }
   ];
+  const officerMenus: Record<Exclude<User['role'], 'Member'>, Array<{ name: string; icon: React.ReactNode }>> = {
+    Chairman: [...administratorMenuItems, { name: 'Month-end Close', icon: <CalendarClock className="w-4 h-4" /> }, { name: 'Account Access', icon: <UserRoundPlus className="w-4 h-4" /> }],
+    Secretary: administratorMenuItems.filter(item => !['Daily Collections', 'Expenses'].includes(item.name)),
+    Treasurer: administratorMenuItems,
+    Accountant: administratorMenuItems,
+    Auditor: administratorMenuItems.filter(item => !['Daily Collections', 'Expenses'].includes(item.name))
+  };
   const menuItems = currentUser.role === 'Member'
     ? [{ name: 'My Account', icon: <LayoutDashboard className="w-4 h-4" /> }]
-    : currentUser.role === 'Chairman'
-      ? [...administratorMenuItems, { name: 'Account Access', icon: <UserRoundPlus className="w-4 h-4" /> }]
-      : administratorMenuItems;
+    : [...officerMenus[currentUser.role], { name: 'Roles & Responsibilities', icon: <BookOpenCheck className="w-4 h-4" /> }];
 
   return (
     <aside 

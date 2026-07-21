@@ -28,7 +28,7 @@ site appear more complete in search.
    `JWT_SECRET` and `MEMBER_OTP_PEPPER`. Keep development fallback variables
    false.
 3. **Use a separate production database.** Apply all migrations through
-   `017`, verify `npm run db:status`, and enable database backups. Do not use
+   `019`, verify `npm run db:status`, and enable database backups. Do not use
    test data or seed records as live SACCO data.
 4. **Test the deployed URL.** Check `/api/health`, sign in as each role, create
    a non-sensitive test member, test recovery email, and repeat the UAT list.

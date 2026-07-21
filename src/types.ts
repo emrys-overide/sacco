@@ -49,12 +49,22 @@ export interface MemberLoanSummary {
   id: string;
   principalAmount: number;
   outstandingBalance: number;
+  amountPaid?: number;
   issueDate: string;
   dueDate?: string;
   status: string;
   interestRate?: number;
   totalPayable?: number;
+  loanType?: string;
+  repaymentPeriodMonths?: number;
+  repaymentMethod?: string;
+  incomeSource?: string;
+  monthlyIncome?: number;
+  guarantorDetails?: string;
+  collateralDetails?: string;
   notes?: string;
+  rejectionReason?: string;
+  rejectedAt?: string;
   repayments: Array<{ id: string; repaymentDate: string; amount: number }>;
 }
 
@@ -173,6 +183,14 @@ export interface PaymentRecord {
 
 export interface MemberPortalData {
   member: Member;
+  profile: {
+    fullName: string;
+    email: string;
+    phone: string;
+    nationalId: string;
+    membershipNumber?: string;
+    profilePhotoData?: string;
+  };
   vehicles: Vehicle[];
   driverAssignments: DriverAssignment[];
   transactions: Transaction[];

@@ -17,7 +17,7 @@ Chairman-created profile + phone/email + password
         -> role-scoped dashboard
 ```
 
-Firebase is not required by the default account flow. Optional officer TOTP is available only when `OFFICER_TOTP_REQUIRED=true`; the safe, simpler default is password authentication plus server-enforced authorization.
+Supabase/PostgreSQL is the active data store for the default account flow. Optional officer TOTP is available only when `OFFICER_TOTP_REQUIRED=true`; the safe, simpler default is password authentication plus server-enforced authorization.
 
 ## Security boundaries
 
@@ -49,7 +49,7 @@ PASSWORD_AUTH_ENABLED=true
 OFFICER_TOTP_REQUIRED=false
 ```
 
-If TOTP is later enabled, also set a 32-byte `TOTP_ENCRYPTION_KEY`. Legacy migration `009` and Firebase compatibility routes may remain while existing identities are moved, but the current browser flow does not depend on them.
+If TOTP is later enabled, also set a 32-byte `TOTP_ENCRYPTION_KEY`. Historical migration `009` remains only to keep previously applied database histories valid; the current browser flow does not depend on it.
 
 ## Verification
 

@@ -43,6 +43,7 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [challengeId, setChallengeId] = useState('');
   const [code, setCode] = useState('');
   const [totpEnrollment, setTotpEnrollment] = useState<TotpEnrollment | null>(null);
@@ -68,6 +69,7 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
     setChallengeId('');
     setCode('');
     setTotpEnrollment(null);
+    setConfirmPassword('');
   };
 
   const completeAuthentication = (data: any) => {
@@ -80,6 +82,7 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
     if (data.passwordChangeRequired) {
       setTemporaryToken(data.token || '');
       setPassword('');
+      setConfirmPassword('');
       setScreen('force-change');
       return;
     }
@@ -125,6 +128,7 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
         }
       } else if (screen === 'force-change') {
         if (password.length < 8) throw new Error('Choose a private password of at least 8 characters.');
+        if (password !== confirmPassword) throw new Error('The new password and confirmation do not match.');
         const response = await fetch('/api/auth/change-temporary-password', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${temporaryToken}` }, body: JSON.stringify({ password }) });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || 'The password could not be changed.');
@@ -196,7 +200,7 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
                 </form>
               )}
 
-              {screen === 'force-change' && <form className="mt-7 space-y-4" onSubmit={handleSubmit}><div><label className="mb-2 block text-xs font-bold text-slate-600">New private password</label><input type="password" value={password} onChange={event => setPassword(event.target.value)} autoComplete="new-password" className={inputClass} required /></div>{error && <p className="rounded-xl bg-rose-50 px-3 py-2.5 text-xs text-rose-700">{error}</p>}<button type="submit" disabled={isSubmitting} className="w-full rounded-2xl bg-emerald-600 px-4 py-3.5 text-sm font-bold text-white">Change password and continue</button></form>}
+              {screen === 'force-change' && <form className="mt-7 space-y-4" onSubmit={handleSubmit}><div><label className="mb-2 block text-xs font-bold text-slate-600">New private password</label><input type="password" value={password} onChange={event => setPassword(event.target.value)} autoComplete="new-password" minLength={8} className={inputClass} required /></div><div><label className="mb-2 block text-xs font-bold text-slate-600">Confirm new password</label><input type="password" value={confirmPassword} onChange={event => setConfirmPassword(event.target.value)} autoComplete="new-password" minLength={8} className={inputClass} required /></div><p className="text-xs leading-5 text-slate-500">Your temporary password is only for first access. Choose a private password before the application opens.</p>{error && <p className="rounded-xl bg-rose-50 px-3 py-2.5 text-xs text-rose-700">{error}</p>}<button type="submit" disabled={isSubmitting} className="w-full rounded-2xl bg-emerald-600 px-4 py-3.5 text-sm font-bold text-white">Change password and continue</button></form>}
 
               {!['help', 'reset', 'force-change'].includes(screen) && (
                 <form className="mt-7 space-y-4" onSubmit={handleSubmit}>

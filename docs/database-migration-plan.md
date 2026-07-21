@@ -79,7 +79,7 @@ Source fields:
 
 ```text
 Legacy user id     -> external legacy reference only, not UUID primary key
-Legacy identity id -> users.firebase_uid (historical import only; unused by runtime authentication)
+Legacy identity id -> users.firebase_uid (historical import field only; unused by runtime authentication)
 Official name      -> users.full_name
 Official email     -> users.email
 Official phone     -> users.phone
@@ -88,11 +88,11 @@ Official role      -> users.role
 
 Rules:
 
-- Firebase Auth is the login identity provider.
-- PostgreSQL `users` stores SACCO role, status, phone, and audit relationships.
+- PostgreSQL/Supabase is the active data store and the application issues its own signed sessions.
+- PostgreSQL `users` stores SACCO role, status, password hash, phone, and audit relationships.
 - Preserve any imported `users.firebase_uid` values for audit/history only. New and existing sessions use server-issued JWTs backed by the `users` table.
 - Never store role security keys or JWT secrets in the database.
-- Never store Firebase passwords or refresh tokens in the database.
+- Never store passwords or session tokens in the database outside the approved password hash.
 
 Validation:
 

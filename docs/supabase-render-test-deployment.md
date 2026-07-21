@@ -39,7 +39,7 @@ DATABASE_SSL=true npm run db:migrate
 DATABASE_SSL=true npm run db:status
 ```
 
-Apply migrations `001` through `017` before starting the application. Migration
+Apply migrations `001` through `019` before starting the application. Migration
 `011` enables row-level security and removes Supabase browser-role access from
 every application table; the browser continues to use only the Express API. Never
 run the reference seed migration against real SACCO data without reviewing it.

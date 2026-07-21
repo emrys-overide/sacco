@@ -50,7 +50,7 @@ Stores non-secret tenant settings such as SACCO name, currency, and fiscal year 
 
 `users`
 
-Stores officials, staff, and member SACCO profiles. PostgreSQL owns the account, role, password hash, status, audit, and ownership link. `users.is_active` is the server-side switch for disabling access. The nullable `firebase_uid` column is retained only so older database imports remain non-destructive; application code no longer uses it for authentication.
+Stores officials, staff, and member SACCO profiles. PostgreSQL/Supabase owns the account, role, password hash, status, audit, and ownership link. `users.is_active` is the server-side switch for disabling access. The nullable legacy identity column is retained only so older database imports remain non-destructive; application code no longer uses it for authentication.
 
 `members`
 
@@ -191,5 +191,5 @@ Add more indexes only after slow-query evidence.
 - Add `NOT NULL` and stricter constraints only after validation.
 - Use reversals for posted money movement.
 - Never store Co-op Bank webhook credentials, JWT secrets, or service account JSON in tables.
-- Never store Firebase passwords or refresh tokens in tables.
+- Never store passwords or session tokens in tables outside approved password hashes.
 - Keep `.env`, deployment secrets, and CI secrets outside git.

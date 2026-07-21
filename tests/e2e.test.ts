@@ -115,7 +115,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
   assert.equal(healthResponse.headers.get('cache-control'), 'no-store');
   const onboardingBeforeBootstrap = await request<{ needsFirstAdmin: boolean }>('/api/auth/onboarding-status', 200);
   assert.equal(onboardingBeforeBootstrap.needsFirstAdmin, true);
-  // The retired Firebase recovery surface must not be registered.
+  // The retired third-party recovery surface must not be registered.
   await request('/api/auth/officer-recovery', 404, {
     method: 'POST',
     body: { password: 'not-a-recovery' }
