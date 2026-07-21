@@ -15,7 +15,9 @@ The first-Chairman setup link appears only while no administrator exists. After 
 
 The Chairman creates officer accounts and resets member/officer passwords from **Account Access**. Optional officer TOTP can be enabled later with `OFFICER_TOTP_REQUIRED=true`; it is off by default.
 
-Member password recovery uses a one-time six-digit code sent to the email already recorded on the member profile. Configure the `SMTP_*`, `EMAIL_FROM`, and `MEMBER_OTP_PEPPER` variables shown in `.env.example`. A Chairman reset creates a 24-hour temporary password which must be replaced before the account can use functional APIs.
+Members request a password reset using their registered phone number or email. The request appears only in the Chairman’s **Account Access** page, where the Chairman verifies the member and issues a 24-hour temporary password. The member must replace it before the account can use functional APIs; no recovery email or code is sent.
+
+The bell icon provides private in-app workflow reminders. Password reset requests notify every active Chairman, and loan review/decision steps notify the next responsible officer or the affected member. See [in-app notification details](docs/in-app-notifications.md).
 
 Loans use an ordered, server-enforced workflow: member application → Secretary eligibility review → Treasurer financial review → Chairman final approval. The Chairman controls the interest rate and eligibility policy in **Loans**. Interest supplied by a browser is ignored; the active server-side policy is used. Repayments are attached to a specific loan and automatically clear it at zero balance.
 

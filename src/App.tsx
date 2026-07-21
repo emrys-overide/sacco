@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, useState, useEffect } from 'react';
+import React, { lazy, Suspense, useState, useEffect, useRef } from 'react';
 import type { MemberPortalData, User, Member, Vehicle, Transaction, UserRole } from './types';
 import { Menu, ShieldAlert, Search, X } from 'lucide-react';
 import { canRole, STORAGE_KEYS } from './lib/auth';
@@ -8,6 +8,7 @@ import { fetchSaccoJson, postSaccoJson } from './lib/api';
 import LoginModal from './components/LoginModal';
 import Sidebar from './components/Sidebar';
 import PwaInstallPrompt from './components/PwaInstallPrompt';
+import NotificationCenter from './components/NotificationCenter';
 
 const GlobalSearchResultsView = lazy(() => import('./components/GlobalSearchResultsView'));
 const DashboardView = lazy(() => import('./components/DashboardView'));
@@ -23,6 +24,7 @@ const OfficerAccountsView = lazy(() => import('./components/OfficerAccountsView'
 const LoansView = lazy(() => import('./components/LoansView'));
 const RoleGuideView = lazy(() => import('./components/RoleGuideView'));
 const MonthEndCloseView = lazy(() => import('./components/MonthEndCloseView'));
+const DeveloperErrorLogView = lazy(() => import('./components/DeveloperErrorLogView'));
 
 const MEMBER_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary', 'Treasurer'];
 const VEHICLE_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary'];
@@ -82,8 +84,10 @@ export default function App() {
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [memberPortal, setMemberPortal] = useState<MemberPortalData | null>(null);
+  const [canViewDeveloperErrors, setCanViewDeveloperErrors] = useState(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [refreshTrigger, setRefreshTrigger] = useState<number>(0);
+  const reportedClientErrors = useRef(new Set<string>());
 
   // Sync state from server on component mount or profile switch
   useEffect(() => {
@@ -135,6 +139,50 @@ export default function App() {
       active = false;
     };
   }, [currentUser, authToken, refreshTrigger]);
+
+  useEffect(() => {
+    let active = true;
+    if (!currentUser || !authToken) {
+      setCanViewDeveloperErrors(false);
+      return;
+    }
+    void fetchSaccoJson<{ allowed: boolean }>('/api/developer-errors/access', {}, authToken)
+      .then(result => { if (active) setCanViewDeveloperErrors(result.allowed); })
+      .catch(() => { if (active) setCanViewDeveloperErrors(false); });
+    return () => { active = false; };
+  }, [currentUser, authToken]);
+
+  useEffect(() => {
+    if (!currentUser || !authToken) return;
+    const report = (message: unknown, stack: unknown, component: string) => {
+      const normalizedMessage = String(message || 'Unknown browser error').slice(0, 2_000);
+      const fingerprint = `${component}:${normalizedMessage}`;
+      if (reportedClientErrors.current.has(fingerprint)) return;
+      reportedClientErrors.current.add(fingerprint);
+      void fetch('/api/developer-errors/client', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
+        body: JSON.stringify({
+          message: normalizedMessage,
+          stack: String(stack || '').slice(0, 8_000),
+          component,
+          page: window.location.pathname,
+          browser: navigator.userAgent
+        })
+      }).catch(() => undefined);
+    };
+    const onError = (event: ErrorEvent) => report(event.message, event.error?.stack, event.filename || 'window.error');
+    const onUnhandledRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason;
+      report(reason instanceof Error ? reason.message : reason, reason instanceof Error ? reason.stack : '', 'unhandledrejection');
+    };
+    window.addEventListener('error', onError);
+    window.addEventListener('unhandledrejection', onUnhandledRejection);
+    return () => {
+      window.removeEventListener('error', onError);
+      window.removeEventListener('unhandledrejection', onUnhandledRejection);
+    };
+  }, [currentUser, authToken]);
 
   const handleRefreshData = () => {
     setRefreshTrigger(prev => prev + 1);
@@ -402,6 +450,10 @@ export default function App() {
         return currentUser.role === 'Chairman'
           ? <MonthEndCloseView token={authToken} />
           : <div className="flex-1 p-8 text-sm text-slate-600">Only the Chairman can close an accounting month.</div>;
+      case 'Developer Errors':
+        return canViewDeveloperErrors
+          ? <DeveloperErrorLogView token={authToken} />
+          : <div className="flex-1 p-8 text-sm text-slate-600">Developer diagnostics are not enabled for this account.</div>;
       case 'Daily Collections':
         return (
           <DailyCollectionsView
@@ -481,9 +533,7 @@ export default function App() {
           <span className="font-bold uppercase tracking-tight text-sm text-slate-900 font-display">Sowetamu</span>
           <span className="text-blue-600 text-xs font-black">Sacco</span>
         </div>
-        <div className="topbar-avatar w-8 h-8 rounded-xl bg-blue-50 flex items-center justify-center font-bold text-[10px] text-blue-600 font-display">
-          {currentUser.name.split(' ').map(n => n[0]).join('')}
-        </div>
+        <div className="flex items-center gap-1"><NotificationCenter token={authToken} onNavigate={setCurrentTab} /><div className="topbar-avatar w-8 h-8 rounded-xl bg-blue-50 flex items-center justify-center font-bold text-[10px] text-blue-600 font-display">{currentUser.name.split(' ').map(n => n[0]).join('')}</div></div>
       </div>
 
       {/* Sidebar Navigation Container */}
@@ -501,6 +551,7 @@ export default function App() {
           blueprintApproved={blueprintApproved}
           onClose={() => setIsMobileSidebarOpen(false)}
           isDatabaseEmpty={members.length === 0}
+          showDeveloperErrors={canViewDeveloperErrors}
           onClearAllData={handleClearAllData}
           isCollapsed={isSidebarCollapsed}
           onToggleCollapse={() => {
@@ -570,6 +621,7 @@ export default function App() {
 
           {/* Right Side: Active role pill */}
           <div className="hidden sm:flex items-center space-x-3">
+            <NotificationCenter token={authToken} onNavigate={setCurrentTab} />
             <div className="flex flex-col items-end">
               <span className="text-[9px] text-slate-400 font-mono font-medium tracking-widest uppercase">AUDIT SAFE</span>
               <span className="text-[11px] font-bold text-blue-700 flex items-center font-mono">

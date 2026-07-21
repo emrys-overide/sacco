@@ -58,9 +58,9 @@ import { COOP_BANK_NAME } from './src/lib/collectionAccounts';
 import { startBackgroundProcessor } from './src/server/backgroundProcessor';
 import { configureProxyTrust, securityHeaders } from './src/server/securityMiddleware';
 import { registerSystemRoutes } from './src/server/systemRoutes';
-import { sendRecoveryCode } from './src/server/emailService';
 import { canReviewLoanStage } from './src/server/loanWorkflow';
 import { isSessionIdle } from './src/server/sessionPolicy';
+import { canViewDeveloperErrorLog, redactErrorText, safeErrorPath } from './src/server/developerErrorLog';
 import {
   CoopIpnError,
   assertCoopIpnAuthentication,
@@ -125,6 +125,27 @@ const initialMembers: Member[] = [];
 const initialVehicles: any[] = [];
 const initialTransactions: Transaction[] = [];
 const localLoginRateLimits = new Map<string, { attempts: number; windowStartedAt: number; lockedUntil?: number }>();
+const localClientErrorReportLimits = new Map<string, { count: number; windowStartedAt: number }>();
+const localPasswordResetRequests: Array<{ id: string; userId: string; status: 'Pending' | 'Completed' | 'Cancelled'; createdAt: string; reviewedAt?: string; reviewedBy?: string }> = [];
+const localAppNotifications: Array<{ id: string; recipientUserId: string; category: string; title: string; message: string; destination?: string; createdAt: string; readAt?: string }> = [];
+const localApplicationErrorLogs: Array<{
+  id: string;
+  occurred_at: string;
+  source: 'server' | 'client';
+  severity: 'warning' | 'error' | 'critical';
+  request_id?: string;
+  method?: string;
+  path?: string;
+  status_code?: number;
+  error_code?: string;
+  message: string;
+  stack_trace?: string;
+  context: Record<string, string>;
+  actor_user_id?: string;
+  resolved_at?: string;
+  resolved_by?: string;
+  resolution_note?: string;
+}> = [];
 
 const JWT_ISSUER = 'matatu-sacco-management-system';
 const JWT_AUDIENCE = 'sacco-api';
@@ -304,6 +325,156 @@ async function recordAuditLog(req: express.Request, action: string, entityTable:
     );
   } catch (error: any) {
     console.warn('[Sacco Audit] Failed to write audit log.');
+  }
+}
+
+type ApplicationErrorInput = {
+  req?: express.Request;
+  source: 'server' | 'client';
+  severity?: 'warning' | 'error' | 'critical';
+  statusCode?: number;
+  errorCode?: string;
+  message: unknown;
+  stack?: unknown;
+  context?: Record<string, string>;
+  actorUserId?: string;
+};
+
+async function recordApplicationError(input: ApplicationErrorInput): Promise<void> {
+  const requestUser = input.req ? (input.req as any).user as AuthorizedUser | undefined : undefined;
+  const actorUserId = input.actorUserId || requestUser?.id;
+  const requestId = input.req ? String((input.req as any).requestId || '') : '';
+  const entry = {
+    id: crypto.randomUUID(),
+    occurred_at: new Date().toISOString(),
+    source: input.source,
+    severity: input.severity || 'error',
+    request_id: requestId.match(/^[0-9a-f-]{36}$/i) ? requestId : undefined,
+    method: input.req?.method?.slice(0, 10),
+    path: safeErrorPath(input.req?.originalUrl || input.req?.path || '/'),
+    status_code: input.statusCode,
+    error_code: input.errorCode ? redactErrorText(input.errorCode, 100) : undefined,
+    message: redactErrorText(input.message, 2_000) || 'Unspecified application error.',
+    stack_trace: input.stack ? redactErrorText(input.stack, 8_000) : undefined,
+    context: Object.fromEntries(Object.entries(input.context || {}).map(([key, value]) => [key.slice(0, 80), redactErrorText(value, 500)])),
+    actor_user_id: actorUserId?.match(/^[0-9a-f-]{36}$/i) ? actorUserId : undefined
+  };
+
+  try {
+    if (postgresPool) {
+      await postgresPool.query(
+        `INSERT INTO application_error_logs (
+          id, occurred_at, source, severity, request_id, method, path, status_code,
+          error_code, message, stack_trace, context, actor_user_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13)`,
+        [
+          entry.id, entry.occurred_at, entry.source, entry.severity, entry.request_id || null,
+          entry.method || null, entry.path, entry.status_code || null, entry.error_code || null,
+          entry.message, entry.stack_trace || null, JSON.stringify(entry.context), entry.actor_user_id || null
+        ]
+      );
+      return;
+    }
+    localApplicationErrorLogs.unshift(entry);
+    localApplicationErrorLogs.splice(200);
+  } catch {
+    // Diagnostics must never make the original request fail or reveal details.
+    console.error('[Sacco Diagnostics] Error log persistence failed.');
+  }
+}
+
+function requireDeveloperErrorLogAccess(req: express.Request): AuthorizedUser {
+  const user = requireAuthenticatedUser(req);
+  if (!canViewDeveloperErrorLog(user.email)) {
+    throw new HttpError(403, 'Developer diagnostics access is not enabled for this account.', 'DEVELOPER_DIAGNOSTICS_ACCESS_DENIED');
+  }
+  return user;
+}
+
+function allowClientErrorReport(userId: string): boolean {
+  const now = Date.now();
+  const existing = localClientErrorReportLimits.get(userId);
+  if (!existing || now - existing.windowStartedAt >= 15 * 60 * 1000) {
+    localClientErrorReportLimits.set(userId, { count: 1, windowStartedAt: now });
+    return true;
+  }
+  if (existing.count >= 20) return false;
+  existing.count += 1;
+  return true;
+}
+
+type AppNotificationInput = {
+  category: string;
+  title: string;
+  message: string;
+  destination?: string;
+};
+
+function normalizedNotification(input: AppNotificationInput): AppNotificationInput {
+  return {
+    category: String(input.category || 'SYSTEM').slice(0, 80),
+    title: String(input.title || 'SACCO notification').slice(0, 180),
+    message: String(input.message || '').slice(0, 1_000),
+    destination: input.destination ? String(input.destination).slice(0, 100) : undefined
+  };
+}
+
+async function notifyUser(userId: string, input: AppNotificationInput): Promise<void> {
+  const notification = normalizedNotification(input);
+  try {
+    if (postgresPool) {
+      if (!userId.match(/^[0-9a-f-]{36}$/i)) return;
+      await postgresPool.query(
+        `INSERT INTO app_notifications (recipient_user_id, category, title, message, destination)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [userId, notification.category, notification.title, notification.message, notification.destination || null]
+      );
+      return;
+    }
+    localAppNotifications.unshift({ id: crypto.randomUUID(), recipientUserId: userId, ...notification, createdAt: new Date().toISOString() });
+    localAppNotifications.splice(500);
+  } catch {
+    console.error('[Sacco Notifications] Notification persistence failed.');
+  }
+}
+
+async function notifyRole(role: UserRole, input: AppNotificationInput): Promise<void> {
+  const notification = normalizedNotification(input);
+  try {
+    if (postgresPool) {
+      await postgresPool.query(
+        `INSERT INTO app_notifications (recipient_user_id, category, title, message, destination)
+         SELECT id, $2, $3, $4, $5
+         FROM users
+         WHERE role = $1 AND is_active = TRUE AND account_status = 'Active'`,
+        [role, notification.category, notification.title, notification.message, notification.destination || null]
+      );
+      return;
+    }
+    localStore.users.filter(user => user.role === role && user.isActive !== false && user.accountStatus === 'Active')
+      .forEach(user => localAppNotifications.unshift({ id: crypto.randomUUID(), recipientUserId: user.id, ...notification, createdAt: new Date().toISOString() }));
+    localAppNotifications.splice(500);
+  } catch {
+    console.error('[Sacco Notifications] Role notification persistence failed.');
+  }
+}
+
+async function notifyMember(memberId: string, input: AppNotificationInput): Promise<void> {
+  try {
+    if (postgresPool) {
+      const recipient = await postgresPool.query(
+        `SELECT id FROM users
+         WHERE role = 'Member' AND linked_member_id = $1 AND is_active = TRUE AND account_status = 'Active'
+         LIMIT 1`,
+        [memberId]
+      );
+      if (recipient.rowCount) await notifyUser(String(recipient.rows[0].id), input);
+      return;
+    }
+    const recipient = localStore.users.find(user => user.role === 'Member' && user.linkedMemberId === memberId && user.isActive !== false && user.accountStatus === 'Active');
+    if (recipient) await notifyUser(recipient.id, input);
+  } catch {
+    console.error('[Sacco Notifications] Member notification persistence failed.');
   }
 }
 
@@ -1268,11 +1439,23 @@ async function reverseLedgerTransaction(transactionId: string, recorderName: str
 }
 
 function sendApiError(res: express.Response, error: any) {
-  if (error instanceof HttpError || error instanceof PersistenceError || error instanceof LedgerPolicyError) {
-    return res.status(error.status).json({ error: error.message, code: error.code });
+  const knownError = error instanceof HttpError || error instanceof PersistenceError || error instanceof LedgerPolicyError;
+  const status = knownError ? error.status : 500;
+  const code = knownError ? error.code : 'INTERNAL_ERROR';
+  if (status >= 500) {
+    void recordApplicationError({
+      req: res.req as express.Request,
+      source: 'server',
+      severity: status >= 500 ? 'critical' : 'error',
+      statusCode: status,
+      errorCode: code,
+      message: error instanceof Error ? error.message : 'Unexpected server error.',
+      stack: error instanceof Error ? error.stack : undefined
+    });
   }
+  if (knownError) return res.status(status).json({ error: error.message, code });
   console.error('[Sacco API] Unexpected request failure.');
-  return res.status(500).json({ error: 'Unexpected server error.', code: 'INTERNAL_ERROR' });
+  return res.status(status).json({ error: 'Unexpected server error.', code });
 }
 
 async function listPaymentRecords(): Promise<PaymentRecord[]> {
@@ -1672,7 +1855,7 @@ function isPublicHttpsUrl(value: string): boolean {
   }
 }
 
-async function deliverMemberOtp(phone: string, otp: string, purpose: 'Activation' | 'PasswordReset'): Promise<void> {
+async function deliverMemberOtp(phone: string, otp: string): Promise<void> {
   const deliveryUrl = String(process.env.MEMBER_OTP_DELIVERY_WEBHOOK_URL || '').trim();
   if (!isPublicHttpsUrl(deliveryUrl)) {
     throw new HttpError(503, 'Member account activation is not configured.', 'MEMBER_ACTIVATION_UNAVAILABLE');
@@ -1688,7 +1871,7 @@ async function deliverMemberOtp(phone: string, otp: string, purpose: 'Activation
       to: phone,
       code: otp,
       expiresInSeconds: 600,
-      purpose: purpose === 'Activation' ? 'member-account-activation' : 'member-password-reset'
+      purpose: 'member-account-activation'
     }),
     signal: AbortSignal.timeout(10_000)
   });
@@ -1704,10 +1887,9 @@ function genericMemberOtpResponse(requestId = crypto.randomUUID()) {
   };
 }
 
-function genericEmailRecoveryResponse(requestId = crypto.randomUUID()) {
+function genericChairmanResetResponse() {
   return {
-    requestId,
-    message: 'If the email matches an eligible SACCO member account, a recovery code has been sent.'
+    message: 'If the submitted details match an active member account, the Chairman will review the password reset request.'
   };
 }
 
@@ -1753,7 +1935,7 @@ async function requestMemberActivation(identifierValue: unknown, requestIp?: str
     );
 
     try {
-      await deliverMemberOtp(String(candidate.rows[0].phone), otp, 'Activation');
+      await deliverMemberOtp(String(candidate.rows[0].phone), otp);
     } catch {
       // Do not leave a code that was never delivered usable. No code, phone,
       // or provider response is logged.
@@ -1847,97 +2029,53 @@ async function verifyMemberActivation(req: express.Request, requestIdValue: unkn
   }
 }
 
-async function requestMemberPasswordReset(emailValue: unknown, requestIp?: string): Promise<{ requestId: string; message: string }> {
-  const requestId = crypto.randomUUID();
-  if (!postgresPool) return genericEmailRecoveryResponse(requestId);
-  const email = normalizedEmail(emailValue);
-  if (!/^\S+@\S+\.\S+$/.test(email)) return genericEmailRecoveryResponse(requestId);
+async function requestChairmanPasswordReset(identifierValue: unknown, requestIp?: string): Promise<{ message: string; created: boolean }> {
+  const response = genericChairmanResetResponse();
+  const identifier = String(identifierValue || '').trim();
+  const phone = normalizedPhone(identifier);
+  const email = normalizedEmail(identifier);
+  if (!identifier || (!phone && !email.includes('@'))) return { ...response, created: false };
+
   try {
-    getActivationOtpPepper();
-    const candidate = await postgresPool.query(
-      `SELECT u.linked_member_id AS member_id, COALESCE(NULLIF(u.email, ''), m.email) AS email
-       FROM users u
-       JOIN members m ON m.id = u.linked_member_id
-       WHERE u.role = 'Member' AND u.is_active = TRUE AND u.account_status = 'Active'
-         AND lower(COALESCE(NULLIF(u.email, ''), m.email, '')) = $1
-       LIMIT 1`,
-      [email]
-    );
-    if (!candidate.rowCount || !candidate.rows[0].email) return genericEmailRecoveryResponse(requestId);
-    const memberId = String(candidate.rows[0].member_id);
-    const rateLimit = await postgresPool.query(
-      `SELECT COUNT(*)::int AS count
-       FROM member_activation_challenges
-       WHERE created_at > now() - interval '15 minutes'
-         AND purpose = 'PasswordReset'
-         AND (member_id = $1 OR ($2 <> '' AND requested_ip = $2))`,
-      [memberId, requestIp || '']
-    );
-    if (Number(rateLimit.rows[0]?.count || 0) >= 3) return genericEmailRecoveryResponse(requestId);
-    const otp = String(crypto.randomInt(100000, 1_000_000));
-    await postgresPool.query(
-      `INSERT INTO member_activation_challenges (id, member_id, otp_hash, expires_at, requested_ip, purpose, delivery_address)
-       VALUES ($1, $2, $3, now() + interval '10 minutes', NULLIF($4, ''), 'PasswordReset', $5)`,
-      [requestId, memberId, hashActivationOtp(requestId, otp), requestIp || '', email]
-    );
-    try {
-      await sendRecoveryCode(String(candidate.rows[0].email), otp);
-    } catch {
-      await postgresPool.query('DELETE FROM member_activation_challenges WHERE id = $1', [requestId]);
+    if (postgresPool) {
+      const candidate = await postgresPool.query(
+        `SELECT id FROM users
+         WHERE role = 'Member' AND is_active = TRUE AND account_status = 'Active'
+           AND (($1 <> '' AND regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = $1)
+             OR ($2 LIKE '%@%' AND lower(COALESCE(email, '')) = $2))
+         LIMIT 1`,
+        [phone, email]
+      );
+      if (!candidate.rowCount) return { ...response, created: false };
+      const userId = String(candidate.rows[0].id);
+      const recent = await postgresPool.query(
+        `SELECT COUNT(*)::int AS count FROM password_reset_requests
+         WHERE created_at > now() - interval '15 minutes'
+           AND (user_id = $1 OR ($2 <> '' AND requested_ip = $2))`,
+        [userId, requestIp || '']
+      );
+      if (Number(recent.rows[0]?.count || 0) >= 3) return { ...response, created: false };
+      const inserted = await postgresPool.query(
+        `INSERT INTO password_reset_requests (user_id, requested_ip)
+         VALUES ($1, NULLIF($2, ''))
+         ON CONFLICT DO NOTHING
+         RETURNING id`,
+        [userId, requestIp || '']
+      );
+      return { ...response, created: Boolean(inserted.rowCount) };
+    }
+
+    const user = localStore.users.find(item => item.role === 'Member' && item.isActive !== false && item.accountStatus === 'Active' && (
+      (phone && normalizedPhone(item.phone) === phone) || (email.includes('@') && normalizedEmail(item.email) === email)
+    ));
+    if (user && !localPasswordResetRequests.some(request => request.userId === user.id && request.status === 'Pending')) {
+      localPasswordResetRequests.unshift({ id: crypto.randomUUID(), userId: user.id, status: 'Pending', createdAt: new Date().toISOString() });
+      return { ...response, created: true };
     }
   } catch {
-    // Keep the response generic for all failure and eligibility states.
+    // Keep this public response identical whether or not a member exists.
   }
-  return genericEmailRecoveryResponse(requestId);
-}
-
-async function verifyMemberPasswordReset(requestIdValue: unknown, otpValue: unknown, passwordValue: unknown): Promise<void> {
-  if (!postgresPool) throw new HttpError(503, 'Member password reset requires the PostgreSQL SACCO database.', 'MEMBER_PASSWORD_RESET_UNAVAILABLE');
-  const requestId = String(requestIdValue || '').trim();
-  const otp = String(otpValue || '').trim();
-  const password = String(passwordValue || '');
-  if (!requestId.match(/^[0-9a-f-]{36}$/i) || !otp.match(/^\d{6}$/) || password.length < 8) {
-    throw new HttpError(400, 'The verification code is invalid or has expired.', 'PASSWORD_RESET_CODE_INVALID');
-  }
-  const client = await postgresPool.connect();
-  let committed = false;
-  try {
-    await client.query('BEGIN');
-    const result = await client.query(
-      `SELECT * FROM member_activation_challenges
-       WHERE id = $1 AND purpose = 'PasswordReset'
-       FOR UPDATE`,
-      [requestId]
-    );
-    const challenge = result.rows[0];
-    if (!challenge || challenge.used_at || new Date(challenge.expires_at).getTime() <= Date.now() || challenge.attempt_count >= challenge.max_attempts) {
-      throw new HttpError(400, 'The verification code is invalid or has expired.', 'PASSWORD_RESET_CODE_INVALID');
-    }
-    const expected = Buffer.from(String(challenge.otp_hash), 'hex');
-    const supplied = Buffer.from(hashActivationOtp(requestId, otp), 'hex');
-    if (expected.length !== supplied.length || !crypto.timingSafeEqual(expected, supplied)) {
-      await client.query('UPDATE member_activation_challenges SET attempt_count = attempt_count + 1 WHERE id = $1', [requestId]);
-      await client.query('COMMIT');
-      committed = true;
-      throw new HttpError(400, 'The verification code is invalid or has expired.', 'PASSWORD_RESET_CODE_INVALID');
-    }
-    const updated = await client.query(
-      `UPDATE users
-       SET password_hash = crypt($1, gen_salt('bf')), must_change_password = FALSE,
-           temporary_password_expires_at = NULL, updated_at = now()
-       WHERE linked_member_id = $2 AND role = 'Member' AND is_active = TRUE AND account_status = 'Active'`,
-      [password, challenge.member_id]
-    );
-    if (!updated.rowCount) throw new HttpError(400, 'The verification code is invalid or has expired.', 'PASSWORD_RESET_CODE_INVALID');
-    await client.query('UPDATE member_activation_challenges SET used_at = now() WHERE id = $1', [requestId]);
-    await client.query('COMMIT');
-    committed = true;
-  } catch (error) {
-    if (!committed) await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
+  return { ...response, created: false };
 }
 
 // Verify the selected persistence adapter before accepting requests.
@@ -1970,6 +2108,13 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
 
   app.disable('x-powered-by');
   app.use(securityHeaders(isProduction));
+  app.use((req, res, next) => {
+    const supplied = String(req.headers['x-request-id'] || '');
+    const requestId = supplied.match(/^[0-9a-f-]{36}$/i) ? supplied : crypto.randomUUID();
+    (req as any).requestId = requestId;
+    res.setHeader('X-Request-Id', requestId);
+    next();
+  });
   // Profile photos are deliberately small and stored only after strict data-URL
   // validation below. Bank callbacks and every other JSON API remain bounded.
   app.use(express.json({ limit: '300kb' }));
@@ -2092,18 +2237,18 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
     }
   });
 
-  app.post('/api/auth/member-password-reset/request', async (req, res) => {
+  app.post('/api/auth/password-reset-request', async (req, res) => {
     try {
-      res.json(await requestMemberPasswordReset(req.body?.email ?? req.body?.identifier, req.ip));
-    } catch (error: any) {
-      sendApiError(res, error);
-    }
-  });
-
-  app.post('/api/auth/member-password-reset/verify', async (req, res) => {
-    try {
-      await verifyMemberPasswordReset(req.body?.requestId, req.body?.code, req.body?.password);
-      res.json({ passwordUpdated: true });
+      const result = await requestChairmanPasswordReset(req.body?.identifier, req.ip);
+      if (result.created) {
+        await notifyRole('Chairman', {
+          category: 'PASSWORD_RESET_REQUEST',
+          title: 'Member password reset requested',
+          message: 'A member has requested a password reset. Verify their identity and issue a temporary password from Account Access.',
+          destination: 'Account Access'
+        });
+      }
+      res.json({ message: result.message });
     } catch (error: any) {
       sendApiError(res, error);
     }
@@ -2253,6 +2398,193 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
   app.use('/api/member-portal', authenticateSaccoUser);
   app.use('/api/loans', authenticateSaccoUser);
   app.use('/api/monthly-closings', authenticateSaccoUser);
+  app.use('/api/developer-errors', authenticateSaccoUser);
+  app.use('/api/password-reset-requests', authenticateSaccoUser);
+  app.use('/api/notifications', authenticateSaccoUser);
+
+  app.get('/api/developer-errors/access', (req, res) => {
+    const user = requireAuthenticatedUser(req);
+    res.json({ allowed: canViewDeveloperErrorLog(user.email) });
+  });
+
+  app.get('/api/password-reset-requests', requirePermission('users.write'), async (req, res) => {
+    try {
+      if (postgresPool) {
+        const result = await postgresPool.query(
+          `SELECT r.id, r.user_id, r.status, r.created_at,
+                  u.full_name, u.email, u.phone, m.member_number
+           FROM password_reset_requests r
+           JOIN users u ON u.id = r.user_id
+           LEFT JOIN members m ON m.id = u.linked_member_id
+           WHERE r.status = 'Pending'
+           ORDER BY r.created_at ASC`
+        );
+        return res.json(result.rows);
+      }
+      const users = new Map(localStore.users.map(user => [user.id, user]));
+      return res.json(localPasswordResetRequests.filter(request => request.status === 'Pending').map(request => {
+        const user = users.get(request.userId);
+        return {
+          id: request.id,
+          user_id: request.userId,
+          status: request.status,
+          created_at: request.createdAt,
+          full_name: user?.name || 'Member',
+          email: user?.email || '',
+          phone: user?.phone || ''
+        };
+      }));
+    } catch (error: any) {
+      return sendApiError(res, error);
+    }
+  });
+
+  app.get('/api/notifications', async (req, res) => {
+    try {
+      const user = requireAuthenticatedUser(req);
+      const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 100);
+      if (postgresPool) {
+        const [items, unread] = await Promise.all([
+          postgresPool.query(
+            `SELECT id, category, title, message, destination, created_at, read_at
+             FROM app_notifications WHERE recipient_user_id = $1
+             ORDER BY created_at DESC LIMIT $2`,
+            [user.id, limit]
+          ),
+          postgresPool.query('SELECT COUNT(*)::int AS count FROM app_notifications WHERE recipient_user_id = $1 AND read_at IS NULL', [user.id])
+        ]);
+        return res.json({ items: items.rows, unreadCount: Number(unread.rows[0]?.count || 0) });
+      }
+      const items = localAppNotifications.filter(item => item.recipientUserId === user.id).slice(0, limit).map(item => ({
+        id: item.id, category: item.category, title: item.title, message: item.message, destination: item.destination,
+        created_at: item.createdAt, read_at: item.readAt
+      }));
+      return res.json({ items, unreadCount: localAppNotifications.filter(item => item.recipientUserId === user.id && !item.readAt).length });
+    } catch (error: any) {
+      return sendApiError(res, error);
+    }
+  });
+
+  app.post('/api/notifications/read-all', async (req, res) => {
+    try {
+      const user = requireAuthenticatedUser(req);
+      if (postgresPool) {
+        await postgresPool.query('UPDATE app_notifications SET read_at = now() WHERE recipient_user_id = $1 AND read_at IS NULL', [user.id]);
+      } else {
+        localAppNotifications.filter(item => item.recipientUserId === user.id && !item.readAt).forEach(item => { item.readAt = new Date().toISOString(); });
+      }
+      res.json({ updated: true });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.post('/api/notifications/:id/read', async (req, res) => {
+    try {
+      const user = requireAuthenticatedUser(req);
+      const notificationId = String(req.params.id || '');
+      if (!notificationId.match(/^[0-9a-f-]{36}$/i)) throw new HttpError(404, 'Notification was not found.', 'NOTIFICATION_NOT_FOUND');
+      if (postgresPool) {
+        const updated = await postgresPool.query(
+          `UPDATE app_notifications SET read_at = COALESCE(read_at, now())
+           WHERE id = $1 AND recipient_user_id = $2 RETURNING id`,
+          [notificationId, user.id]
+        );
+        if (!updated.rowCount) throw new HttpError(404, 'Notification was not found.', 'NOTIFICATION_NOT_FOUND');
+      } else {
+        const item = localAppNotifications.find(notification => notification.id === notificationId && notification.recipientUserId === user.id);
+        if (!item) throw new HttpError(404, 'Notification was not found.', 'NOTIFICATION_NOT_FOUND');
+        item.readAt ||= new Date().toISOString();
+      }
+      res.json({ updated: true });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.post('/api/developer-errors/client', async (req, res) => {
+    try {
+      const user = requireAuthenticatedUser(req);
+      if (!allowClientErrorReport(user.id)) {
+        throw new HttpError(429, 'Too many client error reports. Try again later.', 'CLIENT_ERROR_REPORT_RATE_LIMITED');
+      }
+      const message = String(req.body?.message || '').trim();
+      if (message.length < 3) throw new HttpError(400, 'A client error message is required.', 'CLIENT_ERROR_MESSAGE_REQUIRED');
+      await recordApplicationError({
+        req,
+        source: 'client',
+        severity: 'error',
+        errorCode: 'CLIENT_RUNTIME_ERROR',
+        message,
+        stack: req.body?.stack,
+        context: {
+          component: String(req.body?.component || '').slice(0, 300),
+          page: safeErrorPath(req.body?.page),
+          browser: String(req.body?.browser || '').slice(0, 300)
+        },
+        actorUserId: user.id
+      });
+      res.status(202).json({ recorded: true, requestId: (req as any).requestId });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.get('/api/developer-errors', async (req, res) => {
+    try {
+      requireDeveloperErrorLogAccess(req);
+      const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 200);
+      const openOnly = String(req.query.status || 'open') !== 'all';
+      if (postgresPool) {
+        const result = await postgresPool.query(
+          `SELECT e.*, resolver.full_name AS resolved_by_name
+           FROM application_error_logs e
+           LEFT JOIN users resolver ON resolver.id = e.resolved_by
+           WHERE ($1::boolean = FALSE OR e.resolved_at IS NULL)
+           ORDER BY e.occurred_at DESC
+           LIMIT $2`,
+          [openOnly, limit]
+        );
+        return res.json(result.rows);
+      }
+      const rows = localApplicationErrorLogs.filter(entry => !openOnly || !entry.resolved_at).slice(0, limit);
+      return res.json(rows);
+    } catch (error: any) {
+      return sendApiError(res, error);
+    }
+  });
+
+  app.patch('/api/developer-errors/:id', async (req, res) => {
+    try {
+      const user = requireDeveloperErrorLogAccess(req);
+      const id = String(req.params.id || '');
+      if (!id.match(/^[0-9a-f-]{36}$/i)) throw new HttpError(404, 'Diagnostic entry was not found.', 'ERROR_LOG_NOT_FOUND');
+      const resolved = req.body?.resolved !== false;
+      const note = redactErrorText(req.body?.resolutionNote, 1_000);
+      if (postgresPool) {
+        const result = await postgresPool.query(
+          `UPDATE application_error_logs
+           SET resolved_at = CASE WHEN $2 THEN now() ELSE NULL END,
+               resolved_by = CASE WHEN $2 THEN $3 ELSE NULL END,
+               resolution_note = CASE WHEN $2 THEN NULLIF($4, '') ELSE NULL END
+           WHERE id = $1
+           RETURNING *`,
+          [id, resolved, user.id, note]
+        );
+        if (!result.rowCount) throw new HttpError(404, 'Diagnostic entry was not found.', 'ERROR_LOG_NOT_FOUND');
+        await recordAuditLog(req, resolved ? 'DEVELOPER_ERROR_RESOLVED' : 'DEVELOPER_ERROR_REOPENED', 'application_error_logs', id, undefined, { resolutionNote: note || null });
+        return res.json(result.rows[0]);
+      }
+      const local = localApplicationErrorLogs.find(entry => entry.id === id);
+      if (!local) throw new HttpError(404, 'Diagnostic entry was not found.', 'ERROR_LOG_NOT_FOUND');
+      local.resolved_at = resolved ? new Date().toISOString() : undefined;
+      local.resolved_by = resolved ? user.id : undefined;
+      local.resolution_note = resolved ? note || undefined : undefined;
+      return res.json(local);
+    } catch (error: any) {
+      return sendApiError(res, error);
+    }
+  });
 
   // API 2: Get Users
   app.get('/api/users', requirePermission('users.read'), async (req, res) => {
@@ -2319,29 +2651,77 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
     try {
       const password = String(req.body?.password || '');
       if (password.length < 8) throw new HttpError(400, 'Choose a temporary password of at least 8 characters.', 'PASSWORD_INVALID');
+      const resetRequestId = String(req.body?.resetRequestId || '').trim();
+      if (resetRequestId && !resetRequestId.match(/^[0-9a-f-]{36}$/i)) {
+        throw new HttpError(400, 'The password reset request is invalid.', 'PASSWORD_RESET_REQUEST_INVALID');
+      }
       let updated: AuthorizedUser | undefined;
       if (postgresPool) {
         if (!req.params.id.match(/^[0-9a-f-]{36}$/i)) throw new HttpError(404, 'Account was not found.', 'USER_NOT_FOUND');
-        const result = await postgresPool.query(
-          `UPDATE users SET password_hash = crypt($1, gen_salt('bf')),
-             totp_secret_ciphertext = CASE WHEN $2 THEN NULL ELSE totp_secret_ciphertext END,
-             totp_enabled_at = CASE WHEN $2 THEN NULL ELSE totp_enabled_at END,
-             must_change_password = TRUE,
-             temporary_password_expires_at = now() + interval '24 hours',
-             updated_at = now()
-           WHERE id = $3 AND is_active = TRUE
-           RETURNING id, full_name, email, phone, role, is_active, account_status, linked_member_id`,
-          [password, process.env.OFFICER_TOTP_REQUIRED !== 'true', req.params.id]
-        );
-        if (!result.rowCount) throw new HttpError(404, 'Account was not found.', 'USER_NOT_FOUND');
-        updated = mapDbUser(result.rows[0]);
+        const client = await postgresPool.connect();
+        let committed = false;
+        try {
+          await client.query('BEGIN');
+          if (resetRequestId) {
+            const request = await client.query(
+              `SELECT id FROM password_reset_requests
+               WHERE id = $1 AND user_id = $2 AND status = 'Pending'
+               FOR UPDATE`,
+              [resetRequestId, req.params.id]
+            );
+            if (!request.rowCount) throw new HttpError(409, 'This password reset request is no longer pending.', 'PASSWORD_RESET_REQUEST_NOT_PENDING');
+          }
+          const result = await client.query(
+            `UPDATE users SET password_hash = crypt($1, gen_salt('bf')),
+               totp_secret_ciphertext = CASE WHEN $2 THEN NULL ELSE totp_secret_ciphertext END,
+               totp_enabled_at = CASE WHEN $2 THEN NULL ELSE totp_enabled_at END,
+               must_change_password = TRUE,
+               temporary_password_expires_at = now() + interval '24 hours',
+               updated_at = now()
+             WHERE id = $3 AND is_active = TRUE
+             RETURNING id, full_name, email, phone, role, is_active, account_status, linked_member_id`,
+            [password, process.env.OFFICER_TOTP_REQUIRED !== 'true', req.params.id]
+          );
+          if (!result.rowCount) throw new HttpError(404, 'Account was not found.', 'USER_NOT_FOUND');
+          if (resetRequestId) {
+            await client.query(
+              `UPDATE password_reset_requests
+               SET status = 'Completed', reviewed_at = now(), reviewed_by = $2
+               WHERE id = $1`,
+              [resetRequestId, requireAuthenticatedUser(req).id]
+            );
+          }
+          await client.query('COMMIT');
+          committed = true;
+          updated = mapDbUser(result.rows[0]);
+        } catch (error) {
+          if (!committed) await client.query('ROLLBACK');
+          throw error;
+        } finally {
+          client.release();
+        }
       } else {
         const user = localStore.users.find(item => item.id === req.params.id);
         if (!user) throw new HttpError(404, 'Account was not found.', 'USER_NOT_FOUND');
+        const request = resetRequestId ? localPasswordResetRequests.find(item => item.id === resetRequestId && item.userId === user.id && item.status === 'Pending') : undefined;
+        if (resetRequestId && !request) throw new HttpError(409, 'This password reset request is no longer pending.', 'PASSWORD_RESET_REQUEST_NOT_PENDING');
         user.devPassword = password;
+        if (request) {
+          request.status = 'Completed';
+          request.reviewedAt = new Date().toISOString();
+          request.reviewedBy = requireAuthenticatedUser(req).id;
+        }
         updated = user;
       }
-      await recordAuditLog(req, 'ACCOUNT_PASSWORD_RESET_BY_CHAIRMAN', 'users', updated.id, undefined, { role: updated.role });
+      await recordAuditLog(req, resetRequestId ? 'MEMBER_PASSWORD_RESET_REQUEST_APPROVED' : 'ACCOUNT_PASSWORD_RESET_BY_CHAIRMAN', 'users', updated.id, undefined, { role: updated.role, resetRequestId: resetRequestId || null });
+      if (resetRequestId) {
+        await notifyUser(updated.id, {
+          category: 'PASSWORD_RESET_APPROVED',
+          title: 'Your password reset was approved',
+          message: 'The Chairman has issued a temporary password. Sign in and immediately create your own private password.',
+          destination: 'My Account'
+        });
+      }
       res.json({ passwordUpdated: true });
     } catch (error: any) {
       sendApiError(res, error);
@@ -2464,6 +2844,12 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
         [memberId, principal, interestRate, notes, loanType, repaymentPeriodMonths, repaymentMethod, incomeSource, monthlyIncome, guarantorDetails, collateralDetails, JSON.stringify(applicationSnapshot)]
       );
       await recordAuditLog(req, 'LOAN_APPLICATION_CREATED', 'loans', String(result.rows[0].id), undefined, result.rows[0]);
+      await notifyRole('Secretary', {
+        category: 'LOAN_SECRETARY_REVIEW',
+        title: 'New loan application needs review',
+        message: 'A member loan application is waiting for Secretary eligibility review.',
+        destination: 'Loans'
+      });
       res.status(201).json(result.rows[0]);
     } catch (error: any) { sendApiError(res, error); }
   });
@@ -2485,6 +2871,21 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       );
       if (!result.rowCount) throw new HttpError(409, 'This loan is not awaiting Secretary review.', 'LOAN_STAGE_MISMATCH');
       await recordAuditLog(req, eligible ? 'LOAN_SECRETARY_APPROVED' : 'LOAN_SECRETARY_REJECTED', 'loans', req.params.id, undefined, result.rows[0]);
+      if (eligible) {
+        await notifyRole('Treasurer', {
+          category: 'LOAN_TREASURER_REVIEW',
+          title: 'Loan application needs financial review',
+          message: 'A loan application has passed Secretary eligibility review and is ready for Treasurer review.',
+          destination: 'Loans'
+        });
+      } else {
+        await notifyMember(String(result.rows[0].member_id), {
+          category: 'LOAN_REJECTED',
+          title: 'Loan request was rejected',
+          message: `Your loan request was rejected. Reason: ${rejectionReason}`,
+          destination: 'My Account'
+        });
+      }
       res.json(result.rows[0]);
     } catch (error: any) { sendApiError(res, error); }
   });
@@ -2506,6 +2907,21 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       );
       if (!result.rowCount) throw new HttpError(409, 'This loan is not awaiting Treasurer review.', 'LOAN_STAGE_MISMATCH');
       await recordAuditLog(req, approved ? 'LOAN_TREASURER_APPROVED' : 'LOAN_TREASURER_REJECTED', 'loans', req.params.id, undefined, result.rows[0]);
+      if (approved) {
+        await notifyRole('Chairman', {
+          category: 'LOAN_CHAIRMAN_REVIEW',
+          title: 'Loan application needs final decision',
+          message: 'A loan application has passed financial review and is waiting for the Chairman’s final decision.',
+          destination: 'Loans'
+        });
+      } else {
+        await notifyMember(String(result.rows[0].member_id), {
+          category: 'LOAN_REJECTED',
+          title: 'Loan request was rejected',
+          message: `Your loan request was rejected. Reason: ${rejectionReason}`,
+          destination: 'My Account'
+        });
+      }
       res.json(result.rows[0]);
     } catch (error: any) { sendApiError(res, error); }
   });
@@ -2524,6 +2940,12 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       );
       if (!result.rowCount) throw new HttpError(409, 'Only an applied loan can be approved.', 'LOAN_NOT_APPROVABLE');
       await recordAuditLog(req, 'LOAN_APPROVED_AND_DISBURSED', 'loans', String(result.rows[0].id), undefined, result.rows[0]);
+      await notifyMember(String(result.rows[0].member_id), {
+        category: 'LOAN_APPROVED',
+        title: 'Your loan was approved',
+        message: `Your loan has been approved. The repayment due date is ${String(result.rows[0].due_date).slice(0, 10)}.`,
+        destination: 'My Account'
+      });
       res.json(result.rows[0]);
     } catch (error: any) { sendApiError(res, error); }
   });
@@ -2541,6 +2963,12 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       );
       if (!result.rowCount) throw new HttpError(409, 'Only an applied loan can be rejected.', 'LOAN_NOT_REJECTABLE');
       await recordAuditLog(req, 'LOAN_REJECTED', 'loans', String(result.rows[0].id), undefined, result.rows[0]);
+      await notifyMember(String(result.rows[0].member_id), {
+        category: 'LOAN_REJECTED',
+        title: 'Loan request was rejected',
+        message: `Your loan request was rejected. Reason: ${reason}`,
+        destination: 'My Account'
+      });
       res.json(result.rows[0]);
     } catch (error: any) { sendApiError(res, error); }
   });
@@ -3161,10 +3589,20 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
     res.status(405).json({ MessageCode: '405', Message: 'Method not allowed' });
   });
 
-  app.use((error: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  app.use((error: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
     if (error?.type === 'entity.too.large') return res.status(413).json({ MessageCode: '413', Message: 'Request body is too large' });
     if (error instanceof SyntaxError && 'body' in error) return res.status(400).json({ MessageCode: '400', Message: 'Malformed JSON payload' });
-    next(error);
+    void recordApplicationError({
+      req,
+      source: 'server',
+      severity: 'critical',
+      statusCode: 500,
+      errorCode: 'UNHANDLED_REQUEST_ERROR',
+      message: error instanceof Error ? error.message : 'Unhandled request error.',
+      stack: error instanceof Error ? error.stack : undefined
+    });
+    console.error('[Sacco API] Unhandled request failure.');
+    return res.status(500).json({ error: 'Unexpected server error.', code: 'INTERNAL_ERROR' });
   });
 
   // The standalone Node runtime serves the SPA with Vite in development and

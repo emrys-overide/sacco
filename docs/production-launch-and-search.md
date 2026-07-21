@@ -28,7 +28,7 @@ site appear more complete in search.
    `JWT_SECRET` and `MEMBER_OTP_PEPPER`. Keep development fallback variables
    false.
 3. **Use a separate production database.** Apply all migrations through
-   `019`, verify `npm run db:status`, and enable database backups. Do not use
+   `022`, verify `npm run db:status`, and enable database backups. Do not use
    test data or seed records as live SACCO data.
 4. **Test the deployed URL.** Check `/api/health`, sign in as each role, create
    a non-sensitive test member, test recovery email, and repeat the UAT list.
@@ -36,6 +36,10 @@ site appear more complete in search.
 5. **Keep Co-op Bank IPN disabled until bank onboarding is complete.** A bank
    callback requires the SACCO's approved account numbers, final credentials,
    authentication rules, a controlled callback test, and an always-on host.
+6. **Restrict developer diagnostics.** If you need the private Developer
+   Errors page, set `DEVELOPER_ERROR_LOG_EMAILS` to specific active SACCO login
+   email addresses. It is disabled when the variable is blank; never grant it
+   to a shared officer email.
 
 ## Search ranking actions you own
 

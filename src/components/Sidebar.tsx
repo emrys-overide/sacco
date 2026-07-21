@@ -19,7 +19,8 @@ import {
   UserRoundPlus,
   Landmark,
   BookOpenCheck,
-  CalendarClock
+  CalendarClock,
+  Bug
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -30,6 +31,7 @@ interface SidebarProps {
   blueprintApproved: boolean;
   onClose?: () => void;
   isDatabaseEmpty: boolean;
+  showDeveloperErrors: boolean;
   onClearAllData: () => void;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
@@ -43,6 +45,7 @@ export default function Sidebar({
   blueprintApproved,
   onClose,
   isDatabaseEmpty,
+  showDeveloperErrors,
   onClearAllData,
   isCollapsed,
   onToggleCollapse
@@ -70,7 +73,11 @@ export default function Sidebar({
   };
   const menuItems = currentUser.role === 'Member'
     ? [{ name: 'My Account', icon: <LayoutDashboard className="w-4 h-4" /> }]
-    : [...officerMenus[currentUser.role], { name: 'Roles & Responsibilities', icon: <BookOpenCheck className="w-4 h-4" /> }];
+    : [
+      ...officerMenus[currentUser.role],
+      { name: 'Roles & Responsibilities', icon: <BookOpenCheck className="w-4 h-4" /> },
+      ...(showDeveloperErrors ? [{ name: 'Developer Errors', icon: <Bug className="w-4 h-4" /> }] : [])
+    ];
 
   return (
     <aside 

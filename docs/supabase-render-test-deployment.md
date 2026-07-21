@@ -39,7 +39,7 @@ DATABASE_SSL=true npm run db:migrate
 DATABASE_SSL=true npm run db:status
 ```
 
-Apply migrations `001` through `019` before starting the application. Migration
+Apply migrations `001` through `022` before starting the application. Migration
 `011` enables row-level security and removes Supabase browser-role access from
 every application table; the browser continues to use only the Express API. Never
 run the reference seed migration against real SACCO data without reviewing it.
@@ -50,6 +50,10 @@ run the reference seed migration against real SACCO data without reviewing it.
 2. In Render, choose **New > Blueprint** and select this repository.
 3. Render reads `render.yaml`.
 4. Enter `DATABASE_URL` as a secret and set `APP_URL` to the Render HTTPS URL.
+   If the private Developer Errors page is needed, set
+   `DEVELOPER_ERROR_LOG_EMAILS` to your active SACCO login email (or a
+   comma-separated list of developer account emails). Do not use a public
+   shared address.
 5. Deploy and require `/api/health` to report `postgres_configured`.
 
 The generated `JWT_SECRET` must not be replaced casually: changing it signs all
@@ -67,6 +71,8 @@ users out.
 - Confirm all `/api/**` responses carry `Cache-Control: no-store`.
 - Disconnect the network and confirm the PWA shows the offline notice and never
   displays or accepts cached financial data.
+- Submit a member password-reset request and confirm only the Chairman can
+  issue the temporary password from **Account Access**.
 - Keep all Co-op Bank switches off throughout the free-host test.
 
 ## 5. Install the PWA

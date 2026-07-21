@@ -7,6 +7,7 @@ import { sanitizePersonName, sanitizePhoneNumber } from '../lib/inputValidation'
 type OfficerRole = Exclude<UserRole, 'Chairman' | 'Member'>;
 type OfficerCreation = { fullName: string; email: string; phone: string; role: OfficerRole; password: string };
 type OfficerCreationResponse = { user: User; requiresTotpEnrollment: boolean };
+type PasswordResetRequest = { id: string; user_id: string; full_name: string; email?: string; phone?: string; member_number?: string; created_at: string };
 
 const officerRoles: Array<{ value: OfficerRole; label: string }> = [
   { value: 'Secretary', label: 'Secretary' },
@@ -19,6 +20,7 @@ const inputClass = 'w-full rounded-2xl border border-slate-200 bg-white px-4 py-
 
 export default function OfficerAccountsView({ fallbackAuthToken }: { fallbackAuthToken: string }) {
   const [officers, setOfficers] = useState<User[]>([]);
+  const [passwordResetRequests, setPasswordResetRequests] = useState<PasswordResetRequest[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState('');
@@ -33,9 +35,15 @@ export default function OfficerAccountsView({ fallbackAuthToken }: { fallbackAut
 
   useEffect(() => {
     let active = true;
-    fetchSaccoJson<User[]>('/api/users', {}, fallbackAuthToken)
-      .then(users => {
-        if (active) setOfficers(users);
+    Promise.all([
+      fetchSaccoJson<User[]>('/api/users', {}, fallbackAuthToken),
+      fetchSaccoJson<PasswordResetRequest[]>('/api/password-reset-requests', {}, fallbackAuthToken)
+    ])
+      .then(([users, resetRequests]) => {
+        if (active) {
+          setOfficers(users);
+          setPasswordResetRequests(resetRequests);
+        }
       })
       .catch(caught => {
         if (active) setError(caught instanceof Error ? caught.message : 'Account access could not be loaded.');
@@ -72,14 +80,15 @@ export default function OfficerAccountsView({ fallbackAuthToken }: { fallbackAut
     }
   };
 
-  const resetPassword = async (officer: User) => {
-    const password = window.prompt(`Set a new temporary password for ${officer.name} (at least 8 characters):`);
+  const resetPassword = async (officer: Pick<User, 'id' | 'name'>, requestId?: string) => {
+    const password = window.prompt(`Set a new temporary password for ${officer.name} (at least 8 characters). Share it with them privately:`);
     if (password === null) return;
     if (password.length < 8) { setError('The temporary password must contain at least 8 characters.'); return; }
     setError(''); setNotice(''); setIsSaving(true);
     try {
-      await postSaccoJson(`/api/users/${officer.id}/password`, { password }, fallbackAuthToken);
-      setNotice(`${officer.name}'s password was reset. They can sign in immediately.`);
+      await postSaccoJson(`/api/users/${officer.id}/password`, { password, ...(requestId ? { resetRequestId: requestId } : {}) }, fallbackAuthToken);
+      if (requestId) setPasswordResetRequests(current => current.filter(request => request.id !== requestId));
+      setNotice(`${officer.name}'s temporary password is ready. Share it privately; they must replace it immediately after sign-in.`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'The password could not be reset.');
     } finally { setIsSaving(false); }
@@ -142,6 +151,10 @@ export default function OfficerAccountsView({ fallbackAuthToken }: { fallbackAut
           </div>
 
           <div className="mt-6 space-y-3">
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+              <div className="flex items-start justify-between gap-3"><div><h3 className="font-bold text-amber-950">Member reset requests</h3><p className="mt-1 text-xs leading-5 text-amber-900">Approve only after confirming the member’s identity through your normal SACCO process.</p></div><span className="rounded-full bg-amber-200 px-2 py-1 text-[10px] font-black text-amber-950">{passwordResetRequests.length} pending</span></div>
+              <div className="mt-3 space-y-2">{passwordResetRequests.map(request => <div key={request.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-100 bg-white p-3"><div><p className="text-sm font-bold text-slate-800">{request.full_name}</p><p className="text-xs text-slate-500">{request.member_number ? `Member ${request.member_number} · ` : ''}{request.email || request.phone || 'Registered member'}</p><p className="mt-1 text-[10px] text-slate-400">Requested {new Date(request.created_at).toLocaleString('en-KE')}</p></div><button type="button" disabled={isSaving} onClick={() => void resetPassword({ id: request.user_id, name: request.full_name }, request.id)} className="rounded-lg bg-emerald-700 px-3 py-2 text-xs font-bold text-white disabled:opacity-60">Confirm & set temporary password</button></div>)}{!passwordResetRequests.length && <p className="py-2 text-xs text-amber-900">No member password reset requests are waiting.</p>}</div>
+            </div>
             {isLoading ? <p className="text-sm text-slate-500">Loading officer accounts...</p> : officers.map(officer => (
               <div key={officer.id} className="flex items-center justify-between gap-4 rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3">
                 <div className="min-w-0">
