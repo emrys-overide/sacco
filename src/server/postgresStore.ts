@@ -227,6 +227,7 @@ export async function listPostgresMembers(pool: Pool): Promise<Member[]> {
        FROM ledger_entries le
        WHERE le.member_id = m.id AND le.status IN ('Posted', 'Reversed')
      ) fin ON TRUE
+     WHERE m.deleted_at IS NULL
      ORDER BY m.created_at DESC`
   );
   return result.rows.map(mapMember);
@@ -269,7 +270,7 @@ export async function getPostgresMember(pool: Pool, memberId: string): Promise<M
        FROM ledger_entries le
        WHERE le.member_id = m.id AND le.status IN ('Posted', 'Reversed')
      ) fin ON TRUE
-     WHERE m.id = $1
+     WHERE m.id = $1 AND m.deleted_at IS NULL
      LIMIT 1`,
     [memberId]
   );

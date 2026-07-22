@@ -66,6 +66,7 @@ export const ROLE_PERMISSION_MATRIX: Readonly<Record<UserRole, readonly SaccoPer
     'vehicles.write',
     'drivers.assign',
     'ledger.read.all',
+    'ledger.write',
     'payments.read.all',
     'reports.read.all',
     'reports.export',

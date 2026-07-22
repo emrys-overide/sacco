@@ -14,7 +14,10 @@ test('permission matrix keeps each administrative role within its approved scope
   assert.equal(hasPermission('Secretary', 'users.write'), false);
   assert.equal(hasPermission('Treasurer', 'payments.reconcile'), true);
   assert.equal(hasPermission('Secretary', 'members.write'), true);
-  assert.equal(hasPermission('Secretary', 'ledger.write'), false);
+  assert.equal(hasPermission('Secretary', 'ledger.write'), true);
+  assert.equal(hasPermission('Secretary', 'payments.reconcile'), false);
+  assert.equal(hasPermission('Secretary', 'users.write'), false);
+  assert.equal(hasPermission('Secretary', 'loans.approve'), false);
   assert.equal(hasPermission('Auditor', 'reports.read.all'), true);
   assert.equal(hasPermission('Auditor', 'ledger.write'), false);
   assert.equal(hasPermission('Member', 'member.portal.read'), true);

@@ -6,8 +6,8 @@ for every officer; officers must not share passwords.
 
 | Role | Main responsibility | Can do | Cannot do |
 | --- | --- | --- | --- |
-| Chairman | Governance and final accountability | Create and reset officer accounts; register members and vehicles; post and correct ledger entries; manage loan policy; record a loan for a member; finally approve or reject loans; close a completed accounting month; view and reconcile bank events; access reports. | Delegate the final loan approval or month close to another role. |
-| Secretary | Member records and eligibility | Register and update members and vehicles; assign drivers; view ledger, banking, and reports; perform the first loan eligibility review and either pass it to the Treasurer or reject it with a reason. In the exceptional case of a pending Chairman recovery request, verify the Chairman and issue that Chairman's temporary recovery password. | Post daily collections or expenses; reconcile payments; create accounts; reset member or other officer accounts; set loan policy; approve/disburse a loan; close a month. |
+| Chairman | Governance and final accountability | Create and reset officer accounts; register members and vehicles; remove a member and their login account after all balances are settled; post and correct ledger entries; manage loan policy; record a loan for a member; finally approve or reject loans; close a completed accounting month; view and reconcile bank events; access reports. | Delegate the final loan approval, member deletion, or month close to another role. |
+| Secretary | Daily records and eligibility | Post and correct daily collection records; register and update members and vehicles; assign drivers; view ledger, banking, and reports; perform the first loan eligibility review and either pass it to the Treasurer or reject it with a reason. In the exceptional case of a pending Chairman recovery request, verify the Chairman and issue that Chairman's temporary recovery password. | Reconcile bank payments; create accounts; reset member or other officer accounts; set loan policy; approve/disburse a loan; close a month. |
 | Treasurer | Financial review | View members, fleet, ledger, payments, banking, and reports; post ledger entries and expenses; reconcile payments; perform the second loan financial review; record authorised loan repayments. | Register members; manage accounts; make the Chairman's final loan decision; close a month. |
 | Accountant | Day-to-day accounting | View members and fleet; post/correct/reverse ledger entries and expenses; reconcile payments; view and export reports; record authorised loan repayments. | Register members; manage accounts; complete a loan review or final approval; close a month. |
 | Auditor | Independent read-only oversight | View users, members, vehicles, ledger, banking/payment records, loans, system status, and reports. | Create, edit, reverse, approve, reconcile, reset passwords, or close a month. |
@@ -24,6 +24,14 @@ Every rejection must include a clear reason. The member sees that reason in
 their portal and can correct the issue and submit a new application. The due
 date is calculated only when the Chairman approves the loan, from the selected
 repayment period.
+
+## Member and account deletion
+
+Only the Chairman can remove a member. The member's savings, shares, and loan
+balance must first be settled. The action immediately removes the login account,
+exits linked vehicles from active operations, and hides the member from the
+active registry. Financial and audit history remains retained under an
+anonymized inactive profile so reports and prior transactions stay trustworthy.
 
 ## Chairman recovery exception
 

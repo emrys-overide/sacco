@@ -29,7 +29,7 @@ const DeveloperErrorLogView = lazy(() => import('./components/DeveloperErrorLogV
 
 const MEMBER_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary', 'Treasurer'];
 const VEHICLE_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary'];
-const TRANSACTION_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Treasurer', 'Accountant'];
+const TRANSACTION_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary', 'Treasurer', 'Accountant'];
 const CLEAN_START_VERSION = 'secure-session-v2';
 const SESSION_IDLE_TIMEOUT_MS = 60 * 60 * 1000;
 const SESSION_HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
@@ -287,6 +287,21 @@ export default function App() {
     }
   };
 
+  const handleDeleteMember = async (memberId: string) => {
+    if (!currentUser || currentUser.role !== 'Chairman') {
+      throw new Error('Only the Chairman can delete a member and their account.');
+    }
+    await fetchSaccoJson<{ deleted: true; memberId: string }>(`/api/members/${memberId}`, {
+      method: 'DELETE'
+    }, authToken);
+    const [memberData, vehicleData] = await Promise.all([
+      fetchSaccoJson<Member[]>('/api/members', {}, authToken),
+      fetchSaccoJson<Vehicle[]>('/api/vehicles', {}, authToken)
+    ]);
+    setMembers(memberData);
+    setVehicles(vehicleData);
+  };
+
   const handleAddVehicle = async (newVehicleData: Omit<Vehicle, 'id'>) => {
     if (!currentUser || !canRole(currentUser, VEHICLE_WRITE_ROLES)) {
       setSecurityAlert({
@@ -440,6 +455,7 @@ export default function App() {
           <MembersView
             members={members}
             onAddMember={handleAddMember}
+            onDeleteMember={handleDeleteMember}
             currentUserRole={currentUser.role}
             transactions={transactions}
           />

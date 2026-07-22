@@ -25,7 +25,8 @@ import {
   ChevronRight,
   Sparkles,
   ClipboardCheck,
-  Building
+  Building,
+  Trash2
 } from 'lucide-react';
 import {
   isValidPersonName,
@@ -40,11 +41,12 @@ import {
 interface MembersViewProps {
   members: Member[];
   onAddMember: (newMember: Omit<Member, 'id' | 'dateRegistered' | 'sharesAmount' | 'savingsAmount'>) => Promise<void>;
+  onDeleteMember: (memberId: string) => Promise<void>;
   currentUserRole: UserRole;
   transactions: Transaction[];
 }
 
-export default function MembersView({ members, onAddMember, currentUserRole, transactions }: MembersViewProps) {
+export default function MembersView({ members, onAddMember, onDeleteMember, currentUserRole, transactions }: MembersViewProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'All' | 'Active' | 'Pending'>('All');
   const [showAddModal, setShowAddModal] = useState(false);
@@ -52,6 +54,8 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
   const [memberTxSearch, setMemberTxSearch] = useState('');
   const [downloadSuccessMessage, setDownloadSuccessMessage] = useState('');
   const [copiedSuccess, setCopiedSuccess] = useState(false);
+  const [deletingMemberId, setDeletingMemberId] = useState<string | null>(null);
+  const [memberActionMessage, setMemberActionMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
 
   // New Member Form State
   const [name, setName] = useState('');
@@ -203,6 +207,24 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
     setTimeout(() => setDownloadSuccessMessage(''), 4000);
   };
 
+  const handleDeleteMember = async (member: Member) => {
+    const confirmation = window.prompt(
+      `Delete ${member.name} and their login account? Their active profile will be removed, but financial history will remain for audit. Type DELETE to continue.`
+    );
+    if (confirmation !== 'DELETE') return;
+    setDeletingMemberId(member.id);
+    setMemberActionMessage(null);
+    try {
+      await onDeleteMember(member.id);
+      setSelectedMemberId(null);
+      setMemberActionMessage({ kind: 'success', text: `${member.name} and their login account were removed. Historical financial records were retained.` });
+    } catch (caught) {
+      setMemberActionMessage({ kind: 'error', text: caught instanceof Error ? caught.message : 'The member could not be deleted.' });
+    } finally {
+      setDeletingMemberId(null);
+    }
+  };
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 5 }}
@@ -242,6 +264,13 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
         <div className="bg-emerald-50 border-2 border-emerald-500 text-emerald-950 p-4 rounded flex items-center space-x-2.5 text-xs shadow-sm shrink-0">
           <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
           <span className="font-bold">{downloadSuccessMessage}</span>
+        </div>
+      )}
+
+      {memberActionMessage && (
+        <div className={`border-2 p-4 rounded flex items-center space-x-2.5 text-xs shadow-sm shrink-0 ${memberActionMessage.kind === 'success' ? 'bg-emerald-50 border-emerald-500 text-emerald-950' : 'bg-rose-50 border-rose-500 text-rose-950'}`}>
+          <CheckCircle2 className={`w-5 h-5 shrink-0 ${memberActionMessage.kind === 'success' ? 'text-emerald-600' : 'text-rose-600'}`} />
+          <span className="font-bold">{memberActionMessage.text}</span>
         </div>
       )}
 
@@ -402,6 +431,17 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
 
                   {/* Actions Deck */}
                   <div className="flex space-x-2 w-full md:w-auto self-stretch md:self-auto justify-end">
+                    {currentUserRole === 'Chairman' && (
+                      <button
+                        type="button"
+                        disabled={deletingMemberId === activeSelectedMember.id}
+                        onClick={() => void handleDeleteMember(activeSelectedMember)}
+                        className="px-3 py-1.5 bg-rose-700 hover:bg-rose-600 disabled:cursor-not-allowed disabled:opacity-60 text-white text-[10px] font-bold uppercase tracking-wider rounded border border-rose-800 flex items-center space-x-1 transition-colors"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>{deletingMemberId === activeSelectedMember.id ? 'Deleting...' : 'Delete member'}</span>
+                      </button>
+                    )}
                     <button
                       onClick={() => copyMemberDossierToClipboard(activeSelectedMember)}
                       className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-[10px] font-bold uppercase tracking-wider rounded border border-slate-700 flex items-center space-x-1 transition-colors"

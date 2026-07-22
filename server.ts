@@ -3458,6 +3458,111 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
     }
   });
 
+  // Removing a member is a Chairman-only account-lifecycle action. Financial
+  // history is retained under an anonymized, inactive profile so ledger and
+  // loan audit trails are never silently destroyed.
+  app.delete('/api/members/:id', requirePermission('users.write'), async (req, res) => {
+    const chairman = requireAuthenticatedUser(req);
+    if (chairman.role !== 'Chairman') {
+      return sendApiError(res, new HttpError(403, 'Only the Chairman can delete a member and their account.', 'MEMBER_DELETE_CHAIRMAN_ONLY'));
+    }
+
+    const memberId = String(req.params.id || '').trim();
+    let before: Member | undefined;
+    try {
+      if (postgresPool) {
+        if (!memberId.match(/^[0-9a-f-]{36}$/i)) {
+          throw new HttpError(404, 'Member was not found.', 'MEMBER_NOT_FOUND');
+        }
+        const visibleMember = await getPostgresMember(postgresPool, memberId);
+        if (!visibleMember) throw new HttpError(404, 'Member was not found.', 'MEMBER_NOT_FOUND');
+        before = visibleMember;
+        if (visibleMember.sharesAmount > 0.005 || visibleMember.savingsAmount > 0.005 || Number(visibleMember.loanBalance || 0) > 0.005) {
+          throw new HttpError(409, 'Settle the member’s savings, shares, and outstanding loan balance before deleting the member.', 'MEMBER_HAS_UNSETTLED_BALANCES');
+        }
+
+        const client = await postgresPool.connect();
+        let committed = false;
+        try {
+          await client.query('BEGIN');
+          const locked = await client.query(
+            `SELECT id, member_number, full_name, deleted_at
+             FROM members WHERE id = $1 FOR UPDATE`,
+            [memberId]
+          );
+          if (!locked.rowCount || locked.rows[0].deleted_at) {
+            throw new HttpError(404, 'Member was not found.', 'MEMBER_NOT_FOUND');
+          }
+
+          await client.query(
+            `UPDATE driver_assignments
+             SET status = 'Closed', end_date_time = now(),
+                 reason = COALESCE(NULLIF(reason, ''), 'Member removed by Chairman'), updated_at = now()
+             WHERE owner_member_id = $1 AND status = 'Active'`,
+            [memberId]
+          );
+          await client.query(
+            `UPDATE vehicles SET status = 'Exited', updated_at = now()
+             WHERE member_id = $1 AND status <> 'Exited'`,
+            [memberId]
+          );
+          await client.query(
+            `UPDATE member_activation_challenges SET used_at = COALESCE(used_at, now())
+             WHERE member_id = $1`,
+            [memberId]
+          );
+          const removedAccounts = await client.query(
+            `DELETE FROM users
+             WHERE role = 'Member' AND linked_member_id = $1
+             RETURNING id`,
+            [memberId]
+          );
+          await client.query(
+            `UPDATE members
+             SET full_name = 'Deleted member ' || COALESCE(member_number, substring(id::text, 1, 8)),
+                 national_id = NULL, phone = NULL, email = NULL, status = 'Inactive',
+                 deleted_at = now(), deleted_by = $2, updated_at = now()
+             WHERE id = $1`,
+            [memberId, chairman.id]
+          );
+          await client.query('COMMIT');
+          committed = true;
+          await recordAuditLog(req, 'MEMBER_AND_ACCOUNT_DELETED', 'members', memberId, before, {
+            deleted: true,
+            removedAccountCount: removedAccounts.rowCount || 0,
+            financialHistoryRetained: true
+          });
+        } catch (error) {
+          if (!committed) await client.query('ROLLBACK');
+          throw error;
+        } finally {
+          client.release();
+        }
+      } else {
+        const memberIndex = localStore.members.findIndex(member => member.id === memberId);
+        if (memberIndex < 0) throw new HttpError(404, 'Member was not found.', 'MEMBER_NOT_FOUND');
+        before = { ...localStore.members[memberIndex] };
+        if (before.sharesAmount > 0.005 || before.savingsAmount > 0.005 || Number(before.loanBalance || 0) > 0.005) {
+          throw new HttpError(409, 'Settle the member’s savings, shares, and outstanding loan balance before deleting the member.', 'MEMBER_HAS_UNSETTLED_BALANCES');
+        }
+        const accountIds = new Set(localStore.users.filter(user => user.role === 'Member' && user.linkedMemberId === memberId).map(user => user.id));
+        localStore.users.splice(0, localStore.users.length, ...localStore.users.filter(user => !accountIds.has(user.id)));
+        localStore.mfaChallenges.splice(0, localStore.mfaChallenges.length, ...localStore.mfaChallenges.filter(challenge => !accountIds.has(challenge.userId)));
+        localStore.members.splice(memberIndex, 1);
+        localStore.vehicles.filter(vehicle => vehicle.ownerId === memberId).forEach(vehicle => { vehicle.status = 'Exited'; });
+        await recordAuditLog(req, 'MEMBER_AND_ACCOUNT_DELETED', 'members', memberId, before, {
+          deleted: true,
+          removedAccountCount: accountIds.size,
+          financialHistoryRetained: true
+        });
+      }
+
+      return res.json({ deleted: true, memberId, financialHistoryRetained: true });
+    } catch (error: any) {
+      return sendApiError(res, error);
+    }
+  });
+
   // API 5: Get Fleet Vehicles
   app.get('/api/vehicles', async (req, res) => {
     try {

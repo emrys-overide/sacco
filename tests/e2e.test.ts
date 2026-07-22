@@ -267,6 +267,53 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       status: 'Active'
     }
   });
+  const removableMember = await request('/api/members', 201, {
+    method: 'POST',
+    token: loginToken,
+    body: {
+      id: 'member-e2e-removable',
+      name: 'Removable Member',
+      idNumber: '55556666',
+      email: 'removable.member@example.com',
+      phoneNumber: '0733333333',
+      status: 'Active'
+    }
+  });
+  let removableMemberToken = '';
+  if (!databaseUrl) {
+    await request('/api/auth/member-registration', 201, {
+      method: 'POST',
+      body: {
+        fullName: removableMember.name,
+        phone: removableMember.phoneNumber,
+        email: removableMember.email,
+        password: 'removable-member-password'
+      }
+    });
+    const removableLogin = await request('/api/auth/login', 200, {
+      method: 'POST',
+      body: { identifier: removableMember.email, password: 'removable-member-password' }
+    });
+    removableMemberToken = removableLogin.token as string;
+  }
+  await request(`/api/members/${removableMember.id}`, 403, {
+    method: 'DELETE',
+    token: secretaryLogin.token
+  });
+  const deletedMember = await request(`/api/members/${removableMember.id}`, 200, {
+    method: 'DELETE',
+    token: loginToken
+  });
+  assert.equal(deletedMember.deleted, true);
+  const membersAfterDeletion = await request<any[]>('/api/members', 200, { token: loginToken });
+  assert.equal(membersAfterDeletion.some(member => member.id === removableMember.id), false);
+  if (removableMemberToken) {
+    await request('/api/member-portal', 401, { token: removableMemberToken });
+    await request('/api/auth/login', 401, {
+      method: 'POST',
+      body: { identifier: removableMember.email, password: 'removable-member-password' }
+    });
+  }
   await request('/api/members', 409, {
     method: 'POST',
     token: loginToken,
@@ -322,6 +369,33 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
     }
   });
 
+  // The Secretary owns day-to-day record entry and correction, while the
+  // higher-risk Chairman controls remain unavailable to that role.
+  const secretaryDaily = await request('/api/transactions', 201, {
+    method: 'POST',
+    token: secretaryLogin.token,
+    body: {
+      memberId: firstMember.id,
+      memberName: firstMember.name,
+      vehiclePlate: vehicle.plateNumber,
+      description: 'Secretary daily collection access check',
+      refCode: 'E2E-SECRETARY-DAILY-1',
+      type: 'Credit',
+      category: 'Daily Contribution',
+      amount: 100,
+      tillNumber: 'VehicleTill'
+    }
+  });
+  const secretaryCorrection = await request(`/api/transactions/${secretaryDaily.id}`, 200, {
+    method: 'PUT',
+    token: secretaryLogin.token,
+    body: { amount: 120, description: 'Secretary corrected daily collection' }
+  });
+  await request(`/api/transactions/${secretaryCorrection.id}/reverse`, 201, {
+    method: 'POST',
+    token: secretaryLogin.token
+  });
+
   await request('/api/transactions', 400, {
     method: 'POST',
     token: loginToken,
@@ -371,6 +445,10 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
   const correctedMember = afterCorrection.find(member => member.id === firstMember.id);
   assert.equal(correctedMember.sharesAmount, 360);
   assert.equal(correctedMember.savingsAmount, 840);
+  await request(`/api/members/${firstMember.id}`, 409, {
+    method: 'DELETE',
+    token: loginToken
+  });
 
   const reversal = await request(`/api/transactions/${corrected.id}/reverse`, 201, { method: 'POST', token });
   assert.equal(reversal.type, 'Debit');

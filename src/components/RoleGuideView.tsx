@@ -2,8 +2,8 @@ import React from 'react';
 import { BookOpenCheck, CheckCircle2, ShieldCheck } from 'lucide-react';
 
 const roles = [
-  ['Chairman', 'Governance and final accountability', 'Creates officer accounts, manages loan policy, records member applications, gives final loan decisions, closes completed months, and has full operational access.'],
-  ['Secretary', 'Member records and loan eligibility', 'Registers members and vehicles, assigns drivers, views records, and completes the first loan eligibility review. The Secretary cannot post daily collections or expenses. Only for a verified pending Chairman recovery request, the Secretary may issue that Chairman a temporary recovery password.'],
+  ['Chairman', 'Governance and final accountability', 'Creates and resets accounts, removes a settled member and their login account, manages loan policy, gives final loan decisions, closes completed months, and has full operational access. Financial history remains retained when a member is removed.'],
+  ['Secretary', 'Daily records and loan eligibility', 'Posts and corrects daily collection records, registers members and vehicles, assigns drivers, views reports, and completes the first loan eligibility review. The Secretary cannot reconcile bank payments, manage accounts, make the final loan decision, or close a month. Only for a verified pending Chairman recovery request, the Secretary may issue that Chairman a temporary recovery password.'],
   ['Treasurer', 'Financial review and reconciliation', 'Posts financial entries, reconciles payments, reviews loan figures, and records authorised repayments. The Treasurer cannot register members or make the final loan decision.'],
   ['Accountant', 'Day-to-day ledger management', 'Posts, corrects, and reverses ledger entries; reconciles payments; and prepares internal reports. The Accountant cannot review/approve loans or manage user accounts.'],
   ['Auditor', 'Independent read-only oversight', 'Can inspect records, loans, payments, and reports but cannot create, edit, reconcile, approve, reset passwords, or close a month.'],
