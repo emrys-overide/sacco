@@ -35,7 +35,7 @@ on the final deployed environment.
 
 - [ ] `APP_URL`, `DATABASE_URL`, `DATABASE_SSL`, `JWT_SECRET`, and
   `MEMBER_OTP_PEPPER` are stored as Render secrets, never committed.
-- [ ] All database migrations through `023` are applied; record the output of
+- [ ] All database migrations through `024` are applied; record the output of
   `npm run db:status`.
 - [ ] Co-op Bank IPN remains disabled on the sleeping free Render service.
 - [ ] Explain that a free Render service can take time to wake and that durable

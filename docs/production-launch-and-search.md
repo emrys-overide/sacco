@@ -28,7 +28,7 @@ site appear more complete in search.
    variables false. Password resets are Chairman-confirmed in the app; SMTP is
    not part of this recovery flow.
 3. **Use a separate production database.** Apply all migrations through
-   `023`, verify `npm run db:status`, and follow the backup-and-restore routine
+   `024`, verify `npm run db:status`, and follow the backup-and-restore routine
    in [Free-tier operations](./free-tier-operations.md). Do not use test data
    or seed records as live SACCO data.
 4. **Test the deployed URL.** Check `/api/health`, sign in as each role, create
