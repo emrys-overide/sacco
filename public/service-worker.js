@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'sowetamu-shell-v2';
+const CACHE_VERSION = 'sowetamu-shell-v3';
 const SHELL_FILES = ['/offline.html', '/manifest.webmanifest', '/icons/sacco-icon-192.png', '/icons/sacco-icon-512.png'];
 
 self.addEventListener('install', event => {
