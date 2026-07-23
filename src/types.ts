@@ -50,6 +50,7 @@ export interface MemberLoanSummary {
   principalAmount: number;
   outstandingBalance: number;
   amountPaid?: number;
+  applicationDate?: string;
   issueDate: string;
   dueDate?: string;
   status: string;
@@ -63,6 +64,22 @@ export interface MemberLoanSummary {
   guarantorDetails?: string;
   collateralDetails?: string;
   notes?: string;
+  applicationSnapshot?: {
+    fullName?: string;
+    membershipNumber?: string;
+    nationalId?: string;
+    phone?: string;
+    email?: string;
+  };
+  approvedAt?: string;
+  disbursedAt?: string;
+  secretaryName?: string;
+  secretaryReviewedAt?: string;
+  secretaryNotes?: string;
+  treasurerName?: string;
+  treasurerReviewedAt?: string;
+  treasurerNotes?: string;
+  chairmanName?: string;
   rejectionReason?: string;
   rejectedAt?: string;
   repayments: Array<{ id: string; repaymentDate: string; amount: number }>;

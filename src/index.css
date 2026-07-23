@@ -40,7 +40,7 @@ body {
   isolation: isolate;
   background-image:
     linear-gradient(112deg, rgba(2, 17, 26, 0.96) 0%, rgba(4, 47, 46, 0.80) 43%, rgba(8, 36, 50, 0.38) 100%),
-    url('../assets/ui/sacco-nairobi-backdrop.png');
+    url('../assets/ui/sacco-nairobi-backdrop.webp');
   background-size: cover;
   background-position: center;
   background-attachment: fixed;
@@ -49,7 +49,7 @@ body {
 .auth-shell {
   background-image:
     linear-gradient(110deg, rgba(2, 20, 29, 0.93), rgba(4, 78, 65, 0.66), rgba(15, 23, 42, 0.36)),
-    url('../assets/ui/sacco-nairobi-backdrop.png');
+    url('../assets/ui/sacco-nairobi-backdrop.webp');
 }
 
 .app-shell::before,
@@ -364,7 +364,7 @@ header.app-topbar::after {
   color: white;
   background-image:
     linear-gradient(104deg, rgba(3, 35, 40, 0.97), rgba(4, 78, 65, 0.88), rgba(10, 47, 61, 0.72)),
-    url('../assets/ui/sacco-nairobi-backdrop.png') !important;
+    url('../assets/ui/sacco-nairobi-backdrop.webp') !important;
   background-size: cover !important;
   background-position: center 57% !important;
   border-bottom-color: rgba(167, 243, 208, 0.16) !important;
@@ -480,7 +480,20 @@ header.app-topbar::after {
 
 @media (max-width: 767px) {
   .app-shell, .auth-shell { background-attachment: scroll; }
+  .app-shell::after { display: none; }
+  .auth-card,
+  .app-main-surface,
+  .app-topbar,
+  .app-view .bg-white,
+  .app-view table {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
   .app-main-surface { border: 0; }
+  .app-view tbody tr,
+  .app-main-surface button {
+    transition: none;
+  }
   .dashboard-hero { background-position: 62% center !important; }
   .app-footer {
     min-height: 2.5rem !important;
@@ -543,7 +556,7 @@ body {
 .auth-shell {
   background-image:
     linear-gradient(112deg, rgba(7, 8, 25, 0.97) 0%, rgba(30, 27, 75, 0.82) 46%, rgba(8, 47, 73, 0.48) 100%),
-    url('../assets/ui/sacco-nairobi-backdrop.png');
+    url('../assets/ui/sacco-nairobi-backdrop.webp');
 }
 
 .app-shell::before {
@@ -737,7 +750,7 @@ header.app-topbar::after {
 .app-view .dashboard-hero {
   background-image:
     linear-gradient(106deg, rgba(9, 11, 27, 0.97), rgba(49, 46, 129, 0.84), rgba(8, 47, 73, 0.54)),
-    url('../assets/ui/sacco-nairobi-backdrop.png') !important;
+    url('../assets/ui/sacco-nairobi-backdrop.webp') !important;
   border: 0 !important;
   box-shadow: none;
 }
@@ -825,7 +838,7 @@ header.app-topbar::after {
   background-image:
     linear-gradient(90deg, rgba(9, 11, 27, 0.94) 0%, rgba(17, 24, 67, 0.68) 37%, rgba(9, 11, 27, 0.1) 72%),
     linear-gradient(0deg, rgba(9, 11, 27, 0.75), transparent 52%),
-    url('../assets/ui/sacco-urban-flow.png');
+    url('../assets/ui/sacco-urban-flow.webp');
   background-position: center;
   background-size: cover;
   box-shadow: 0 40px 90px -64px rgba(9, 11, 27, 0.85);
@@ -953,7 +966,7 @@ header.app-topbar::after {
     background-image:
       linear-gradient(90deg, rgba(9, 11, 27, 0.95), rgba(9, 11, 27, 0.58) 70%, rgba(9, 11, 27, 0.26)),
       linear-gradient(0deg, rgba(9, 11, 27, 0.8), transparent 58%),
-      url('../assets/ui/sacco-urban-flow.png');
+      url('../assets/ui/sacco-urban-flow.webp');
   }
 
   .flow-visual-content {

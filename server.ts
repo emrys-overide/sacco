@@ -3154,12 +3154,18 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       if (!postgresPool) throw new HttpError(503, 'Loan records require PostgreSQL.', 'LOANS_UNAVAILABLE');
       const result = await postgresPool.query(
         `SELECT l.*, m.full_name AS member_name, m.status AS member_status,
+           secretary_user.full_name AS secretary_reviewed_by_name,
+           treasurer_user.full_name AS treasurer_reviewed_by_name,
+           chairman_user.full_name AS approved_by_name,
            COALESCE(fin.savings, 0) AS member_savings,
            CURRENT_DATE - COALESCE(m.date_registered, CURRENT_DATE) AS membership_days,
            COALESCE(repayments.amount_paid, 0) AS amount_paid,
            l.principal_amount * (1 + l.interest_rate / 100) AS total_payable,
            GREATEST(0, l.principal_amount * (1 + l.interest_rate / 100) - COALESCE(repayments.amount_paid, 0)) AS outstanding_balance
          FROM loans l JOIN members m ON m.id = l.member_id
+         LEFT JOIN users secretary_user ON secretary_user.id = l.secretary_reviewed_by
+         LEFT JOIN users treasurer_user ON treasurer_user.id = l.treasurer_reviewed_by
+         LEFT JOIN users chairman_user ON chairman_user.id = l.approved_by
          LEFT JOIN LATERAL (
            SELECT SUM(CASE WHEN le.account_type IN ('Savings','DailyContribution') AND le.transaction_type = 'Credit' THEN
              CASE WHEN le.account_type = 'Savings' THEN le.amount ELSE COALESCE((le.metadata->>'savingsContribution')::numeric, le.amount * .70) END ELSE 0 END) AS savings

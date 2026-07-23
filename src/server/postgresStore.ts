@@ -731,9 +731,14 @@ export async function listPostgresPaymentsByMember(pool: Pool, memberId: string)
 
 export async function listPostgresLoansByMember(pool: Pool, memberId: string): Promise<MemberLoanSummary[]> {
   const result = await pool.query(
-    `SELECT l.id, l.principal_amount, l.interest_rate, l.issue_date, l.due_date, l.status, l.notes,
+    `SELECT l.id, l.principal_amount, l.interest_rate, l.application_date, l.issue_date, l.due_date,
+       l.status, l.notes, l.approved_at, l.disbursed_at, l.application_snapshot,
        l.loan_type, l.repayment_period_months, l.repayment_method, l.income_source, l.monthly_income,
        l.guarantor_details, l.collateral_details,
+       l.secretary_reviewed_at, l.secretary_notes, l.treasurer_reviewed_at, l.treasurer_notes,
+       secretary_user.full_name AS secretary_reviewed_by_name,
+       treasurer_user.full_name AS treasurer_reviewed_by_name,
+       chairman_user.full_name AS approved_by_name,
        l.rejection_reason, l.rejected_at,
        COALESCE(SUM(lr.amount), 0) AS repaid_amount,
        COALESCE(
@@ -744,9 +749,12 @@ export async function listPostgresLoansByMember(pool: Pool, memberId: string): P
          '[]'::json
        ) AS repayments
      FROM loans l
+     LEFT JOIN users secretary_user ON secretary_user.id = l.secretary_reviewed_by
+     LEFT JOIN users treasurer_user ON treasurer_user.id = l.treasurer_reviewed_by
+     LEFT JOIN users chairman_user ON chairman_user.id = l.approved_by
      LEFT JOIN loan_repayments lr ON lr.loan_id = l.id
      WHERE l.member_id = $1
-     GROUP BY l.id
+     GROUP BY l.id, secretary_user.full_name, treasurer_user.full_name, chairman_user.full_name
      ORDER BY l.issue_date DESC`,
     [memberId]
   );
@@ -755,6 +763,7 @@ export async function listPostgresLoansByMember(pool: Pool, memberId: string): P
     principalAmount: toNumber(row.principal_amount),
     outstandingBalance: Math.max(0, toNumber(row.principal_amount) * (1 + toNumber(row.interest_rate) / 100) - toNumber(row.repaid_amount)),
     amountPaid: toNumber(row.repaid_amount),
+    applicationDate: row.application_date ? String(row.application_date).slice(0, 10) : undefined,
     issueDate: String(row.issue_date).slice(0, 10),
     dueDate: row.due_date ? String(row.due_date).slice(0, 10) : undefined,
     status: row.status,
@@ -768,6 +777,16 @@ export async function listPostgresLoansByMember(pool: Pool, memberId: string): P
     guarantorDetails: row.guarantor_details || undefined,
     collateralDetails: row.collateral_details || undefined,
     notes: row.notes || undefined,
+    applicationSnapshot: row.application_snapshot || undefined,
+    approvedAt: row.approved_at ? new Date(row.approved_at).toISOString() : undefined,
+    disbursedAt: row.disbursed_at ? new Date(row.disbursed_at).toISOString() : undefined,
+    secretaryName: row.secretary_reviewed_by_name || undefined,
+    secretaryReviewedAt: row.secretary_reviewed_at ? new Date(row.secretary_reviewed_at).toISOString() : undefined,
+    secretaryNotes: row.secretary_notes || undefined,
+    treasurerName: row.treasurer_reviewed_by_name || undefined,
+    treasurerReviewedAt: row.treasurer_reviewed_at ? new Date(row.treasurer_reviewed_at).toISOString() : undefined,
+    treasurerNotes: row.treasurer_notes || undefined,
+    chairmanName: row.approved_by_name || undefined,
     rejectionReason: row.rejection_reason || undefined,
     rejectedAt: row.rejected_at ? new Date(row.rejected_at).toISOString() : undefined,
     repayments: row.repayments.map((repayment: any) => ({
