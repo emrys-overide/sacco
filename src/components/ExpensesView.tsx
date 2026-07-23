@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Transaction, UserRole, TillType } from '../types';
+import { sanitizeDecimalInput } from '../lib/inputValidation';
 import { 
   Plus, 
   Search, 
@@ -49,12 +50,12 @@ export default function ExpensesView({
   const [category, setCategory] = useState<'Office Expenses' | 'Petty Cash' | 'Utilities' | 'Equipment'>('Office Expenses');
   const [amount, setAmount] = useState('');
   const [refCode, setRefCode] = useState('');
-  const [tillNumber, setTillNumber] = useState<'UtilityTill' | 'None' | 'VehicleTill'>('UtilityTill');
+  const [tillNumber, setTillNumber] = useState<'UtilityTill' | 'None' | 'VehicleTill'>('VehicleTill');
   const [recipient, setRecipient] = useState('');
   const [notes, setNotes] = useState('');
 
   // Sacco role restrictions
-  const canRecordExpense = currentUserRole === 'Treasurer' || currentUserRole === 'Chairman';
+  const canRecordExpense = ['Chairman', 'Secretary', 'Treasurer', 'Accountant'].includes(currentUserRole);
 
   // Extract all debit (expense) transactions
   const expenses = transactions.filter(t => t.type === 'Debit');
@@ -70,7 +71,7 @@ export default function ExpensesView({
 
   // Source till aggregates
   const utilityTillExpenses = expenses
-    .filter(t => t.tillNumber === 'UtilityTill')
+    .filter(t => t.tillNumber === 'VehicleTill')
     .reduce((acc, t) => acc + t.amount, 0);
 
   const cashDrawerExpenses = expenses
@@ -96,7 +97,7 @@ export default function ExpensesView({
     setRecipient('');
     setNotes('');
     setCategory('Office Expenses');
-    setTillNumber('UtilityTill');
+    setTillNumber('VehicleTill');
     setShowAddModal(true);
     setErrorMessage('');
   };
@@ -285,7 +286,7 @@ export default function ExpensesView({
           </div>
         </div>
 
-        {/* Card 3: Utility Till Funded */}
+        {/* Card 3: Operations Account Funded */}
         <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-[0_8px_30px_rgb(0,0,0,0.015)] hover:shadow-md transition-all flex items-center space-x-4">
           <div className="p-3 bg-blue-50 border border-blue-100 text-blue-600 rounded-xl">
             <Wallet className="w-6 h-6" />
@@ -295,7 +296,7 @@ export default function ExpensesView({
             <h3 className="text-xl font-black text-slate-800 mt-1 font-display">
               KES {utilityTillExpenses.toLocaleString()}
             </h3>
-            <p className="text-[10px] text-blue-500 font-bold mt-0.5">Till 4810294 Source</p>
+            <p className="text-[10px] text-blue-500 font-bold mt-0.5">Account 48277 Source</p>
           </div>
         </div>
 
@@ -362,9 +363,9 @@ export default function ExpensesView({
                 className="w-full sm:w-36 p-1.5 border border-slate-200 rounded text-xs focus:outline-none focus:border-emerald-600 bg-white"
               >
                 <option value="All">All Sources</option>
-                <option value="UtilityTill">Utility Till</option>
+                <option value="UtilityTill">Savings Account 871671</option>
                 <option value="None">Petty Cash</option>
-                <option value="VehicleTill">Vehicle Till</option>
+                <option value="VehicleTill">Operations Account 48277</option>
               </select>
             </div>
           </div>
@@ -419,7 +420,7 @@ export default function ExpensesView({
                           </span>
                           <span>&bull;</span>
                           <span className="font-mono bg-slate-100 px-1.5 py-0.5 rounded text-[9px] text-slate-600 font-semibold">
-                            {tx.tillNumber === 'UtilityTill' ? 'Utility Till 4810294' : tx.tillNumber === 'VehicleTill' ? 'Fleet Till 8249102' : 'Petty Cash'}
+                            {tx.tillNumber === 'UtilityTill' ? 'Savings Account 871671' : tx.tillNumber === 'VehicleTill' ? 'Operations Account 48277' : 'Petty Cash'}
                           </span>
                         </div>
                       </div>
@@ -484,7 +485,7 @@ export default function ExpensesView({
                             <div className="flex justify-between text-[10px]">
                               <span className="text-slate-400">Funding Source:</span>
                               <span className="font-bold text-slate-700 font-mono">
-                                {tx.tillNumber === 'UtilityTill' ? 'Till 4810294' : tx.tillNumber === 'VehicleTill' ? 'Till 8249102' : 'Office Drawer'}
+                                {tx.tillNumber === 'UtilityTill' ? 'Account 871671' : tx.tillNumber === 'VehicleTill' ? 'Account 48277' : 'Office Drawer'}
                               </span>
                             </div>
                             <div className="flex justify-between text-[10px]">
@@ -547,16 +548,15 @@ export default function ExpensesView({
 
               <div>
                 <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1 font-mono">
-                  Funding Capital Source *
+                  Funding Source *
                 </label>
                 <select
                   value={tillNumber}
                   onChange={(e) => setTillNumber(e.target.value as any)}
                   className="w-full p-2.5 border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-rose-600 bg-white font-mono"
                 >
-                  <option value="UtilityTill">Till 4810294 (Sacco Administrative Utility Account)</option>
-                  <option value="None">Direct Office Cash Drawer Draw (Petty Cash)</option>
-                  <option value="VehicleTill">Till 8249102 (Paid directly from Fleet Account)</option>
+                  <option value="VehicleTill">Account 48277 (Operations / Daily Collection)</option>
+                  <option value="None">Direct Office Cash Drawer (Petty Cash)</option>
                 </select>
               </div>
 
@@ -579,10 +579,11 @@ export default function ExpensesView({
                     Amount (KES) *
                   </label>
                   <input
-                    type="number"
-                    required
-                    value={amount}
-                    onChange={(e) => setAmount(e.target.value)}
+                  type="number"
+                  required
+                  value={amount}
+                  onChange={(e) => setAmount(sanitizeDecimalInput(e.target.value))}
+                  inputMode="decimal"
                     className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-mono focus:outline-none focus:border-rose-600"
                   />
                 </div>
@@ -681,7 +682,7 @@ export default function ExpensesView({
           return (
             <div id="print-voucher-billboard" className="hidden border border-dashed border-slate-400 p-8 rounded-2xl max-w-md bg-white font-mono text-slate-800 text-xs shadow-lg space-y-4">
               <div className="text-center border-b-2 border-dashed border-slate-300 pb-4">
-                <h2 className="text-base font-black uppercase">Sowetamu Matatu Sacco Ltd</h2>
+                <h2 className="text-base font-black uppercase">Sowetamu Sacco</h2>
                 <p className="text-[9px] text-slate-500 mt-1 uppercase">CS/NO. 22239 &bull; Nairobi, Kenya</p>
                 <p className="text-[10px] font-black uppercase tracking-wider text-slate-700 mt-2 bg-slate-100 p-1 rounded">
                   OFFICIAL DEBIT DISBURSEMENT VOUCHER
@@ -703,7 +704,7 @@ export default function ExpensesView({
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-500">Disbursement Account:</span>
-                  <span className="font-bold text-slate-900">{pTx.tillNumber === 'UtilityTill' ? 'Till 4810294 (Admin)' : pTx.tillNumber === 'VehicleTill' ? 'Till 8249102 (Fleet)' : 'Cash Drawer'}</span>
+                  <span className="font-bold text-slate-900">{pTx.tillNumber === 'UtilityTill' ? 'Account 871671 (Savings)' : pTx.tillNumber === 'VehicleTill' ? 'Account 48277 (Operations)' : 'Cash Drawer'}</span>
                 </div>
               </div>
 

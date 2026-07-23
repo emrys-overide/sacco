@@ -1,0 +1,43 @@
+services:
+  - type: web
+    name: sowetamu-sacco-test
+    runtime: node
+    plan: free
+    branch: agent/coop-bank-b2b-ipn
+    autoDeployTrigger: commit
+    buildCommand: npm ci --no-audit --no-fund && npm run build
+    startCommand: npm run db:migrate && npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_SSL
+        value: "true"
+      - key: JWT_SECRET
+        generateValue: true
+      - key: APP_URL
+        sync: false
+      - key: TRUST_PROXY
+        value: "true"
+      - key: PASSWORD_AUTH_ENABLED
+        value: "true"
+      - key: ALLOW_IN_MEMORY_DB
+        value: "false"
+      - key: ALLOW_DEV_AUTH_FALLBACK
+        value: "false"
+      - key: ALLOW_DEV_JWT_AUTH
+        value: "false"
+      - key: OFFICER_TOTP_REQUIRED
+        value: "false"
+      - key: MEMBER_OTP_PEPPER
+        generateValue: true
+      - key: COOP_IPN_ENABLED
+        value: "false"
+      - key: COOP_OBSERVE_ONLY
+        value: "true"
+      - key: COOP_AUTO_POSTING_ENABLED
+        value: "false"
+      - key: BACKGROUND_PROCESSOR_ENABLED
+        value: "false"

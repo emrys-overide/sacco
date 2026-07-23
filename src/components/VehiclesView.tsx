@@ -2,11 +2,18 @@ import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import { Vehicle, Member, UserRole } from '../types';
 import { Search, Bus, PlusCircle, Wrench, Ban, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import {
+  isValidPersonName,
+  isValidPhoneNumber,
+  sanitizePersonName,
+  sanitizePhoneNumber,
+  sanitizeVehiclePlate
+} from '../lib/inputValidation';
 
 interface VehiclesViewProps {
   vehicles: Vehicle[];
   members: Member[];
-  onAddVehicle: (newVehicle: Omit<Vehicle, 'id'>) => void;
+  onAddVehicle: (newVehicle: Omit<Vehicle, 'id'>) => Promise<void>;
   currentUserRole: UserRole;
 }
 
@@ -47,10 +54,18 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
     setError('');
   };
 
-  const handleCreate = (e: React.FormEvent) => {
+  const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!plateNumber.trim() || !ownerId || !driverName.trim() || !driverPhone.trim()) {
       setError('Please fill in all required fields.');
+      return;
+    }
+    if (!isValidPersonName(driverName)) {
+      setError('Driver name must use letters only.');
+      return;
+    }
+    if (!isValidPhoneNumber(driverPhone)) {
+      setError('Enter a valid driver phone number using digits only.');
       return;
     }
 
@@ -67,16 +82,21 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
       return;
     }
 
-    onAddVehicle({
-      plateNumber: plateNumber.toUpperCase().trim(),
-      ownerId,
-      ownerName: owner.name,
-      driverName: driverName.trim(),
-      driverPhone: driverPhone.trim(),
-      route,
-      status: 'Active',
-      capacity
-    });
+    try {
+      await onAddVehicle({
+        plateNumber: plateNumber.toUpperCase().trim(),
+        ownerId,
+        ownerName: owner.name,
+        driverName: driverName.trim(),
+        driverPhone: driverPhone.trim(),
+        route,
+        status: 'Active',
+        capacity
+      });
+    } catch (error: any) {
+      setError(error?.message || 'Vehicle registration failed. Check the server connection and retry.');
+      return;
+    }
 
     // Reset Form
     setPlateNumber('');
@@ -252,7 +272,7 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
                     type="text"
                     required
                     value={plateNumber}
-                    onChange={(e) => setPlateNumber(e.target.value.toUpperCase())}
+                    onChange={(e) => setPlateNumber(sanitizeVehiclePlate(e.target.value))}
                     className="w-full p-2 border border-slate-200 rounded text-xs font-mono uppercase focus:outline-none focus:border-emerald-600"
                   />
                   <p className="mt-1 text-[9px] text-slate-400">Prefilled from the selected member when available; you can still type another plate.</p>
@@ -284,7 +304,10 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
                   type="text"
                   required
                   value={driverName}
-                  onChange={(e) => setDriverName(e.target.value)}
+                  onChange={(e) => setDriverName(sanitizePersonName(e.target.value))}
+                  inputMode="text"
+                  pattern="[A-Za-z .'-]+"
+                  title="Letters only."
                   className="w-full p-2 border border-slate-200 rounded text-xs focus:outline-none focus:border-emerald-600"
                 />
               </div>
@@ -295,10 +318,13 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
                     Driver Mobile Phone *
                   </label>
                   <input
-                    type="text"
-                    required
-                    value={driverPhone}
-                    onChange={(e) => setDriverPhone(e.target.value)}
+                  type="tel"
+                  required
+                  value={driverPhone}
+                  onChange={(e) => setDriverPhone(sanitizePhoneNumber(e.target.value))}
+                  inputMode="tel"
+                  pattern="[+]?[0-9]{9,15}"
+                  title="Use a phone number only."
                     className="w-full p-2 border border-slate-200 rounded text-xs focus:outline-none focus:border-emerald-600"
                   />
                 </div>

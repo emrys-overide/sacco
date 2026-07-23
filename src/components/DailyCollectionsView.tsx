@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import type { Vehicle, Member, Transaction, VehicleClass } from '../types';
 import { STORAGE_KEYS } from '../lib/auth';
+import { sanitizeDecimalInput } from '../lib/inputValidation';
 import { 
   Printer, 
   Plus, 
@@ -87,6 +88,20 @@ export default function DailyCollectionsView({
   
   // Posting records entries in the ledger; only auditors are read-only.
   const isReadOnly = currentUserRole === 'Auditor';
+  const activeVehicles = vehicles.filter(vehicle => vehicle.status === 'Active');
+
+  const rowDiffersFromLedger = (row: CollectionRow): boolean => {
+    const original = transactions.find(tx => tx.id === row.transactionId);
+    if (!original) return false;
+    return original.vehiclePlate !== row.vehiclePlate ||
+      original.vehicleClass !== row.vehicleClass ||
+      Number(original.operationAmount || 0) !== Number(row.operation || 0) ||
+      Number(original.entranceFee || 0) !== Number(row.entranceFee || 0) ||
+      Number(original.loanRepay || 0) !== Number(row.loanRepay || 0) ||
+      Number(original.savingsContribution || 0) !== Number(row.savings || 0) ||
+      Number(original.sTicket || 0) !== Number(row.sTicket || 0) ||
+      Number(original.legalFee || 0) !== Number(row.legalFee || 0);
+  };
 
   // Load from local storage on mount
   useEffect(() => {
@@ -129,12 +144,13 @@ export default function DailyCollectionsView({
     rowsToSave: CollectionRow[] = rows,
     expensesToSave: ExpenseRow[] = expenses
   ) => {
+    let effectiveRows = rowsToSave;
     try {
-      await Promise.all(rowsToSave.filter(row => row.transactionId).map(row => {
+      const corrections = await Promise.all(rowsToSave.filter(row => row.transactionId && rowDiffersFromLedger(row)).map(async row => {
         const grossAmount = getRowTotal(row);
         const original = transactions.find(tx => tx.id === row.transactionId);
         const deduction = Number(original?.expenseDeduction || 0);
-        return onUpdateTransaction(row.transactionId!, {
+        const corrected = await onUpdateTransaction(row.transactionId!, {
           vehiclePlate: row.vehiclePlate,
           vehicleClass: row.vehicleClass,
           operationAmount: row.operation,
@@ -146,7 +162,13 @@ export default function DailyCollectionsView({
           grossAmount,
           amount: Math.max(0, grossAmount - deduction)
         });
+        return { originalId: row.transactionId!, correctedId: corrected.id };
       }));
+      const correctedIds = new Map(corrections.map(item => [item.originalId, item.correctedId]));
+      effectiveRows = rowsToSave.map(row => row.transactionId && correctedIds.has(row.transactionId)
+        ? { ...row, transactionId: correctedIds.get(row.transactionId) }
+        : row);
+      setRows(effectiveRows);
     } catch (error: any) {
       setErrorMessage(error?.message || 'Could not save ledger corrections.');
       return;
@@ -156,7 +178,7 @@ export default function DailyCollectionsView({
       id: sheetId,
       date: selectedDate,
       route: selectedRoute,
-      rows: rowsToSave,
+      rows: effectiveRows,
       expenses: expensesToSave,
       posted: postedStatus,
       postedAt: postedStatus ? new Date().toLocaleString() : undefined
@@ -239,7 +261,7 @@ export default function DailyCollectionsView({
     const nextNo = rows.length > 0 ? Math.max(...rows.map(r => r.no)) + 1 : 1;
     setRows(prev => [...prev, {
       no: nextNo,
-      vehiclePlate: vehicles[prev.length % vehicles.length]?.plateNumber || '',
+      vehiclePlate: activeVehicles[prev.length % Math.max(activeVehicles.length, 1)]?.plateNumber || '',
       vehicleClass: 'Nissan',
       operation: 0,
       entranceFee: 0,
@@ -252,6 +274,11 @@ export default function DailyCollectionsView({
 
   const handleDeleteRow = (no: number) => {
     if (isReadOnly) return;
+    const confirmed = window.confirm(
+      `Delete daily collection row ${no}? This cannot be undone. Do you want to proceed?`
+    );
+    if (!confirmed) return;
+
     setRows(prev => prev.filter(r => r.no !== no).map((r, index) => ({ ...r, no: index + 1 })));
   };
 
@@ -264,12 +291,22 @@ export default function DailyCollectionsView({
 
   const handleDeleteExpenseRow = (index: number) => {
     if (isReadOnly) return;
+    const confirmed = window.confirm(
+      `Delete expense line ${index + 1}? This cannot be undone. Do you want to proceed?`
+    );
+    if (!confirmed) return;
+
     setExpenses(prev => prev.filter((_, idx) => idx !== index));
   };
 
   // Reset to a blank daily sheet
   const handleResetDefaults = () => {
     if (isReadOnly) return;
+    const confirmed = window.confirm(
+      'Clear this daily sheet? All unposted collection and expense entries on this sheet will be removed. Do you want to proceed?'
+    );
+    if (!confirmed) return;
+
     setRows([]);
     setExpenses([]);
     setIsPosted(false);
@@ -286,6 +323,16 @@ export default function DailyCollectionsView({
     const timestampShort = selectedDate;
     const unpostedRows = rows.filter(row => !row.transactionId);
     const unpostedExpenses = expenses.filter(exp => !exp.transactionId && exp.amount > 0 && exp.description.trim());
+    const invalidRow = unpostedRows.find(row => {
+      if (getRowTotal(row) <= 0) return false;
+      const vehicle = activeVehicles.find(item => item.plateNumber === row.vehiclePlate);
+      const member = members.find(item => item.id === vehicle?.ownerId && item.status === 'Active');
+      return !vehicle || !member;
+    });
+    if (invalidRow) {
+      setErrorMessage(`Row ${invalidRow.no} must use an active onboarded vehicle linked to an active registered member.`);
+      return;
+    }
     if (!unpostedRows.length && !unpostedExpenses.length) {
       await handleSaveLocal(isPosted);
       setSuccessMessage('Changes saved. All visible entries are already linked to the Sacco ledger.');
@@ -330,7 +377,7 @@ export default function DailyCollectionsView({
           type: 'Debit',
           category: 'Petty Cash',
           amount: expense.amount,
-          tillNumber: 'UtilityTill'
+          tillNumber: 'VehicleTill'
         });
         createdExpenseIds.set(expense.no, transaction.id);
       }
@@ -367,7 +414,7 @@ export default function DailyCollectionsView({
           </div>
           <h2 className="text-lg font-bold font-display text-slate-100 mt-1 flex items-center">
             <ClipboardList className="w-5 h-5 text-emerald-400 mr-2" />
-            Sowetamu Travellers Sacco — Field Collection Sheet
+            Sowetamu Sacco — Field Collection Sheet
           </h2>
           <p className="text-xs text-slate-400 max-w-2xl leading-normal">
             This component replicates the physical daily field sheets filled at stages (such as <strong className="text-white">Stage 17 &amp; Cabanas</strong>). Under the hood, we digitize these entries, compute dynamic vertical sums, account for daily on-route expenses, and allow one-click ledger synchronization to post transactions seamlessly to the centralized dual-till vault.
@@ -469,7 +516,7 @@ export default function DailyCollectionsView({
             </div>
 
             <div>
-              <h1 className="text-2xl font-black font-display tracking-tight text-emerald-950">SOWETAMU</h1>
+              <h1 className="text-2xl font-black font-display tracking-tight text-emerald-950">SOWETAMU SACCO</h1>
               <p className="text-[10px] text-emerald-800 font-bold uppercase tracking-[1.5px] font-mono leading-none">TRAVELLERS SACCO</p>
               <p className="text-[9px] text-slate-500 mt-1 italic">"We Serve with Courtesy, Discipline &amp; Dignity"</p>
             </div>
@@ -530,19 +577,16 @@ export default function DailyCollectionsView({
                         <span className="font-mono font-bold text-slate-800">{row.vehiclePlate}</span>
                       ) : (
                         <>
-                        <input
-                          type="text"
-                          list={`daily-vehicle-plates-${row.no}`}
+                        <select
                           value={row.vehiclePlate}
-                          onChange={(e) => handleUpdateRowField(row.no, 'vehiclePlate', e.target.value.toUpperCase())}
-                          placeholder="e.g. KDA 123A"
+                          onChange={(e) => handleUpdateRowField(row.no, 'vehiclePlate', e.target.value)}
                           className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono font-bold bg-transparent text-slate-800 text-xs rounded focus:outline-none"
-                        />
-                        <datalist id={`daily-vehicle-plates-${row.no}`}>
-                          {vehicles.map(v => (
-                            <option key={v.id} value={v.plateNumber}>{v.plateNumber} ({v.driverName})</option>
+                        >
+                          <option value="">Select V.REG...</option>
+                          {activeVehicles.map(v => (
+                            <option key={v.id} value={v.plateNumber}>{v.plateNumber} — {v.ownerName}</option>
                           ))}
-                        </datalist>
+                        </select>
                         </>
                       )}
                     </td>
@@ -571,7 +615,8 @@ export default function DailyCollectionsView({
                         min="0"
                         value={row.operation || ''}
                         disabled={isReadOnly}
-                        onChange={(e) => handleUpdateRowField(row.no, 'operation', Number(e.target.value))}
+                        onChange={(e) => handleUpdateRowField(row.no, 'operation', Number(sanitizeDecimalInput(e.target.value)) || 0)}
+                        inputMode="decimal"
                         className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-emerald-800 font-bold text-xs rounded focus:outline-none focus:bg-white"
                       />
                     </td>
@@ -582,7 +627,8 @@ export default function DailyCollectionsView({
                         type="number"
                         value={row.entranceFee || ''}
                         disabled={isReadOnly}
-                        onChange={(e) => handleUpdateRowField(row.no, 'entranceFee', Number(e.target.value))}
+                        onChange={(e) => handleUpdateRowField(row.no, 'entranceFee', Number(sanitizeDecimalInput(e.target.value)) || 0)}
+                        inputMode="decimal"
                         className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-emerald-800 font-bold text-xs rounded focus:outline-none focus:bg-white"
                       />
                     </td>
@@ -593,7 +639,8 @@ export default function DailyCollectionsView({
                         type="number"
                         value={row.loanRepay || ''}
                         disabled={isReadOnly}
-                        onChange={(e) => handleUpdateRowField(row.no, 'loanRepay', Number(e.target.value))}
+                        onChange={(e) => handleUpdateRowField(row.no, 'loanRepay', Number(sanitizeDecimalInput(e.target.value)) || 0)}
+                        inputMode="decimal"
                         className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-slate-800 text-xs rounded focus:outline-none focus:bg-white"
                       />
                     </td>
@@ -604,7 +651,8 @@ export default function DailyCollectionsView({
                         type="number"
                         value={row.savings || ''}
                         disabled={isReadOnly}
-                        onChange={(e) => handleUpdateRowField(row.no, 'savings', Number(e.target.value))}
+                        onChange={(e) => handleUpdateRowField(row.no, 'savings', Number(sanitizeDecimalInput(e.target.value)) || 0)}
+                        inputMode="decimal"
                         className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-blue-800 font-bold text-xs rounded focus:outline-none focus:bg-white"
                       />
                     </td>
@@ -615,7 +663,8 @@ export default function DailyCollectionsView({
                         type="number"
                         value={row.sTicket || ''}
                         disabled={isReadOnly}
-                        onChange={(e) => handleUpdateRowField(row.no, 'sTicket', Number(e.target.value))}
+                        onChange={(e) => handleUpdateRowField(row.no, 'sTicket', Number(sanitizeDecimalInput(e.target.value)) || 0)}
+                        inputMode="decimal"
                         className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-amber-800 font-bold text-xs rounded focus:outline-none focus:bg-white"
                       />
                     </td>
@@ -626,7 +675,8 @@ export default function DailyCollectionsView({
                         type="number"
                         value={row.legalFee || ''}
                         disabled={isReadOnly}
-                        onChange={(e) => handleUpdateRowField(row.no, 'legalFee', Number(e.target.value))}
+                        onChange={(e) => handleUpdateRowField(row.no, 'legalFee', Number(sanitizeDecimalInput(e.target.value)) || 0)}
+                        inputMode="decimal"
                         className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-rose-800 font-bold text-xs rounded focus:outline-none focus:bg-white"
                       />
                     </td>
@@ -746,7 +796,8 @@ export default function DailyCollectionsView({
                       type="number"
                       value={exp.amount || ''}
                       disabled={isReadOnly}
-                      onChange={(e) => handleUpdateExpenseField(exp.no, idx, 'amount', Number(e.target.value))}
+                      onChange={(e) => handleUpdateExpenseField(exp.no, idx, 'amount', Number(sanitizeDecimalInput(e.target.value)) || 0)}
+                      inputMode="decimal"
                       className="w-full px-2 py-1 border border-slate-200 rounded text-right font-bold text-rose-700 text-xs bg-transparent focus:outline-none focus:border-slate-900 focus:bg-white"
                     />
                   </div>

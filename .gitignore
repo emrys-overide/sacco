@@ -2,7 +2,9 @@ node_modules/
 build/
 dist/
 coverage/
+.backups/
 .DS_Store
 *.log
+gha-creds-*.json
 .env*
 !.env.example

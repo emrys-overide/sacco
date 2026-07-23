@@ -15,7 +15,15 @@ import {
   ChevronLeft,
   ChevronRight,
   Database,
-  Smartphone
+  Building2,
+  UserRoundPlus,
+  Landmark,
+  BookOpenCheck,
+  CircleHelp,
+  CalendarClock,
+  Bug,
+  KeyRound,
+  Settings
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -26,7 +34,8 @@ interface SidebarProps {
   blueprintApproved: boolean;
   onClose?: () => void;
   isDatabaseEmpty: boolean;
-  onClearAllData: () => void;
+  showDeveloperErrors: boolean;
+  onClearBrowserCache: () => void;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
 }
@@ -39,23 +48,40 @@ export default function Sidebar({
   blueprintApproved,
   onClose,
   isDatabaseEmpty,
-  onClearAllData,
+  showDeveloperErrors,
+  onClearBrowserCache,
   isCollapsed,
   onToggleCollapse
 }: SidebarProps) {
   const [isHovered, setIsHovered] = React.useState(false);
   const displayCollapsed = isCollapsed && !isHovered;
 
-  const menuItems = [
+  const administratorMenuItems = [
     { name: 'Dashboard', icon: <LayoutDashboard className="w-4 h-4" /> },
     { name: 'Daily Collections', icon: <ClipboardList className="w-4 h-4" /> },
     { name: 'Expenses', icon: <Receipt className="w-4 h-4" /> },
     { name: 'Members', icon: <Users className="w-4 h-4" /> },
+    { name: 'Loans', icon: <Landmark className="w-4 h-4" /> },
     { name: 'Fleet', icon: <Bus className="w-4 h-4" /> },
-    { name: 'Paybill Link', icon: <Smartphone className="w-4 h-4" /> },
+    { name: 'Banking', icon: <Building2 className="w-4 h-4" /> },
     { name: 'Reports', icon: <FileSpreadsheet className="w-4 h-4" /> },
     { name: 'Blueprint', icon: <FileCode className="w-4 h-4" /> }
   ];
+  const officerMenus: Record<Exclude<User['role'], 'Member'>, Array<{ name: string; icon: React.ReactNode }>> = {
+    Chairman: [...administratorMenuItems, { name: 'Month-end Close', icon: <CalendarClock className="w-4 h-4" /> }, { name: 'Account Access', icon: <UserRoundPlus className="w-4 h-4" /> }],
+    Secretary: [...administratorMenuItems, { name: 'Chairman Recovery', icon: <KeyRound className="w-4 h-4" /> }],
+    Treasurer: administratorMenuItems,
+    Accountant: administratorMenuItems,
+    Auditor: administratorMenuItems.filter(item => !['Daily Collections', 'Expenses'].includes(item.name))
+  };
+  const menuItems = currentUser.role === 'Member'
+    ? [{ name: 'My Account', icon: <LayoutDashboard className="w-4 h-4" /> }]
+    : [
+      ...officerMenus[currentUser.role],
+      { name: 'Roles & Responsibilities', icon: <BookOpenCheck className="w-4 h-4" /> },
+      { name: 'Account Settings', icon: <Settings className="w-4 h-4" /> },
+      ...(showDeveloperErrors ? [{ name: 'Developer Errors', icon: <Bug className="w-4 h-4" /> }] : [])
+    ];
 
   return (
     <aside 
@@ -72,7 +98,7 @@ export default function Sidebar({
       }`}>
         {!displayCollapsed ? (
           <div className="flex items-center space-x-2.5">
-            <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center shadow-sm shadow-blue-200">
+            <div className="brand-mark w-9 h-9 bg-blue-600 rounded-xl flex items-center justify-center shadow-sm shadow-blue-200">
               <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
               </svg>
@@ -80,7 +106,7 @@ export default function Sidebar({
             <div>
               <h1 className="text-sm font-bold font-display uppercase tracking-wider text-slate-900 flex items-center space-x-1">
                 <span>Sowetamu</span>
-                <span className="text-blue-600">Pro</span>
+                <span className="text-blue-600">Sacco</span>
               </h1>
               <p className="text-[9px] text-slate-400 font-mono tracking-wider font-semibold">
                 FINANCIAL OS V1.0
@@ -88,8 +114,8 @@ export default function Sidebar({
             </div>
           </div>
         ) : (
-          <div className="flex flex-col items-center md:items-center space-y-1.5 md:block hidden" title="Sowetamu Pro Sacco OS">
-            <div className="w-9 h-9 bg-blue-600 rounded-lg flex items-center justify-center shadow-sm shadow-blue-200">
+          <div className="flex flex-col items-center md:items-center space-y-1.5 md:block hidden" title="Sowetamu Sacco OS">
+            <div className="brand-mark w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center shadow-sm shadow-blue-200">
               <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
               </svg>
@@ -101,7 +127,7 @@ export default function Sidebar({
         <div className="md:hidden block">
           <h1 className="text-sm font-bold font-display uppercase tracking-wider text-slate-900 flex items-center space-x-1">
             <span>Sowetamu</span>
-            <span className="text-blue-600 font-black">Pro</span>
+            <span className="text-blue-600 font-black">Sacco</span>
           </h1>
         </div>
         
@@ -130,6 +156,11 @@ export default function Sidebar({
       {/* Nav Actions inside Scrollable Container */}
       <div className="flex-1 overflow-y-auto space-y-5 py-4 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent">
         <nav className={`p-3 space-y-1 ${displayCollapsed ? 'md:flex md:flex-col md:items-center md:px-2' : ''}`}>
+          {!displayCollapsed && currentUser.role !== 'Member' && (
+            <p className="px-2 pb-2 text-[8px] font-bold uppercase tracking-[0.22em] text-emerald-200/45 font-mono">
+              Operations workspace
+            </p>
+          )}
           {menuItems.map((item) => {
             const isActive = currentTab === item.name;
             return (
@@ -142,7 +173,7 @@ export default function Sidebar({
                 title={displayCollapsed ? `${item.name} Directory` : undefined}
                 whileHover={{ scale: 1.015, x: displayCollapsed ? 0 : 2 }}
                 whileTap={{ scale: 0.985 }}
-                className={`w-full flex items-center transition-all duration-200 text-left cursor-pointer relative ${
+                className={`sidebar-nav-item ${isActive ? 'is-active' : ''} w-full flex items-center transition-all duration-200 text-left cursor-pointer relative ${
                   displayCollapsed 
                     ? `md:justify-center md:p-2.5 rounded-xl ${
                         isActive 
@@ -185,9 +216,9 @@ export default function Sidebar({
           })}
         </nav>
 
-        {/* Clean Database Controls */}
-        {!displayCollapsed ? (
-          <div className="mx-4 p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+        {/* Local reset controls are an administrator-only convenience. */}
+        {currentUser.role !== 'Member' && (!displayCollapsed ? (
+          <div className="sidebar-section-card mx-4 p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-[9px] font-mono font-bold text-slate-500 uppercase tracking-widest">
                 Sacco Database
@@ -205,16 +236,16 @@ export default function Sidebar({
             </p>
             <div className="pt-1">
               <button
-                onClick={onClearAllData}
+                onClick={onClearBrowserCache}
                 className="w-full py-1 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 rounded text-[9px] font-bold uppercase tracking-wider transition-all cursor-pointer"
-                title="Clear local browser state"
+                title="Clear cached data from this browser only"
               >
-                Clear Local State
+                Clear Browser Cache
               </button>
             </div>
           </div>
         ) : (
-          <div className="mx-2 p-2 bg-slate-50 border border-slate-200 rounded-xl flex flex-col items-center space-y-3 hidden md:flex">
+          <div className="sidebar-section-card mx-2 p-2 bg-slate-50 border border-slate-200 rounded-xl flex flex-col items-center space-y-3 hidden md:flex">
             <span 
               className={`p-1.5 rounded-lg border ${
                 isDatabaseEmpty 
@@ -227,27 +258,37 @@ export default function Sidebar({
             </span>
             <div className="flex flex-col space-y-1.5 w-full items-center">
               <button
-                onClick={onClearAllData}
+                onClick={onClearBrowserCache}
                 className="p-1 bg-red-50 hover:bg-red-100 text-red-600 border border-red-100 rounded text-xs transition-all cursor-pointer hover:scale-105 active:scale-95"
-                title="Clear Local State"
+                title="Clear Browser Cache"
               >
-                CLR
+                CACHE
               </button>
             </div>
           </div>
-        )}
+        ))}
       </div>
 
       {/* Profile Selector & User Meta (Fixed Bottom) */}
-      <div className={`p-4 border-t border-slate-100 bg-white flex flex-col transition-all duration-300 ${
+      <div className={`sidebar-profile p-4 border-t border-slate-100 bg-white flex flex-col transition-all duration-300 ${
         displayCollapsed ? 'md:space-y-4 md:items-center md:justify-center' : 'space-y-3'
       }`}>
+        <a
+          href="/documentation"
+          target="_blank"
+          rel="noopener noreferrer"
+          className={`flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 ${displayCollapsed ? 'md:justify-center' : ''}`}
+          title="Documentation and Technical Help"
+        >
+          <CircleHelp className="h-4 w-4 shrink-0" />
+          {(!displayCollapsed || window.innerWidth < 768) && <span>Documentation &amp; Help</span>}
+        </a>
         <div className={`flex items-center justify-between pt-2 border-t border-slate-100 w-full ${
           displayCollapsed ? 'md:flex-col md:space-y-3' : 'space-x-3'
         }`}>
           <div className="flex items-center space-x-3">
             <div 
-              className="w-8 h-8 rounded bg-blue-50 text-blue-600 flex items-center justify-center font-bold text-xs font-display shrink-0"
+              className="sidebar-avatar w-9 h-9 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center font-bold text-xs font-display shrink-0"
               title={`${currentUser.name} (${currentUser.role})`}
             >
               {currentUser.name.split(' ').map(n => n[0]).join('')}

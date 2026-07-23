@@ -37,14 +37,14 @@ The Sacco Management System is built using a modern, scalable multi-tier archite
 *   **Frontend (React + Vite + Tailwind CSS):** A lightweight, responsive Single Page Application (SPA) optimized for low-bandwidth mobile networks in Kenya (Edge/3G). It uses aggressive client-side caching via LocalStorage and IndexedDB.
 *   **Backend (Python Django + DRF):** A secure, robust, enterprise-grade REST API utilizing Python 3.12 and Django. Handles complex business logic, transactional consistency, PDF generation, and external integration hooks.
 *   **Database (PostgreSQL 16):** Houses relational models including complex constraint checks for member accounts, shares, loans, and transaction history.
-*   **Caching & Queue Layer (Redis + Celery):** Offloads long-running tasks like M-Pesa IPN validation and daily financial report generation.`
+*   **Caching & Queue Layer (Redis + Celery):** Offloads long-running tasks like Co-op Bank B2B event review and daily financial report generation.`
   },
   {
     id: 'database',
     title: '2. Database Schema',
     subtitle: 'PostgreSQL Relational schema optimized for audit trails',
     content: `### 2.1 Database Naming Conventions
-*   **Tables:** Lowercase snake_case pluralized (e.g., \`sacco_members\`, \`mpesa_transactions\`).
+*   **Tables:** Lowercase snake_case pluralized (e.g., \`sacco_members\`, \`coop_bank_ipn_events\`).
 *   **Columns:** Lowercase snake_case singular (e.g., \`id\`, \`plate_number\`, \`created_at\`).
 *   **Primary Keys:** Named exactly \`id\` as a UUIDv4 to prevent sequential ID guessing.
 *   **Foreign Keys:** Suffix with \`_id\` referencing parent table (e.g., \`owner_id\` references \`sacco_members(id)\`).
@@ -96,11 +96,11 @@ CREATE TABLE sacco_vehicles (
 -- Financial Transactions (Immutable Double-Entry Ledger)
 CREATE TABLE financial_ledger (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    ref_code VARCHAR(50) UNIQUE NOT NULL, -- M-Pesa Transaction ID (e.g. QE93FD82H1) or Voucher Code
+    ref_code VARCHAR(50) UNIQUE NOT NULL, -- Co-op Bank transaction ID, bank reference, or voucher code
     member_id UUID REFERENCES sacco_members(id) ON DELETE RESTRICT,
     vehicle_id UUID REFERENCES sacco_vehicles(id) ON DELETE RESTRICT,
     type VARCHAR(10) NOT NULL CHECK (type IN ('Credit', 'Debit')),
-    category VARCHAR(50) NOT NULL CHECK (category IN ('Daily Contribution', 'Registration Fee', 'Management Fee', 'Office Expenses', 'Petty Cash', 'Penalty')),
+    category VARCHAR(50) NOT NULL CHECK (category IN ('Daily Contribution', 'Savings Contribution', 'Registration Fee', 'Management Fee', 'Office Expenses', 'Petty Cash', 'Penalty')),
     amount NUMERIC(12, 2) NOT NULL CHECK (amount > 0),
     description TEXT,
     recorded_by UUID NOT NULL REFERENCES sacco_users(id),
@@ -127,32 +127,32 @@ CREATE TABLE sacco_loans (
   {
     id: 'api',
     title: '3. API & Auth Strategy',
-    subtitle: 'Secure REST endpoints with stateless JWT authentication',
+    subtitle: 'Secure REST endpoints with signed bearer-session authentication',
     content: `### 3.1 Authentication Workflow
-Security is implemented using short-lived Stateless JSON Web Tokens (JWT) combined with Secure, HttpOnly Cookies for token storage to prevent Cross-Site Scripting (XSS) and Session hijacking.
+The current application uses signed JSON Web Tokens (JWTs) in the Authorization header. The browser holds the token only in the active application session; it is not stored as a persistent browser cookie or local-storage value. The server validates the signature, issuer, audience, expiry, account status, and role on every protected request.
 
-1.  **Request Login:** \`POST /api/v1/auth/login/\` with email and password.
-2.  **Issue Token:** Server returns a short-lived access token (expires in 15 mins) and sets a HttpOnly, Secure, SameSite=Strict cookie with a refresh token (expires in 7 days).
-3.  **Authorization:** Frontend includes access token in Authorization Header: \`Bearer <access_token>\`.
-4.  **Token Refresh:** When access token expires, client calls \`POST /api/v1/auth/token/refresh/\` sending the Refresh Cookie.
+1.  **Request login:** \`POST /api/auth/login\` with a registered email or phone and password.
+2.  **Issue session:** The server returns a signed bearer token. The configured maximum lifetime is eight hours by default, and the server rejects a session after one hour without activity.
+3.  **Authorization:** The frontend includes the token in the Authorization header: \`Bearer <token>\`.
+4.  **Step-up controls:** The SACCO can require an authenticator-app code for officers. A Chairman-issued temporary password must be changed before the account can access SACCO records.
 
 ### 3.2 Endpoint Architecture
-All endpoints are strictly versioned: \`/api/v1/\`.
+Protected endpoints are under \`/api/\`; the server is the authority for every role check.
 
 | Endpoint | Method | Role Allowed | Description |
 | :--- | :--- | :--- | :--- |
-| \`/auth/login/\` | POST | Anonymous | Authenticate user, obtain JWT |
-| \`/members/\` | GET | All staff | List and search registered members |
-| \`/members/\` | POST | Chairman, Secretary | Register a new member |
-| \`/vehicles/\` | GET | All staff | List and search Matatus |
-| \`/vehicles/\` | POST | Chairman, Secretary | Register a new vehicle |
-| \`/transactions/\` | GET | All staff | Browse immutable transaction ledger |
-| \`/transactions/\` | POST | Treasurer | Record daily contribution / M-Pesa code |
-| \`/reports/summary/\` | GET | All staff | Get summary stats, targets |
-| \`/reports/pdf/\` | GET | Chairman, Treasurer | Generate signed PDF financial ledger export |
+| \`/api/auth/login\` | POST | Anonymous | Authenticate an existing user and obtain a bearer session |
+| \`/api/members\` | GET | Authorised roles | List the permitted member scope |
+| \`/api/members\` | POST | Chairman, Secretary | Register a new member |
+| \`/api/vehicles\` | GET | Authorised roles | List the permitted vehicle scope |
+| \`/api/vehicles\` | POST | Chairman, Secretary | Register a new vehicle |
+| \`/api/transactions\` | GET | Authorised roles | Browse the permitted ledger scope |
+| \`/api/transactions\` | POST | Chairman, Treasurer, Accountant | Record an authorised ledger entry |
+| \`/api/loans\` | GET/POST | Role-dependent | Review or submit SACCO loan workflow records |
+| \`/api/member-portal\` | GET | Member | View only the authenticated member's own information |
 
 ### 3.3 Role-Based Permissions matrix
-*   **Treasurer:** Full control over financial accounting, M-Pesa reconciliation, and daily cash logging.
+*   **Treasurer:** Full control over financial accounting, Co-op Bank event review, and daily cash logging.
 *   **Secretary:** Owns registrations, contact details updating, minutes writing, and agenda creation.
 *   **Chairman:** Ultimate Sacco supervisor, approves loans, reads audited statements, updates platform settings.
 *   **Auditor:** Read-only access to all ledgers, reporting metrics, and validation logs.`
@@ -160,20 +160,22 @@ All endpoints are strictly versioned: \`/api/v1/\`.
   {
     id: 'security',
     title: '4. Security & Compliance Plan',
-    subtitle: 'Fulfilling strict CBK Sacco guidelines and M-Pesa API safety',
+    subtitle: 'Practical safeguards and production controls for SACCO data',
     content: `### 4.1 Data Security & Privacy
-Matatu Saccos process sensitive financial information. Compliance with the Central Bank of Kenya (CBK) and the Kenya Data Protection Act (ODPC) is native:
+Matatu Saccos process sensitive personal and financial information. The application includes security controls, but formal legal or regulatory compliance needs a separate SACCO review and cannot be claimed from software alone.
 
-*   **Encryption at Rest:** Standard PostgreSQL storage volumes encrypted using AES-256.
-*   **Encryption in Transit:** Dynamic HTTPS (TLS 1.3) enforced for all browser interfaces.
-*   **Audit Logging:** Every user action (logins, exports, registrations) logged into an immutable database journal with IP address, user agent, and timestamp.
-*   **Input Sanitization:** All forms enforce strict type checks, custom XSS protection middleware, and SQL injection prevention via Django ORM parameterized queries.
+*   **Transport and browser protections:** Production is intended to run behind HTTPS with a restrictive Content Security Policy, frame blocking, no-store API responses, and security headers.
+*   **Data access:** Every protected request re-checks the signed session and server-side role permission. Members are scoped to their own record.
+*   **Audit logging:** PostgreSQL deployments record important security and operational actions with a timestamp, actor, and request context.
+*   **Input handling:** Forms apply validation, JSON bodies are size-limited, and PostgreSQL queries use parameterized values. The application is a Node/Express service, not a Django application.
+*   **Operational controls:** Keep secrets only in the host secret store, use individual accounts, enable officer authenticator codes for production, and keep backups outside the hosting filesystem.
 
-### 4.2 M-Pesa IPN Gateway Integration Security
-When integrating the Safaricom M-Pesa Daraja API (C2B or STK Push):
-1.  **IP Whitelisting:** Sacco endpoints only accept callback payloads from verified Safaricom IP ranges.
-2.  **Signature Matching:** Secure signatures inside Safaricom headers verified using public certificates.
-3.  **Ref Code Idempotency:** Financial Ledger enforces a strict unique constraint on \`ref_code\`. Safaricom callback attempts with repeated Transaction IDs are processed exactly once.`
+### 4.2 Co-op Bank B2B Event Integration Security
+When integrating Co-op Bank Core Banking Event Notifications:
+1.  **HTTPS and authentication:** The registered endpoint accepts only the configured Bearer token or Basic credentials; secrets are stored only on the server.
+2.  **Account allow-list:** Events are accepted only for authorised full Co-op account numbers and expected currency.
+3.  **Transaction ID idempotency:** The durable inbox has a unique \`transaction_id\`; repeated bank notifications receive a successful response without creating a duplicate record.
+4.  **Review before posting:** Credit and debit events are recorded as pending review. A bank event is never automatically treated as member income or posted to the ledger.`
   },
   {
     id: 'scaling',
@@ -224,7 +226,7 @@ services:
     title: '6. Implementation Roadmap',
     subtitle: 'Agile phases moving from foundation to full financial OS',
     content: `### 6.1 Phase Breakdown
-*   **Phase 1 (Current Core):** Role-based Authentication, Members Registry, Vehicle Fleets, M-Pesa transactions recording, Daily aggregates, PDF summaries.
+*   **Phase 1 (Current Core):** Role-based Authentication, Members Registry, Vehicle Fleets, Co-op Bank event recording, Daily aggregates, PDF summaries.
 *   **Phase 2 (Savings & Shares):** Integration of shares ledger, interest calculators, and custom withdraw vouchers.
 *   **Phase 3 (Mobile Loan Matrix):** Loan application pipelines, automated credit scoring based on historic daily contributions, guarantor lockups, and auto-disbursal API.
 *   **Phase 4 (Reporting Automation):** Month-end close workflow, automated dashboard forecasting, Excel/PDF exports, and management review approvals.

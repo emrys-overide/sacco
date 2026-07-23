@@ -4,21 +4,30 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx server.ts",
-    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "dev": "tsx start.ts",
+    "build:client": "vite build",
+    "build:server": "esbuild start.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "build": "npm run build:client && npm run build:server",
     "start": "node dist/server.cjs",
+    "db:up": "node scripts/database.mjs up",
+    "db:migrate": "node scripts/database.mjs migrate",
+    "db:status": "node scripts/database.mjs status",
+    "db:backup": "node scripts/database-backup.mjs",
+    "db:restore-test": "node scripts/restore-backup-test.mjs",
+    "db:down": "node scripts/database.mjs down",
+    "simulate:coop-ipn": "node scripts/simulate-coop-ipn.mjs",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "test:stress": "node --import tsx --test tests/concurrentStress.test.ts",
+    "test:red-team": "node --import tsx --test tests/redTeamSecurity.test.ts"
   },
   "dependencies": {
-    "@google-cloud/firestore": "^8.6.0",
     "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
-    "firebase": "^12.15.0",
-    "firebase-admin": "^14.1.0",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "pg": "^8.22.0",
@@ -36,5 +45,8 @@
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.3"
+  },
+  "overrides": {
+    "uuid": "11.1.1"
   }
 }

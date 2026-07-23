@@ -1,6 +1,6 @@
 # Database Migration Plan
 
-This runbook moves the app from local mock data and Firestore-style documents to the production PostgreSQL schema.
+This runbook moves the app from local mock data to the production PostgreSQL schema hosted by Supabase.
 
 ## Current Data Sources
 
@@ -8,7 +8,7 @@ The app currently has three possible data sources:
 
 - In-memory fallback data seeded from `server.ts`.
 - Browser/local development state.
-- Optional Firestore collections when Google credentials are configured.
+- Disposable in-memory data when explicitly enabled for local tests.
 
 The production target is PostgreSQL/Supabase using SQL migrations under `database/migrations`.
 
@@ -79,7 +79,7 @@ Source fields:
 
 ```text
 Legacy user id     -> external legacy reference only, not UUID primary key
-Firebase user uid  -> users.firebase_uid
+Legacy identity id -> users.firebase_uid (historical import field only; unused by runtime authentication)
 Official name      -> users.full_name
 Official email     -> users.email
 Official phone     -> users.phone
@@ -88,12 +88,11 @@ Official role      -> users.role
 
 Rules:
 
-- Firebase Auth is the login identity provider.
-- PostgreSQL `users` stores SACCO role, status, phone, and audit relationships.
-- Backfill `users.firebase_uid` from Firebase Auth export where possible.
-- If `firebase_uid` is temporarily empty, the API can link the row by matching verified Firebase email on first login.
+- PostgreSQL/Supabase is the active data store and the application issues its own signed sessions.
+- PostgreSQL `users` stores SACCO role, status, password hash, phone, and audit relationships.
+- Preserve any imported `users.firebase_uid` values for audit/history only. New and existing sessions use server-issued JWTs backed by the `users` table.
 - Never store role security keys or JWT secrets in the database.
-- Never store Firebase passwords or refresh tokens in the database.
+- Never store passwords or session tokens in the database outside the approved password hash.
 
 Validation:
 
@@ -191,7 +190,9 @@ FROM ledger_entries
 WHERE status = 'Posted';
 ```
 
-## Phase 5: M-Pesa Payment Backfill
+## Phase 5: Legacy Payment Compatibility Backfill
+
+This phase is only for preserving records received before the Co-op Bank B2B cutover. It does not enable a Daraja integration.
 
 Map current `PaymentRecord` rows to `mpesa_payments`.
 
@@ -222,7 +223,36 @@ SELECT trans_id, COUNT(*) FROM mpesa_payments GROUP BY trans_id HAVING COUNT(*) 
 SELECT COUNT(*) FROM mpesa_payments WHERE status = 'Reconciled' AND ledger_entry_id IS NULL;
 ```
 
-## Phase 6: Module Write Cutover
+## Phase 6: Co-op Bank B2B Event Inbox
+
+Apply `008_coop_bank_b2b_ipn.sql` before registering the production HTTPS receiver with Co-op Bank.
+
+```text
+Co-op event TransactionId -> coop_bank_ipn_events.transaction_id
+Co-op event AcctNo        -> coop_bank_ipn_events.account_number
+Co-op event EventType     -> coop_bank_ipn_events.event_type
+Co-op event amount        -> coop_bank_ipn_events.amount
+Co-op event raw body      -> coop_bank_ipn_events.raw_payload
+```
+
+Rules:
+
+- Authenticate each bank request with the agreed Bearer token or Basic credentials.
+- Accept only events for `COOP_B2B_ALLOWED_ACCOUNT_NUMBERS` and the expected currency.
+- Insert `TransactionId` idempotently before returning HTTP `200` or `201`.
+- Keep all events as `PendingReview`; never automatically post a credit or debit to the member ledger.
+
+Validation:
+
+```sql
+SELECT transaction_id, COUNT(*)
+FROM coop_bank_ipn_events
+GROUP BY transaction_id
+HAVING COUNT(*) > 1;
+SELECT event_type, status, COUNT(*) FROM coop_bank_ipn_events GROUP BY event_type, status;
+```
+
+## Phase 7: Module Write Cutover
 
 Cut over writes in this order:
 
@@ -230,7 +260,7 @@ Cut over writes in this order:
 2. Members module: `members`.
 3. Fleet module: `routes`, `vehicles`.
 4. Ledger module: `ledger_entries`.
-5. Paybill module: `mpesa_payments`, `ledger_entries`.
+5. Co-op Bank event inbox: `coop_bank_ipn_events`.
 6. Reports module: reporting views and `monthly_closings`.
 7. Reports module polish: close-month workflow, exports, and audit review.
 
@@ -241,12 +271,12 @@ For each module:
 - Compare counts and totals against old storage.
 - Keep rollback path to previous storage until validation passes.
 
-## Phase 7: Reporting And Closing
+## Phase 8: Reporting And Closing
 
 Create first month-end closing only after:
 
 - Ledger totals match historical report totals.
-- M-Pesa reconciled totals match Daraja callback totals.
+- Reviewed Co-op Bank events match the bank statement and each reconciled event links to at most one ledger entry.
 - Member balances from `v_member_financial_balances` match expected balances.
 
 Closing validation:
@@ -256,7 +286,7 @@ SELECT * FROM v_daily_till_summary ORDER BY entry_date DESC LIMIT 30;
 SELECT * FROM v_member_financial_balances ORDER BY full_name;
 ```
 
-## Phase 8: Security And Audit Hardening
+## Phase 9: Security And Audit Hardening
 
 Add follow-up migrations for:
 
@@ -288,9 +318,9 @@ Before go-live:
 - No duplicate member national IDs.
 - No duplicate vehicle plates.
 - No duplicate ledger reference codes.
-- No duplicate M-Pesa transaction IDs.
+- No duplicate Co-op Bank transaction IDs.
 - Every active vehicle has a member owner or documented exception.
-- Every reconciled M-Pesa payment links to one ledger entry.
+- Every reconciled Co-op Bank event links to at most one ledger entry.
 - Credit/debit totals match the previous system.
 - Reversal entries point to valid originals.
 - Closed month totals match generated reports.
@@ -300,10 +330,9 @@ Before go-live:
 - Database backup completed.
 - Migrations applied to production.
 - App env points to production database.
-- Firebase Admin credentials are configured on the Express server.
-- Firebase web config is configured for the frontend.
-- Daraja callback base URL points to production app domain.
+- Co-op Bank B2B endpoint is HTTPS and its authentication secrets are configured in the host secret manager.
+- Full authorised Co-op account numbers are set in `COOP_B2B_ALLOWED_ACCOUNT_NUMBERS`.
 - Dev auth fallback is disabled.
 - First admin users created.
-- Smoke tests pass for login, member creation, ledger posting, reversal, Daraja callback, reconciliation, and reports.
+- Smoke tests pass for login, member creation, ledger posting, reversal, Co-op Bank B2B receipt, reconciliation, and reports.
 - Monitoring and error logs are active.

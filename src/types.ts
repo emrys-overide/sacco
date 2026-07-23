@@ -4,17 +4,24 @@
 
 export type UserRole = 'Chairman' | 'Secretary' | 'Treasurer' | 'Auditor' | 'Member' | 'Accountant';
 
+export type AccountStatus = 'PendingActivation' | 'Active' | 'Suspended' | 'Disabled' | 'Rejected' | 'Locked';
+
 export interface User {
   id: string;
   name: string;
   email: string;
   role: UserRole;
   phone: string;
+  accountStatus?: AccountStatus;
+  linkedMemberId?: string;
 }
 
 export interface Member {
   id: string;
   name: string;
+  /** Trusted email recorded by an officer; used with phone and name to gate member account creation. */
+  email?: string;
+  membershipNumber?: string;
   idNumber: string;
   phoneNumber: string;
   status: 'Active' | 'Inactive' | 'Pending';
@@ -25,6 +32,60 @@ export interface Member {
   loanBalance?: number;     // Outstanding member loan, reduced by daily loan repayments
   initialLoanAmount?: number;
 }
+
+export interface DriverAssignment {
+  id: string;
+  vehicleId: string;
+  vehiclePlate?: string;
+  driverName: string;
+  driverPhone?: string;
+  startDateTime: string;
+  endDateTime?: string;
+  status: 'Active' | 'Closed';
+  reason?: string;
+}
+
+export interface MemberLoanSummary {
+  id: string;
+  principalAmount: number;
+  outstandingBalance: number;
+  amountPaid?: number;
+  applicationDate?: string;
+  issueDate: string;
+  dueDate?: string;
+  status: string;
+  interestRate?: number;
+  totalPayable?: number;
+  loanType?: string;
+  repaymentPeriodMonths?: number;
+  repaymentMethod?: string;
+  incomeSource?: string;
+  monthlyIncome?: number;
+  guarantorDetails?: string;
+  collateralDetails?: string;
+  notes?: string;
+  applicationSnapshot?: {
+    fullName?: string;
+    membershipNumber?: string;
+    nationalId?: string;
+    phone?: string;
+    email?: string;
+  };
+  approvedAt?: string;
+  disbursedAt?: string;
+  secretaryName?: string;
+  secretaryReviewedAt?: string;
+  secretaryNotes?: string;
+  treasurerName?: string;
+  treasurerReviewedAt?: string;
+  treasurerNotes?: string;
+  chairmanName?: string;
+  rejectionReason?: string;
+  rejectedAt?: string;
+  repayments: Array<{ id: string; repaymentDate: string; amount: number }>;
+}
+
+export type LoanStatus = 'Applied' | 'Approved' | 'Active' | 'Cleared' | 'Defaulted' | 'Rejected' | 'WrittenOff';
 
 export interface Vehicle {
   id: string;
@@ -41,7 +102,7 @@ export interface Vehicle {
 export type TillType = 'VehicleTill' | 'UtilityTill' | 'None';
 export type VehicleClass = 'Nissan' | 'Sienta' | 'Member Contribution';
 export type TransactionType = 'Credit' | 'Debit';
-export type TransactionCategory = 'Daily Contribution' | 'Registration Fee' | 'Management Fee' | 'Office Expenses' | 'Petty Cash' | 'Penalty' | 'Utilities' | 'Equipment';
+export type TransactionCategory = 'Daily Contribution' | 'Savings Contribution' | 'Registration Fee' | 'Management Fee' | 'Office Expenses' | 'Petty Cash' | 'Penalty' | 'Utilities' | 'Equipment';
 
 export interface Transaction {
   id: string;
@@ -50,7 +111,7 @@ export interface Transaction {
   memberName?: string;
   vehiclePlate?: string;
   description: string;
-  refCode: string; // M-Pesa or Cash voucher code
+  refCode: string; // Bank reference or cash voucher code
   type: TransactionType;
   category: TransactionCategory;
   amount: number;
@@ -74,6 +135,47 @@ export type PaymentStatus = 'Pending' | 'Reconciled' | 'Unmatched' | 'Rejected' 
 export type PaymentSource = 'Manual' | 'Webhook';
 export type PaymentMatchMethod = 'Member ID' | 'Vehicle Plate' | 'Phone Number' | 'Manual Assignment' | 'None';
 
+export type CoopBankEventType = 'CREDIT' | 'DEBIT' | string;
+export type CoopBankProcessingStatus = 'RECEIVED' | 'VALIDATED' | 'PROCESSING' | 'PROCESSED' | 'FAILED' | 'QUARANTINED';
+export type CoopBankReconciliationStatus = 'NOT_EVALUATED' | 'MATCHED' | 'UNMATCHED' | 'AMBIGUOUS' | 'IGNORED_DEBIT' | 'PENDING_ALLOCATION' | 'POSTED' | 'MANUALLY_RECONCILED';
+
+/** A durable Co-operative Bank B2B/IPN event. Raw bank payloads remain server-only. */
+export interface CoopBankEvent {
+  id: string;
+  transactionId: string;
+  paymentRef?: string;
+  accountNumber: string;
+  amount: number;
+  currency: string;
+  eventType: CoopBankEventType;
+  narration: string;
+  customerMemoLine1?: string;
+  customerMemoLine2?: string;
+  customerMemoLine3?: string;
+  bookedBalance?: number;
+  clearedBalance?: number;
+  exchangeRate?: number;
+  postingDate?: string;
+  valueDate?: string;
+  transactionDate?: string;
+  processingStatus: CoopBankProcessingStatus;
+  reconciliationStatus: CoopBankReconciliationStatus;
+  matchedMemberId?: string;
+  matchedMemberName?: string;
+  matchedVehicleId?: string;
+  matchedVehiclePlate?: string;
+  ledgerEntryId?: string;
+  matchMethod?: string;
+  matchConfidence?: number;
+  manualReviewReason?: string;
+  processingAttempts: number;
+  duplicateCount: number;
+  lastProcessingError?: string;
+  receivedAt: string;
+  processedAt?: string;
+  reconciledAt?: string;
+}
+
 export interface PaymentRecord {
   id: string;
   timestamp: string;
@@ -84,6 +186,7 @@ export interface PaymentRecord {
   tillNumber: Exclude<TillType, 'None'>;
   category: TransactionCategory;
   accountReference: string;
+  destinationAccount?: string;
   payerName: string;
   payerPhone: string;
   memberId?: string;
@@ -95,19 +198,26 @@ export interface PaymentRecord {
   rawPayload?: unknown;
 }
 
+export interface MemberPortalData {
+  member: Member;
+  profile: {
+    fullName: string;
+    email: string;
+    phone: string;
+    nationalId: string;
+    membershipNumber?: string;
+    profilePhotoData?: string;
+  };
+  vehicles: Vehicle[];
+  driverAssignments: DriverAssignment[];
+  transactions: Transaction[];
+  payments: PaymentRecord[];
+  loans: MemberLoanSummary[];
+}
+
 export interface TargetCollection {
   name: string;
   current: number;
   target: number;
   unit: string;
-}
-
-export interface MPesaConfig {
-  shortcode: string;
-  callbackUrl: string;
-  mode: 'sandbox' | 'production';
-  stkPushEnabled: boolean;
-  hasConsumerKey?: boolean;
-  hasConsumerSecret?: boolean;
-  credentialsConfigured?: boolean;
 }

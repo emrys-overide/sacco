@@ -25,17 +25,28 @@ import {
   ChevronRight,
   Sparkles,
   ClipboardCheck,
-  Building
+  Building,
+  Trash2
 } from 'lucide-react';
+import {
+  isValidPersonName,
+  isValidPhoneNumber,
+  sanitizeDecimalInput,
+  sanitizeIntegerInput,
+  sanitizePersonName,
+  sanitizePhoneNumber,
+  sanitizeVehiclePlate
+} from '../lib/inputValidation';
 
 interface MembersViewProps {
   members: Member[];
-  onAddMember: (newMember: Omit<Member, 'id' | 'dateRegistered' | 'sharesAmount' | 'savingsAmount'>) => void;
+  onAddMember: (newMember: Omit<Member, 'id' | 'dateRegistered' | 'sharesAmount' | 'savingsAmount'>) => Promise<void>;
+  onDeleteMember: (memberId: string) => Promise<void>;
   currentUserRole: UserRole;
   transactions: Transaction[];
 }
 
-export default function MembersView({ members, onAddMember, currentUserRole, transactions }: MembersViewProps) {
+export default function MembersView({ members, onAddMember, onDeleteMember, currentUserRole, transactions }: MembersViewProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'All' | 'Active' | 'Pending'>('All');
   const [showAddModal, setShowAddModal] = useState(false);
@@ -43,10 +54,13 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
   const [memberTxSearch, setMemberTxSearch] = useState('');
   const [downloadSuccessMessage, setDownloadSuccessMessage] = useState('');
   const [copiedSuccess, setCopiedSuccess] = useState(false);
+  const [deletingMemberId, setDeletingMemberId] = useState<string | null>(null);
+  const [memberActionMessage, setMemberActionMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
 
   // New Member Form State
   const [name, setName] = useState('');
   const [idNumber, setIdNumber] = useState('');
+  const [email, setEmail] = useState('');
   const [phoneNumber, setPhoneNumber] = useState('');
   const [assignedVehicle, setAssignedVehicle] = useState('');
   const [openingLoanBalance, setOpeningLoanBalance] = useState('');
@@ -82,26 +96,45 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
   const totalDeposited = memberTransactions.filter(t => t.type === 'Credit').reduce((acc, t) => acc + t.amount, 0);
   const totalLevies = memberTransactions.filter(t => t.type === 'Debit').reduce((acc, t) => acc + t.amount, 0);
   const totalFleetTill = memberTransactions.filter(t => t.tillNumber === 'VehicleTill' && t.type === 'Credit').reduce((acc, t) => acc + t.amount, 0);
-  const totalUtilityTill = memberTransactions.filter(t => t.tillNumber === 'UtilityTill').reduce((acc, t) => acc + t.amount, 0);
+  const totalUtilityTill = memberTransactions.filter(t => t.tillNumber === 'UtilityTill' && t.type === 'Credit').reduce((acc, t) => acc + t.amount, 0);
 
-  const handleCreate = (e: React.FormEvent) => {
+  const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || !idNumber.trim() || !phoneNumber.trim()) {
+    if (!name.trim() || !idNumber.trim() || !email.trim() || !phoneNumber.trim()) {
       setError('Please fill in all required fields.');
       return;
     }
-    onAddMember({
-      name,
-      idNumber,
-      phoneNumber,
-      status: 'Active', // Automatically registered as Active for administrative ease in prototype
-      vehicleAssigned: assignedVehicle.trim() || undefined,
-      initialLoanAmount: Number(openingLoanBalance) || 0,
-      loanBalance: Number(openingLoanBalance) || 0
-    });
+    if (!isValidPersonName(name)) {
+      setError('Full name must use letters only.');
+      return;
+    }
+    if (!isValidPhoneNumber(phoneNumber)) {
+      setError('Enter a valid phone number using digits only.');
+      return;
+    }
+    if (!/^\S+@\S+\.\S+$/.test(email.trim())) {
+      setError('Enter the member email address used for secure account verification.');
+      return;
+    }
+    try {
+      await onAddMember({
+        name,
+        idNumber,
+        email: email.trim().toLowerCase(),
+        phoneNumber,
+        status: 'Active',
+        vehicleAssigned: assignedVehicle.trim() || undefined,
+        initialLoanAmount: Number(openingLoanBalance) || 0,
+        loanBalance: Number(openingLoanBalance) || 0
+      });
+    } catch (error: any) {
+      setError(error?.message || 'Member registration failed. Check the server connection and retry.');
+      return;
+    }
     // Reset Form
     setName('');
     setIdNumber('');
+    setEmail('');
     setPhoneNumber('');
     setAssignedVehicle('');
     setOpeningLoanBalance('');
@@ -119,7 +152,7 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
 
   const triggerMemberReportDownload = (member: Member, txs: Transaction[]) => {
     let content = `======================================================\n`;
-    content += `         SOWETAMU TRAVELLERS SACCO MEMBER ACCOUNT REPORT\n`;
+    content += `         SOWETAMU SACCO MEMBER ACCOUNT REPORT\n`;
     content += `         MEMBER: ${member.name.toUpperCase()}\n`;
     content += `         Generated on: ${new Date().toLocaleString()}\n`;
     content += `======================================================\n\n`;
@@ -128,7 +161,7 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
     content += `------------------------------------------------------\n`;
     content += `Full Name              : ${member.name}\n`;
     content += `National ID Number     : ${member.idNumber}\n`;
-    content += `Phone Number (M-Pesa)  : ${member.phoneNumber}\n`;
+    content += `Phone Number            : ${member.phoneNumber}\n`;
     content += `Sacco Registration Date: ${member.dateRegistered || 'N/A'}\n`;
     content += `Membership Status      : ${member.status}\n`;
     content += `Assigned Vehicle Plate : ${member.vehicleAssigned || 'No vehicle currently assigned'}\n\n`;
@@ -143,15 +176,15 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
 
     content += `TILL SEGREGATION ACTIVITY LOG:\n`;
     content += `------------------------------------------------------\n`;
-    content += `Vehicle Till No. 8249102 Deposits : KES ${totalFleetTill.toLocaleString()}.00\n`;
-    content += `Utility Till No. 4810294 Payments : KES ${totalUtilityTill.toLocaleString()}.00\n\n`;
+    content += `Operations / Daily Account 48277 Deposits : KES ${totalFleetTill.toLocaleString()}.00\n`;
+    content += `Member Savings Account 871671 Deposits : KES ${totalUtilityTill.toLocaleString()}.00\n\n`;
 
     content += `DETAILED PERSONAL AUDIT TRAIL:\n`;
     content += `------------------------------------------------------\n`;
     content += `Date       Till Type       Ref Code      Type    Category             Amount\n`;
     txs.forEach(t => {
       const dateStr = t.timestamp.substring(0, 10);
-      const tillStr = (t.tillNumber === 'VehicleTill' ? 'Till 8249102' : t.tillNumber === 'UtilityTill' ? 'Till 4810294' : 'Cash Drawer').padEnd(15);
+      const tillStr = (t.tillNumber === 'VehicleTill' ? 'Acct 48277' : t.tillNumber === 'UtilityTill' ? 'Acct 871671' : 'Cash Drawer').padEnd(15);
       const refCode = t.refCode.padEnd(13);
       const typeStr = t.type.padEnd(7);
       const catStr = t.category.padEnd(20);
@@ -172,6 +205,24 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
 
     setDownloadSuccessMessage(`Success! Personal statement for ${member.name} exported.`);
     setTimeout(() => setDownloadSuccessMessage(''), 4000);
+  };
+
+  const handleDeleteMember = async (member: Member) => {
+    const confirmation = window.prompt(
+      `Delete ${member.name} and their login account? Their active profile will be removed, but financial history will remain for audit. Type DELETE to continue.`
+    );
+    if (confirmation !== 'DELETE') return;
+    setDeletingMemberId(member.id);
+    setMemberActionMessage(null);
+    try {
+      await onDeleteMember(member.id);
+      setSelectedMemberId(null);
+      setMemberActionMessage({ kind: 'success', text: `${member.name} and their login account were removed. Historical financial records were retained.` });
+    } catch (caught) {
+      setMemberActionMessage({ kind: 'error', text: caught instanceof Error ? caught.message : 'The member could not be deleted.' });
+    } finally {
+      setDeletingMemberId(null);
+    }
   };
 
   return (
@@ -213,6 +264,13 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
         <div className="bg-emerald-50 border-2 border-emerald-500 text-emerald-950 p-4 rounded flex items-center space-x-2.5 text-xs shadow-sm shrink-0">
           <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
           <span className="font-bold">{downloadSuccessMessage}</span>
+        </div>
+      )}
+
+      {memberActionMessage && (
+        <div className={`border-2 p-4 rounded flex items-center space-x-2.5 text-xs shadow-sm shrink-0 ${memberActionMessage.kind === 'success' ? 'bg-emerald-50 border-emerald-500 text-emerald-950' : 'bg-rose-50 border-rose-500 text-rose-950'}`}>
+          <CheckCircle2 className={`w-5 h-5 shrink-0 ${memberActionMessage.kind === 'success' ? 'text-emerald-600' : 'text-rose-600'}`} />
+          <span className="font-bold">{memberActionMessage.text}</span>
         </div>
       )}
 
@@ -373,6 +431,17 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
 
                   {/* Actions Deck */}
                   <div className="flex space-x-2 w-full md:w-auto self-stretch md:self-auto justify-end">
+                    {currentUserRole === 'Chairman' && (
+                      <button
+                        type="button"
+                        disabled={deletingMemberId === activeSelectedMember.id}
+                        onClick={() => void handleDeleteMember(activeSelectedMember)}
+                        className="px-3 py-1.5 bg-rose-700 hover:bg-rose-600 disabled:cursor-not-allowed disabled:opacity-60 text-white text-[10px] font-bold uppercase tracking-wider rounded border border-rose-800 flex items-center space-x-1 transition-colors"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>{deletingMemberId === activeSelectedMember.id ? 'Deleting...' : 'Delete member'}</span>
+                      </button>
+                    )}
                     <button
                       onClick={() => copyMemberDossierToClipboard(activeSelectedMember)}
                       className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-[10px] font-bold uppercase tracking-wider rounded border border-slate-700 flex items-center space-x-1 transition-colors"
@@ -417,7 +486,7 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                     <div className="w-full bg-slate-200 h-1 rounded-full mt-3 overflow-hidden">
                       <div className="bg-emerald-600 h-full rounded-full" style={{ width: '65%' }}></div>
                     </div>
-                    <p className="text-[9px] text-slate-400 mt-1.5 font-medium">Reconciled daily M-Pesa ledger</p>
+                    <p className="text-[9px] text-slate-400 mt-1.5 font-medium">Reconciled daily bank ledger</p>
                   </div>
 
                   {/* Card 2: Shares Capital */}
@@ -481,7 +550,7 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                     {/* Till 1 */}
                     <div className="bg-white border border-slate-200 p-3.5 rounded flex items-center justify-between">
                       <div>
-                        <span className="text-[9px] font-bold text-slate-400 block font-mono">VEHICLE FLEET TILL (824 9102)</span>
+                        <span className="text-[9px] font-bold text-slate-400 block font-mono">OPERATIONS / DAILY ACCOUNT (48277)</span>
                         <span className="text-xs text-slate-600 mt-1 block">Contributions &amp; fees</span>
                       </div>
                       <div className="text-right">
@@ -495,7 +564,7 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                     {/* Till 2 */}
                     <div className="bg-white border border-slate-200 p-3.5 rounded flex items-center justify-between">
                       <div>
-                        <span className="text-[9px] font-bold text-slate-400 block font-mono">UTILITY TILL (481 0294) / PETTY CASH</span>
+                        <span className="text-[9px] font-bold text-slate-400 block font-mono">MEMBER SAVINGS ACCOUNT (871671)</span>
                         <span className="text-xs text-slate-600 mt-1 block">Charges, offices &amp; debits</span>
                       </div>
                       <div className="text-right">
@@ -566,7 +635,7 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                                     ? 'bg-blue-50 text-blue-800 border-blue-200' 
                                     : 'bg-slate-100 text-slate-700 border-slate-200'
                                 }`}>
-                                  {t.tillNumber === 'VehicleTill' ? 'Till: 8249102' : t.tillNumber === 'UtilityTill' ? 'Till: 4810294' : 'Cash Drawer'}
+                                  {t.tillNumber === 'VehicleTill' ? 'Account: 48277' : t.tillNumber === 'UtilityTill' ? 'Account: 871671' : 'Cash Drawer'}
                                 </span>
                               </td>
                               <td className="px-4 py-3 text-slate-700 font-medium">
@@ -619,7 +688,10 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                   type="text"
                   required
                   value={name}
-                  onChange={(e) => setName(e.target.value)}
+                  onChange={(e) => setName(sanitizePersonName(e.target.value))}
+                  inputMode="text"
+                  pattern="[A-Za-z .'-]+"
+                  title="Letters only."
                   className="w-full p-2 border border-slate-200 rounded text-xs focus:outline-none focus:border-emerald-600"
                 />
               </div>
@@ -630,23 +702,44 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                     National ID Number *
                   </label>
                   <input
-                    type="text"
-                    required
-                    value={idNumber}
-                    onChange={(e) => setIdNumber(e.target.value)}
+                  type="text"
+                  required
+                  value={idNumber}
+                  onChange={(e) => setIdNumber(sanitizeIntegerInput(e.target.value, 12))}
+                  inputMode="numeric"
+                  pattern="[0-9]+"
+                  title="Numbers only."
                     className="w-full p-2 border border-slate-200 rounded text-xs font-mono focus:outline-none focus:border-emerald-600"
                   />
                 </div>
 
                 <div>
                   <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
-                    Phone Number (M-Pesa linked) *
+                    Email for account verification *
                   </label>
                   <input
-                    type="text"
+                    type="email"
                     required
-                    value={phoneNumber}
-                    onChange={(e) => setPhoneNumber(e.target.value)}
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value.trimStart())}
+                    autoComplete="email"
+                    className="w-full border border-slate-200 rounded-md px-3 py-2 text-xs outline-none focus:border-emerald-600"
+                    placeholder="member@example.com"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
+                    Phone Number *
+                  </label>
+                  <input
+                  type="tel"
+                  required
+                  value={phoneNumber}
+                  onChange={(e) => setPhoneNumber(sanitizePhoneNumber(e.target.value))}
+                  inputMode="tel"
+                  pattern="[+]?[0-9]{9,15}"
+                  title="Use a phone number only."
                     className="w-full p-2 border border-slate-200 rounded text-xs focus:outline-none focus:border-emerald-600"
                   />
                 </div>
@@ -659,7 +752,7 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                 <input
                   type="text"
                   value={assignedVehicle}
-                  onChange={(e) => setAssignedVehicle(e.target.value.toUpperCase())}
+                  onChange={(e) => setAssignedVehicle(sanitizeVehiclePlate(e.target.value))}
                   className="w-full p-2 border border-slate-200 rounded text-xs font-mono uppercase focus:outline-none focus:border-emerald-600"
                 />
               </div>
@@ -672,7 +765,8 @@ export default function MembersView({ members, onAddMember, currentUserRole, tra
                   type="number"
                   min="0"
                   value={openingLoanBalance}
-                  onChange={(e) => setOpeningLoanBalance(e.target.value)}
+                  onChange={(e) => setOpeningLoanBalance(sanitizeDecimalInput(e.target.value))}
+                  inputMode="decimal"
                   placeholder="0"
                   className="w-full p-2 border border-slate-200 rounded text-xs font-mono focus:outline-none focus:border-emerald-600"
                 />

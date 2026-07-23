@@ -1,291 +1,240 @@
-import React, { useState } from 'react';
-import { createUserWithEmailAndPassword, signInWithEmailAndPassword, updateProfile } from 'firebase/auth';
-import { User } from '../types';
-import { firebaseAuth } from '../lib/firebase';
-import { CheckCircle2, LogIn, ShieldCheck, UserPlus } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { ArrowLeft, CheckCircle2, HelpCircle, LogIn, ShieldCheck, UserPlus } from 'lucide-react';
+import type { User } from '../types';
+import { sanitizePersonName, sanitizePhoneNumber } from '../lib/inputValidation';
 
 interface LoginModalProps {
   onLoginSuccess: (user: User, token: string) => void;
 }
 
-type AuthMode = 'signin' | 'bootstrap';
+type AuthScreen = 'welcome' | 'help' | 'login' | 'register' | 'reset-request' | 'chairman-recovery' | 'force-change' | 'bootstrap' | 'totp';
+type TotpEnrollment = { manualKey: string; otpauthUri: string };
 
-function getAuthenticationErrorMessage(error: any): string {
-  if (error?.code === 'auth/operation-not-allowed') {
-    return 'Email/password authentication is disabled for this Firebase project. Enable the Email/Password provider in Firebase Authentication, then try again.';
+const inputClass = 'w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-600 focus:ring-4 focus:ring-emerald-100';
+const isStaticHostingPreview = import.meta.env.VITE_STATIC_HOSTING_PREVIEW === 'true';
+
+async function api(path: string, body: unknown) {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  const text = await response.text();
+  let data: any = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = {};
   }
-  if (error?.code === 'auth/weak-password') {
-    return 'Use a password with at least 6 characters.';
+  if (!response.ok) {
+    if (isStaticHostingPreview) {
+      throw new Error('This no-cost preview hosts the interface only. Sign-in and account actions need the secure backend deployment.');
+    }
+    throw new Error(data.error || 'The request could not be completed.');
   }
-  if (error?.code === 'auth/wrong-password' || error?.code === 'auth/invalid-credential') {
-    return 'The email or password is incorrect.';
-  }
-  return error?.message || 'Authentication failed.';
+  return data;
 }
 
 export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
-  const [mode, setMode] = useState<AuthMode>('signin');
+  const [screen, setScreen] = useState<AuthScreen>('welcome');
+  const [needsFirstAdmin, setNeedsFirstAdmin] = useState(false);
+  const [identifier, setIdentifier] = useState('');
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [challengeId, setChallengeId] = useState('');
+  const [code, setCode] = useState('');
+  const [totpEnrollment, setTotpEnrollment] = useState<TotpEnrollment | null>(null);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [temporaryToken, setTemporaryToken] = useState('');
 
-  const completeDevLogin = async () => {
-    const response = await fetch('/api/auth/login', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ email, password })
-    });
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/auth/onboarding-status')
+      .then(async response => response.ok ? response.json() : { needsFirstAdmin: false })
+      .then(data => { if (!cancelled) setNeedsFirstAdmin(data.needsFirstAdmin === true); })
+      .catch(() => { if (!cancelled) setNeedsFirstAdmin(false); });
+    return () => { cancelled = true; };
+  }, []);
 
-    const data = await response.json();
-    if (!response.ok) {
-      throw new Error(data.error || 'Development login failed.');
-    }
-
-    onLoginSuccess(data.user, data.token);
+  const chooseScreen = (next: AuthScreen) => {
+    setScreen(next);
+    setError('');
+    setNotice('');
+    setChallengeId('');
+    setCode('');
+    setTotpEnrollment(null);
+    setConfirmPassword('');
   };
 
-  const handleSignIn = async () => {
-    if (!email.trim() || !password) {
-      throw new Error('Email and password are required.');
-    }
-
-    if (!firebaseAuth) {
-      await completeDevLogin();
+  const completeAuthentication = (data: any) => {
+    if (data.requiresTotp) {
+      setChallengeId(data.challengeId);
+      setTotpEnrollment(data.enrollment || null);
+      setScreen('totp');
       return;
     }
-
-    const credential = await signInWithEmailAndPassword(firebaseAuth, email.trim(), password);
-    const idToken = await credential.user.getIdToken();
-    const response = await fetch('/api/auth/session', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${idToken}`
-      }
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-      throw new Error(data.error || 'Could not open SACCO session.');
+    if (data.passwordChangeRequired) {
+      setTemporaryToken(data.token || '');
+      setPassword('');
+      setConfirmPassword('');
+      setScreen('force-change');
+      return;
     }
-
-    onLoginSuccess(data.user, idToken);
+    if (!data.token || !data.user) throw new Error('The server did not create a SACCO session.');
+    onLoginSuccess(data.user as User, data.token);
   };
 
-  const handleBootstrap = async () => {
-    if (!fullName.trim() || !email.trim() || !password) {
-      throw new Error('Full name, email, and password are required for first-admin setup.');
-    }
-
-    let idToken = '';
-    if (firebaseAuth) {
-      let credential;
-      try {
-        credential = await createUserWithEmailAndPassword(firebaseAuth, email.trim(), password);
-      } catch (error: any) {
-        // The Firebase identity may have been created by an earlier bootstrap
-        // attempt before the SACCO profile request failed. Resume that attempt
-        // by proving ownership with the same email and password.
-        if (error?.code !== 'auth/email-already-in-use') {
-          throw error;
-        }
-        credential = await signInWithEmailAndPassword(firebaseAuth, email.trim(), password);
-      }
-
-      if (credential.user.displayName !== fullName.trim()) {
-        await updateProfile(credential.user, { displayName: fullName.trim() });
-      }
-      idToken = await credential.user.getIdToken();
-    }
-
-    const response = await fetch('/api/auth/bootstrap', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(idToken ? { Authorization: `Bearer ${idToken}` } : {})
-      },
-      body: JSON.stringify({
-        fullName: fullName.trim(),
-        email: email.trim(),
-        phone: phone.trim(),
-        password
-      })
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-      throw new Error(data.error || 'First-admin setup failed.');
-    }
-
-    onLoginSuccess(data.user, idToken || data.token);
-  };
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
     setError('');
+    setNotice('');
     setIsSubmitting(true);
-
     try {
-      if (mode === 'bootstrap') {
-        await handleBootstrap();
-      } else {
-        await handleSignIn();
+      if (screen === 'login') {
+        if (!identifier || !password) throw new Error('Enter your phone or email and password.');
+        completeAuthentication(await api('/api/auth/login', { identifier, password }));
+      } else if (screen === 'register') {
+        if (!fullName || !phone || !email || password.length < 8) {
+          throw new Error('Enter your registered name, phone, email, and a password of at least 8 characters.');
+        }
+        await api('/api/auth/member-registration', { fullName, phone, email, password });
+        setIdentifier(email);
+        setPassword('');
+        setScreen('login');
+        setNotice('Account created. You can now sign in with your email or phone number.');
+      } else if (screen === 'bootstrap') {
+        if (!fullName || !email || password.length < 8) throw new Error('Enter a name, email, and password of at least 8 characters.');
+        completeAuthentication(await api('/api/auth/bootstrap', { fullName, email, phone, password }));
+      } else if (screen === 'totp') {
+        if (!/^\d{6}$/.test(code)) throw new Error('Enter the six-digit code from your authenticator app.');
+        completeAuthentication(await api('/api/auth/totp/verify', { challengeId, code }));
+      } else if (screen === 'reset-request') {
+        if (!identifier) throw new Error('Enter the phone number or email on your SACCO account.');
+        const result = await api('/api/auth/password-reset-request', { identifier });
+        setNotice(result.message);
+      } else if (screen === 'chairman-recovery') {
+        if (!identifier) throw new Error('Enter the Chairman account phone number or email.');
+        const result = await api('/api/auth/chairman-recovery-request', { identifier });
+        setNotice(result.message);
+      } else if (screen === 'force-change') {
+        if (password.length < 8) throw new Error('Choose a private password of at least 8 characters.');
+        if (password !== confirmPassword) throw new Error('The new password and confirmation do not match.');
+        const response = await fetch('/api/auth/change-temporary-password', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${temporaryToken}` }, body: JSON.stringify({ password }) });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'The password could not be changed.');
+        completeAuthentication({ ...data, token: data.token, user: data.user });
       }
-    } catch (err: any) {
-      setError(getAuthenticationErrorMessage(err));
+    } catch (caught: any) {
+      setError(caught?.message || 'Authentication failed.');
     } finally {
       setIsSubmitting(false);
     }
   };
 
+  const title = screen === 'login' ? 'Welcome back'
+    : screen === 'register' ? 'Create your account'
+      : screen === 'bootstrap' ? 'Set up your SACCO'
+        : screen === 'totp' ? 'Confirm your secure code'
+          : screen === 'reset-request' ? 'Request a password reset'
+            : screen === 'chairman-recovery' ? 'Request Chairman recovery'
+              : screen === 'force-change' ? 'Create a private password'
+            : 'Getting started';
+  const subtitle = screen === 'login' ? 'Sign in to access your SACCO account.'
+    : screen === 'register' ? 'Use the same details already saved on your active member record.'
+      : screen === 'bootstrap' ? 'This private setup is available only while no Chairman exists.'
+        : screen === 'totp' ? 'This extra step is enabled by your SACCO administrator.'
+          : screen === 'reset-request' ? 'Contact the Chairman or SACCO Administrator directly; the system also sends them a reset notification.'
+            : screen === 'chairman-recovery' ? 'This exceptional request is sent only to the Secretary for identity verification.'
+              : screen === 'force-change' ? 'Replace the temporary password before continuing.'
+            : 'Choose the option that matches your account.';
+
   return (
-    <div className="auth-shell min-h-screen flex flex-col justify-center py-12 px-4 sm:px-6 lg:px-8 font-sans">
-      <div className="sm:mx-auto sm:w-full sm:max-w-md">
-        <div className="flex justify-center">
-          <div className="w-14 h-14 bg-emerald-950 flex items-center justify-center rounded-2xl shadow-md border border-emerald-800">
-            <span className="text-xl font-bold font-display text-emerald-400 tracking-wider">M</span>
-          </div>
+    <div className="auth-shell min-h-screen px-4 py-10 font-sans sm:px-6">
+      <div className="mx-auto flex min-h-[calc(100vh-5rem)] w-full max-w-md flex-col justify-center">
+        <div className="mb-7 flex items-center justify-center gap-3 text-white">
+          <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-emerald-300/30 bg-emerald-400/15 shadow-lg"><span className="font-display text-lg font-bold text-emerald-300">M</span></div>
+          <div><p className="font-display text-xl font-bold tracking-tight">Sowetamu Sacco</p><p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-emerald-200/80">Member access</p></div>
         </div>
-        <h2 className="mt-6 text-center text-3xl font-black text-slate-800 font-display tracking-tight">
-          MatatuSacco <span className="text-emerald-600">Pro</span>
-        </h2>
-        <p className="mt-2 text-center text-xs text-slate-400 uppercase tracking-[2px] font-mono">
-          Clean SACCO setup
-        </p>
-      </div>
 
-      <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
-        <div className="auth-card bg-white py-8 px-6 border border-white/70 rounded-3xl shadow-2xl sm:px-10">
-          <div className="mb-5 grid grid-cols-2 gap-2 bg-slate-100 border border-slate-200 rounded-2xl p-1">
-            <button
-              type="button"
-              onClick={() => setMode('signin')}
-              className={`py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all ${
-                mode === 'signin' ? 'bg-slate-900 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'
-              }`}
-            >
-              Sign In
-            </button>
-            <button
-              type="button"
-              onClick={() => setMode('bootstrap')}
-              className={`py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all ${
-                mode === 'bootstrap' ? 'bg-emerald-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'
-              }`}
-            >
-              First Admin
-            </button>
-          </div>
-
-          <div className="mb-6 p-4 bg-emerald-50/50 border border-emerald-100 rounded-2xl">
-            <div className="flex space-x-2.5 items-start text-xs text-slate-600">
-              <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-              <div>
-                <p className="font-bold text-slate-800">
-                  {mode === 'bootstrap' ? 'Create your first SACCO admin' : 'Secure SACCO sign in'}
-                </p>
-                <p className="mt-1 text-[11px] leading-relaxed">
-                  {mode === 'bootstrap'
-                    ? 'Use this once on a fresh install. The account becomes Chairman and can add members, vehicles, and other officials.'
-                    : 'Firebase verifies identity. The SACCO users table controls role, status, and audit traceability.'}
-                </p>
-                <div className="mt-2 text-[10px] font-mono bg-white/60 p-2 rounded-lg space-y-1 border border-emerald-100">
-                  <p className="flex items-center gap-1.5"><CheckCircle2 className="w-3 h-3 text-emerald-600" /> Identity: Firebase Auth</p>
-                  <p className="flex items-center gap-1.5"><CheckCircle2 className="w-3 h-3 text-emerald-600" /> Role: PostgreSQL users table</p>
-                  <p className="flex items-center gap-1.5"><CheckCircle2 className="w-3 h-3 text-emerald-600" /> Audit: API authorization logs</p>
-                </div>
+        <main className="auth-card rounded-[2rem] px-6 py-7 sm:px-9 sm:py-9">
+          {screen === 'welcome' ? (
+            <section className="text-center">
+              <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-100 text-emerald-700"><ShieldCheck className="h-7 w-7" /></div>
+              <h1 className="mt-6 font-display text-3xl font-bold tracking-tight text-slate-900">Welcome to your SACCO</h1>
+              <p className="mx-auto mt-3 max-w-sm text-sm leading-6 text-slate-500">One account for members and officers, protected by your password and server-side access rules.</p>
+              {isStaticHostingPreview && <p className="mx-auto mt-4 max-w-sm rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">Static Hosting preview: you can review the interface and navigation, but secure sign-in, data, and payments are unavailable until the backend is deployed.</p>}
+              <div className="mt-8 space-y-3">
+                <button type="button" onClick={() => chooseScreen('login')} className="flex w-full items-center justify-center gap-2 rounded-2xl bg-emerald-600 px-4 py-3.5 text-sm font-bold text-white shadow-lg shadow-emerald-900/15"><LogIn className="h-4 w-4" />Log in</button>
+                <button type="button" onClick={() => chooseScreen('register')} className="w-full rounded-2xl border border-emerald-200 bg-white px-4 py-3.5 text-sm font-bold text-emerald-700">Create member account</button>
               </div>
-            </div>
-          </div>
+              <button type="button" onClick={() => chooseScreen('help')} className="mt-5 inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500"><HelpCircle className="h-3.5 w-3.5" />First-time help</button>
+              {needsFirstAdmin && <button type="button" onClick={() => chooseScreen('bootstrap')} className="mt-6 block w-full text-xs font-semibold text-slate-500 underline decoration-slate-300 underline-offset-4">Set up the first Chairman</button>}
+            </section>
+          ) : (
+            <section>
+              <button type="button" onClick={() => chooseScreen(screen === 'totp' ? 'login' : 'welcome')} className="mb-6 inline-flex items-center gap-1.5 text-xs font-bold text-slate-500"><ArrowLeft className="h-3.5 w-3.5" />Back</button>
+              <h1 className="font-display text-3xl font-bold tracking-tight text-slate-900">{title}</h1>
+              <p className="mt-2 text-sm leading-6 text-slate-500">{subtitle}</p>
 
-          <form className="space-y-5" onSubmit={handleSubmit}>
-            {mode === 'bootstrap' && (
-              <>
-                <div>
-                  <label htmlFor="full-name" className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
-                    Full Name
-                  </label>
-                  <input
-                    id="full-name"
-                    type="text"
-                    value={fullName}
-                    onChange={(e) => setFullName(e.target.value)}
-                    className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-emerald-600 shadow-xs"
-                    required
-                  />
+              {screen === 'help' && (
+                <div className="mt-7 space-y-4 text-sm leading-6 text-slate-600">
+                  <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-4"><p className="font-bold text-slate-800">New member</p><p>Your name, phone, and email must match one active member record. Then choose your password and sign in.</p></div>
+                  <div className="rounded-2xl border border-slate-200 p-4"><p className="font-bold text-slate-800">Officer</p><p>The Chairman creates your account. Use the work email or phone and password they give you on the same login screen.</p></div>
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4"><p className="font-bold text-slate-800">Chairman account recovery</p><p>If the Chairman cannot sign in, submit a Chairman recovery request. It is sent only to the Secretary, who must verify the Chairman’s identity before issuing a temporary recovery password.</p><button type="button" onClick={() => chooseScreen('chairman-recovery')} className="mt-2 font-bold text-amber-800 underline underline-offset-2">Request Chairman recovery</button></div>
+                  <div className="rounded-2xl border border-slate-200 p-4"><p className="font-bold text-slate-800">Documentation and technical help</p><p className="mt-1">Read the <a href="/documentation" className="font-bold text-emerald-700 underline underline-offset-2">SACCO user guide</a> or contact the Technical Department at <a href="mailto:emryspaul7@gmail.com" className="font-bold text-emerald-700 underline underline-offset-2">emryspaul7@gmail.com</a> / <a href="tel:+254759670456" className="font-bold text-emerald-700 underline underline-offset-2">0759670456</a>.</p></div>
                 </div>
-                <div>
-                  <label htmlFor="phone" className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
-                    Phone
-                  </label>
-                  <input
-                    id="phone"
-                    type="tel"
-                    value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
-                    className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-emerald-600 shadow-xs"
-                  />
-                </div>
-              </>
-            )}
+              )}
 
-            <div>
-              <label htmlFor="email" className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
-                Email
-              </label>
-              <input
-                id="email"
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-emerald-600 shadow-xs"
-                required
-              />
-            </div>
+              {screen === 'reset-request' && (
+                <form className="mt-7 space-y-4" onSubmit={handleSubmit}>
+                  <div><label className="mb-2 block text-xs font-bold text-slate-600">Registered phone or email</label><input value={identifier} onChange={event => setIdentifier(event.target.value)} autoComplete="username" className={inputClass} required /></div>
+                  <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-900">For your protection, contact the Chairman or SACCO Administrator directly after submitting this request. The system sends them an in-app notification. They will give you a temporary password, which you must replace immediately after signing in.</p>
+                  {error && <p className="rounded-xl bg-rose-50 px-3 py-2.5 text-xs text-rose-700">{error}</p>}{notice && <p className="rounded-xl bg-emerald-50 px-3 py-2.5 text-xs text-emerald-700">{notice}</p>}
+                  <button type="submit" disabled={isSubmitting} className="w-full rounded-2xl bg-emerald-600 px-4 py-3.5 text-sm font-bold text-white">Notify Chairman / Administrator</button>
+                </form>
+              )}
 
-            <div>
-              <label htmlFor="password" className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
-                Password
-              </label>
-              <input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-emerald-600 shadow-xs"
-                required
-              />
-            </div>
+              {screen === 'chairman-recovery' && (
+                <form className="mt-7 space-y-4" onSubmit={handleSubmit}>
+                  <div><label className="mb-2 block text-xs font-bold text-slate-600">Chairman’s registered phone or email</label><input value={identifier} onChange={event => setIdentifier(event.target.value)} autoComplete="username" className={inputClass} required /></div>
+                  <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-900">For security, the result is the same whether or not an account is found. Contact the Secretary directly and complete the SACCO’s identity-verification process. The Secretary can reset only a pending Chairman recovery request.</p>
+                  {error && <p className="rounded-xl bg-rose-50 px-3 py-2.5 text-xs text-rose-700">{error}</p>}{notice && <p className="rounded-xl bg-emerald-50 px-3 py-2.5 text-xs text-emerald-700">{notice}</p>}
+                  <button type="submit" disabled={isSubmitting} className="w-full rounded-2xl bg-amber-700 px-4 py-3.5 text-sm font-bold text-white disabled:opacity-60">Notify Secretary</button>
+                </form>
+              )}
 
-            {error && (
-              <p className="text-xs text-rose-600 font-medium" id="login-error-message">
-                {error}
-              </p>
-            )}
+              {screen === 'force-change' && <form className="mt-7 space-y-4" onSubmit={handleSubmit}><div><label className="mb-2 block text-xs font-bold text-slate-600">New private password</label><input type="password" value={password} onChange={event => setPassword(event.target.value)} autoComplete="new-password" minLength={8} className={inputClass} required /></div><div><label className="mb-2 block text-xs font-bold text-slate-600">Confirm new password</label><input type="password" value={confirmPassword} onChange={event => setConfirmPassword(event.target.value)} autoComplete="new-password" minLength={8} className={inputClass} required /></div><p className="text-xs leading-5 text-slate-500">Your temporary password is only for first access. Choose a private password before the application opens.</p>{error && <p className="rounded-xl bg-rose-50 px-3 py-2.5 text-xs text-rose-700">{error}</p>}<button type="submit" disabled={isSubmitting} className="w-full rounded-2xl bg-emerald-600 px-4 py-3.5 text-sm font-bold text-white">Change password and continue</button></form>}
 
-            <button
-              type="submit"
-              disabled={isSubmitting}
-              id="login-submit-button"
-              className="w-full py-3 px-4 bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white font-bold text-xs uppercase tracking-wider rounded-xl shadow-xs transition-all flex items-center justify-center space-x-2 cursor-pointer"
-            >
-              {mode === 'bootstrap' ? <UserPlus className="w-4 h-4" /> : <LogIn className="w-4 h-4" />}
-              <span>{isSubmitting ? 'Working...' : mode === 'bootstrap' ? 'Create First Admin' : 'Sign In'}</span>
-            </button>
-          </form>
+              {!['help', 'reset-request', 'chairman-recovery', 'force-change'].includes(screen) && (
+                <form className="mt-7 space-y-4" onSubmit={handleSubmit}>
+                  {(screen === 'register' || screen === 'bootstrap') && <div><label className="mb-2 block text-xs font-bold text-slate-600">Full name</label><input value={fullName} onChange={event => setFullName(sanitizePersonName(event.target.value))} autoComplete="name" className={inputClass} required /></div>}
+                  {screen === 'login' && <div><label className="mb-2 block text-xs font-bold text-slate-600">Phone or email</label><input value={identifier} onChange={event => setIdentifier(event.target.value)} autoComplete="username" className={inputClass} required /></div>}
+                  {screen === 'register' && <div><label className="mb-2 block text-xs font-bold text-slate-600">Registered phone</label><input type="tel" value={phone} onChange={event => setPhone(sanitizePhoneNumber(event.target.value))} autoComplete="tel" inputMode="tel" pattern="[+]?[0-9]{9,15}" className={inputClass} required /></div>}
+                  {(screen === 'register' || screen === 'bootstrap') && <div><label className="mb-2 block text-xs font-bold text-slate-600">Email address</label><input type="email" value={email} onChange={event => setEmail(event.target.value)} autoComplete="email" className={inputClass} required /></div>}
+                  {screen === 'bootstrap' && <div><label className="mb-2 block text-xs font-bold text-slate-600">Phone <span className="font-medium text-slate-400">(optional)</span></label><input type="tel" value={phone} onChange={event => setPhone(sanitizePhoneNumber(event.target.value))} pattern="[+]?[0-9]{9,15}" className={inputClass} /></div>}
+                  {(screen === 'login' || screen === 'register' || screen === 'bootstrap') && <div><label className="mb-2 block text-xs font-bold text-slate-600">Password</label><input type="password" value={password} onChange={event => setPassword(event.target.value)} autoComplete={screen === 'login' ? 'current-password' : 'new-password'} className={inputClass} required /></div>}
+                  {screen === 'totp' && <div>{totpEnrollment && <div className="mb-4 rounded-2xl border border-emerald-100 bg-emerald-50 p-4 text-xs text-slate-600"><p className="font-bold text-slate-800">Optional authenticator setup</p><code className="mt-3 block break-all rounded-xl bg-white px-3 py-2 text-[11px]">{totpEnrollment.manualKey}</code></div>}<label className="mb-2 block text-xs font-bold text-slate-600">Six-digit code</label><input value={code} onChange={event => setCode(event.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric" pattern="[0-9]{6}" className={inputClass} required /></div>}
+                  {error && <p className="rounded-xl bg-rose-50 px-3 py-2.5 text-xs font-medium leading-5 text-rose-700">{error}</p>}
+                  {notice && <p className="rounded-xl bg-emerald-50 px-3 py-2.5 text-xs font-medium leading-5 text-emerald-700">{notice}</p>}
+                  <button type="submit" disabled={isSubmitting} className="flex w-full items-center justify-center gap-2 rounded-2xl bg-emerald-600 px-4 py-3.5 text-sm font-bold text-white shadow-lg shadow-emerald-900/15 disabled:opacity-60">{screen === 'register' || screen === 'bootstrap' ? <UserPlus className="h-4 w-4" /> : <LogIn className="h-4 w-4" />}{isSubmitting ? 'Please wait...' : screen === 'register' ? 'Create account' : screen === 'bootstrap' ? 'Create Chairman account' : screen === 'totp' ? 'Confirm code' : 'Sign in'}</button>
+                </form>
+              )}
 
-          <div className="mt-6 border-t border-slate-100 pt-6">
-            <div className="text-center">
-              <span className="text-[9px] text-slate-400 uppercase tracking-widest font-mono">
-                New installs start empty
-              </span>
-            </div>
+              {screen === 'login' && <div className="mt-5 flex flex-wrap items-center justify-between gap-3 text-xs"><button type="button" onClick={() => chooseScreen('reset-request')} className="font-semibold text-slate-500">Request password reset</button><button type="button" onClick={() => chooseScreen('chairman-recovery')} className="font-semibold text-amber-700">Chairman recovery</button><button type="button" onClick={() => chooseScreen('register')} className="font-semibold text-emerald-700">Create account</button></div>}
+              {screen === 'register' && <p className="mt-5 text-center text-xs text-slate-500">Already have an account? <button type="button" onClick={() => chooseScreen('login')} className="font-bold text-emerald-700">Log in</button></p>}
+            </section>
+          )}
+
+          <div className="mt-7 border-t border-slate-100 pt-5 text-center">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400"><CheckCircle2 className="mr-1 inline h-3.5 w-3.5 text-emerald-600" />Protected with secure account verification</p>
+            <div className="mt-2 flex items-center justify-center gap-3 text-xs font-semibold text-emerald-700"><a href="/about" className="underline decoration-emerald-200 underline-offset-4">About Sowetamu Sacco</a><a href="/documentation" className="underline decoration-emerald-200 underline-offset-4">Documentation &amp; Help</a></div>
           </div>
-        </div>
+        </main>
       </div>
     </div>
   );

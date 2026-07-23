@@ -1,6 +1,9 @@
 import React, { useState } from 'react';
 import type { Transaction, Vehicle, Member, User, UserRole } from '../types';
 import { canRole } from '../lib/auth';
+import { sanitizeDecimalInput, sanitizeReferenceCode } from '../lib/inputValidation';
+import { isExpenseTransactionCategory, requiresRegisteredMember } from '../lib/transactionPolicy';
+import { calculateReportFinancials, SOWETAMU_AUDIT_REFERENCE } from '../lib/reportFinancials';
 import { 
   FileText, 
   Download, 
@@ -19,7 +22,6 @@ import {
   Sparkles,
   BookOpen,
   Printer,
-  Shield,
   FileCheck,
   Award,
   Users,
@@ -35,7 +37,7 @@ import {
   Pencil
 } from 'lucide-react';
 
-const JOURNAL_WRITE_ROLES: readonly UserRole[] = ['Treasurer', 'Chairman', 'Accountant'];
+const JOURNAL_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary', 'Treasurer', 'Accountant'];
 
 interface ReportsViewProps {
   transactions: Transaction[];
@@ -56,20 +58,32 @@ export default function ReportsView({
   onUpdateTransaction,
   currentUser 
 }: ReportsViewProps) {
+  // Regulatory/audited reports require a closed period and external approval.
+  // This legacy presentation remains in source only while it is rebuilt; it is
+  // intentionally not reachable in the live interface.
+  const showUnverifiedComplianceWorkspace = false;
   // Navigation
   const [activeSection, setActiveSection] = useState<'cashless' | 'compliance' | 'accountant'>('cashless');
 
   // Accountant Workspace States
   const [journalType, setJournalType] = useState<'Credit' | 'Debit'>('Credit');
-  const [journalCategory, setJournalCategory] = useState<'Daily Contribution' | 'Registration Fee' | 'Management Fee' | 'Office Expenses' | 'Petty Cash' | 'Penalty' | 'Utilities' | 'Equipment'>('Daily Contribution');
+  const [journalCategory, setJournalCategory] = useState<'Daily Contribution' | 'Savings Contribution' | 'Registration Fee' | 'Management Fee' | 'Office Expenses' | 'Petty Cash' | 'Penalty' | 'Utilities' | 'Equipment'>('Daily Contribution');
   const [journalAmount, setJournalAmount] = useState<string>('');
   const [journalDescription, setJournalDescription] = useState<string>('');
   const [journalRefCode, setJournalRefCode] = useState<string>('');
   const [journalMemberId, setJournalMemberId] = useState<string>('');
   const [journalVehiclePlate, setJournalVehiclePlate] = useState<string>('');
-  const [journalTill, setJournalTill] = useState<'VehicleTill' | 'UtilityTill' | 'None'>('UtilityTill');
+  const [journalTill, setJournalTill] = useState<'VehicleTill' | 'UtilityTill' | 'None'>('VehicleTill');
   const [journalSuccess, setJournalSuccess] = useState<string>('');
   const [journalError, setJournalError] = useState<string>('');
+  const journalRequiresRegistration = requiresRegisteredMember(journalCategory);
+  const activeJournalVehicles = vehicles.filter(vehicle => vehicle.status === 'Active');
+  const eligibleJournalMembers = members.filter(member =>
+    member.status === 'Active' && activeJournalVehicles.some(vehicle => vehicle.ownerId === member.id)
+  );
+  const eligibleJournalVehicles = journalMemberId
+    ? activeJournalVehicles.filter(vehicle => vehicle.ownerId === journalMemberId)
+    : activeJournalVehicles;
 
   const [ledgerSearch, setLedgerSearch] = useState<string>('');
   const [ledgerCategoryFilter, setLedgerCategoryFilter] = useState<string>('All');
@@ -102,84 +116,14 @@ export default function ReportsView({
   const [treasurerName, setTreasurerName] = useState('Tobias Taabu Obiero');
   const [bankName, setBankName] = useState('Co-operative Bank of Kenya Ltd, Kayole Branch');
   const [saccoRegNo, setSaccoRegNo] = useState('CS/NO. 22239');
-  const [saccoCustomName, setSaccoCustomName] = useState('SOWETAMU SAVINGS & CREDIT');
+  const [saccoCustomName, setSaccoCustomName] = useState('SOWETAMU SACCO');
 
-  // Math aggregates (Live Data)
-  const totalCredits = transactions.filter(t => t.type === 'Credit').reduce((acc, t) => acc + t.amount, 0);
-  const totalDebits = transactions.filter(t => t.type === 'Debit').reduce((acc, t) => acc + t.amount, 0);
-  const netBalance = totalCredits - totalDebits;
-
-  // Till 1: Vehicle Fleet Till (Till: 824 9102)
-  const vehicleTx = transactions.filter(t => t.tillNumber === 'VehicleTill');
-  const vehicleCredits = vehicleTx.filter(t => t.type === 'Credit').reduce((acc, t) => acc + t.amount, 0);
-  const vehicleDebits = vehicleTx.filter(t => t.type === 'Debit').reduce((acc, t) => acc + t.amount, 0);
-  const vehicleNet = vehicleCredits - vehicleDebits;
-
-  // Till 2: Sacco Operating Utility Till (Till: 481 0294)
-  const utilityTx = transactions.filter(t => t.tillNumber === 'UtilityTill');
-  const utilityCredits = utilityTx.filter(t => t.type === 'Credit').reduce((acc, t) => acc + t.amount, 0);
-  const utilityDebits = utilityTx.filter(t => t.type === 'Debit').reduce((acc, t) => acc + t.amount, 0);
-  const utilityNet = utilityCredits - utilityDebits;
-
-  // Petty cash / Unassigned drawer
-  const cashTx = transactions.filter(t => t.tillNumber === 'None');
-  const cashCredits = cashTx.filter(t => t.type === 'Credit').reduce((acc, t) => acc + t.amount, 0);
-  const cashDebits = cashTx.filter(t => t.type === 'Debit').reduce((acc, t) => acc + t.amount, 0);
-  const cashNet = cashCredits - cashDebits;
-
-  // Category summary
-  const categorySummary: { [key: string]: number } = {};
-  transactions.forEach(t => {
-    categorySummary[t.category] = (categorySummary[t.category] || 0) + t.amount;
-  });
-
-  // Calculate live members count
-  const liveActiveCount = members.filter(m => m.status === 'Active').length;
-  const liveDormantCount = members.filter(m => m.status !== 'Active').length;
-  const liveTotalMembers = members.length;
-
-  // Live Sacco Financial Sheet Data Mapping
-  const liveShareCapital = members.reduce((acc, m) => acc + Number(m.sharesAmount || 0), 0);
-  const liveMembersDeposits = members.reduce((acc, m) => acc + Number(m.savingsAmount || 0), 0);
-  const liveCashEquiv = netBalance;
-  const liveLoansToMembers = 0; // No loan-advance register exists yet.
-  const livePPECarrying = transactions
-    .filter(t => t.category === 'Equipment')
-    .reduce((sum, t) => sum + (t.type === 'Debit' ? t.amount : -t.amount), 0);
-  const liveReceivables = 0; // No receivables register exists yet.
-
-  // Live total Assets formula to balance
-  const liveTotalAssets = liveCashEquiv + liveReceivables + liveLoansToMembers + livePPECarrying;
-  const liveTradePayables = 0; // No payables register exists yet.
-  const liveTotalLiabilities = liveMembersDeposits + liveTradePayables;
-  
-  // Balanced Reserve deficit/surplus
-  const liveReserves = 0;
-
-  // Sowetamu Audit Reference Data (Static Copy for perfect match of provided PDF)
-  const sowetamuData = {
-    saccoName: 'SOWETAMU SAVINGS & CREDIT',
-    regNo: 'CS/NO. 22239',
-    year: '2024',
-    auditFee: 25500,
-    members: { active: 17, dormant: 11, total: 28 },
-    financials: {
-      shareCapital: 435000,
-      membersDeposits: 194250,
-      statutoryReserve: -10483.85,
-      retainedEarnings: -41935.40, // Sums to -52,419.25 reserves
-      totalAssets: 621830.75,
-      loansToMembers: 171740, // Page 9 Balance Sheet
-      cashAndEquiv: 138990.75, // Page 9 Note 6
-      otherReceivables: 138850, // Page 9
-      ppeCarrying: 172250, // Page 9 carrying value
-      tradePayables: 45000, // Page 9
-      totalLiabilities: 239250, // Page 9
-      shareholdersFunds: 382580.75, // Page 9
-      netSurplus: -52419.25, // Page 5 deficit
-      revenue: 6977416.00 // Page 6 revenue
-    }
-  };
+  const reportMetrics = calculateReportFinancials(transactions, members);
+  const { totalCredits, totalDebits, netBalance, categorySummary } = reportMetrics;
+  const { entries: vehicleTx, credits: vehicleCredits, debits: vehicleDebits, net: vehicleNet } = reportMetrics.vehicle;
+  const { entries: utilityTx, credits: utilityCredits, debits: utilityDebits, net: utilityNet } = reportMetrics.utility;
+  const { entries: cashTx, credits: cashCredits, debits: cashDebits, net: cashNet } = reportMetrics.cash;
+  const sowetamuData = SOWETAMU_AUDIT_REFERENCE;
 
   // Select dataset depending on switcher state
   const reportSaccoName = reportDataSource === 'sowetamu' ? sowetamuData.saccoName : saccoCustomName;
@@ -189,26 +133,11 @@ export default function ReportsView({
   
   const reportMembers = reportDataSource === 'sowetamu' 
     ? sowetamuData.members 
-    : { active: liveActiveCount, dormant: liveDormantCount, total: liveTotalMembers };
+    : reportMetrics.liveMembers;
 
   const reportFinancials = reportDataSource === 'sowetamu' 
     ? sowetamuData.financials 
-    : {
-        shareCapital: liveShareCapital,
-        membersDeposits: liveMembersDeposits,
-        statutoryReserve: liveReserves * 0.2 > 0 ? liveReserves * 0.2 : 0,
-        retainedEarnings: 0,
-        totalAssets: liveTotalAssets,
-        loansToMembers: liveLoansToMembers,
-        cashAndEquiv: liveCashEquiv,
-        otherReceivables: liveReceivables,
-        ppeCarrying: livePPECarrying,
-        tradePayables: liveTradePayables,
-        totalLiabilities: liveTotalLiabilities,
-        shareholdersFunds: liveShareCapital + liveReserves,
-        netSurplus: totalCredits - totalDebits,
-        revenue: totalCredits
-      };
+    : reportMetrics.liveFinancials;
 
   const filteredLedgerTransactions = transactions.filter(t => {
     const normalizedSearch = ledgerSearch.toLowerCase();
@@ -239,7 +168,7 @@ export default function ReportsView({
   // Cashless till download
   const triggerDownload = (format: 'TXT' | 'CSV') => {
     let content = `======================================================\n`;
-    content += `         SOWETAMU TRAVELLERS SACCO FINANCIAL BLUEPRINT REPORT\n`;
+    content += `         SOWETAMU SACCO FINANCIAL BLUEPRINT REPORT\n`;
     content += `         Scope: ${reportType} Combined & Segregated Tills Statement\n`;
     content += `              Generated on: ${new Date().toLocaleString()}\n`;
     content += `======================================================\n\n`;
@@ -252,12 +181,12 @@ export default function ReportsView({
 
     content += `INDIVIDUAL TILL LEDGER SUMMARIES:\n`;
     content += `------------------------------------------------------\n`;
-    content += `1. VEHICLE TILL NO. 824 9102 (FLEET COLLECTIONS)\n`;
+    content += `1. CO-OP ACCOUNT 48277 (OPERATIONS / DAILY COLLECTIONS)\n`;
     content += `   - Total Deposits     : KES ${vehicleCredits.toLocaleString()}.00\n`;
     content += `   - Total Payouts/Fees : KES ${vehicleDebits.toLocaleString()}.00\n`;
     content += `   - Net Till Balance   : KES ${vehicleNet.toLocaleString()}.00\n\n`;
 
-    content += `2. OPERATING UTILITY TILL NO. 481 0294 (ADMIN & UTILITIES)\n`;
+    content += `2. CO-OP ACCOUNT 871671 (MEMBER SAVINGS)\n`;
     content += `   - Total Deposits     : KES ${utilityCredits.toLocaleString()}.00\n`;
     content += `   - Total Office Exp   : KES ${utilityDebits.toLocaleString()}.00\n`;
     content += `   - Net Till Balance   : KES ${utilityNet.toLocaleString()}.00\n\n`;
@@ -287,7 +216,7 @@ export default function ReportsView({
     content += `Date       Till Type       Ref Code      Type    Category             Amount\n`;
     transactions.forEach(t => {
       const dateStr = t.timestamp.substring(0, 10);
-      const tillStr = (t.tillNumber === 'VehicleTill' ? 'Till 8249102' : t.tillNumber === 'UtilityTill' ? 'Till 4810294' : 'Cash Drawer').padEnd(15);
+      const tillStr = (t.tillNumber === 'VehicleTill' ? 'Acct 48277' : t.tillNumber === 'UtilityTill' ? 'Acct 871671' : 'Cash Drawer').padEnd(15);
       const refCode = t.refCode.padEnd(13);
       const typeStr = t.type.padEnd(7);
       const catStr = t.category.padEnd(20);
@@ -306,7 +235,7 @@ export default function ReportsView({
     link.click();
     document.body.removeChild(link);
 
-    setDownloadSuccessMessage(`Success! Sowetamu Dual-Till Financial Statement exported in ${format} format.`);
+    setDownloadSuccessMessage(`Success! Sowetamu Sacco dual-till financial statement exported in ${format} format.`);
     setTimeout(() => setDownloadSuccessMessage(''), 5000);
   };
 
@@ -348,12 +277,6 @@ export default function ReportsView({
     report += `  - Trade Payables & Accruals   : KSH ${reportFinancials.tradePayables.toLocaleString()}\n`;
     report += `  TOTAL AUDITED LIABILITIES     : KSH ${reportFinancials.totalLiabilities.toLocaleString()}\n\n`;
 
-    report += `EQUITY & SHAREHOLDERS' FUNDS:\n`;
-    report += `  - Sacco Share Capital         : KSH ${reportFinancials.shareCapital.toLocaleString()}\n`;
-    report += `  - Retained Reserves/Surplus   : KSH ${reportFinancials.retainedEarnings.toLocaleString()}\n`;
-    report += `  TOTAL SHAREHOLDERS' FUNDS     : KSH ${reportFinancials.shareholdersFunds.toLocaleString()}\n`;
-    report += `  TOTAL LIABILITIES & FUNDS     : KSH ${(reportFinancials.totalLiabilities + reportFinancials.shareholdersFunds).toLocaleString()}\n\n`;
-
     report += `4. IFRS LEGAL AUDITOR OPINION\n`;
     report += `-------------------------------------------------------------------------\n`;
     report += `Subject: Compliance Audit on Co-operative Societies Act Cap 490\n`;
@@ -390,8 +313,8 @@ export default function ReportsView({
               Cooperative Societies Act Cap 490 Registry
             </span>
           </div>
-          <h2 className="text-xl font-bold font-display text-slate-800 mt-1">Sacco Audit &amp; Reporting Central</h2>
-          <p className="text-xs text-slate-500">Generate real-time cash flow statements, dual-till ledger charts and print regulatory annual reports</p>
+          <h2 className="text-xl font-bold font-display text-slate-800 mt-1">Sacco operational reporting</h2>
+          <p className="text-xs text-slate-500">Review current ledger activity, cash flow, and internal operational summaries.</p>
         </div>
 
         {/* Outer Section Switcher */}
@@ -405,20 +328,9 @@ export default function ReportsView({
             }`}
           >
             <Activity className="w-3.5 h-3.5" />
-            <span>Cashless Tills Hub</span>
+            <span>Co-op Accounts Hub</span>
           </button>
           
-          <button
-            onClick={() => setActiveSection('compliance')}
-            className={`px-3 py-2 text-xs font-bold uppercase tracking-wider rounded-md flex items-center justify-center space-x-1.5 transition-all ${
-              activeSection === 'compliance'
-                ? 'bg-slate-900 text-white shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            <BookOpen className="w-3.5 h-3.5 text-amber-500" />
-            <span>Kenyan Audit Book</span>
-          </button>
 
           <button
             onClick={() => setActiveSection('accountant')}
@@ -477,7 +389,7 @@ export default function ReportsView({
               }`}
             >
               <div className="w-full flex items-center justify-between">
-                <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 font-mono">VEHICLE TILL (No. 824 9102)</span>
+                <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 font-mono">OPERATIONS / DAILY (48277)</span>
                 <Wallet className={`w-4 h-4 ${activeTillTab === 'vehicle' ? 'text-emerald-600' : 'text-slate-400'}`} />
               </div>
               <div className="mt-4">
@@ -499,7 +411,7 @@ export default function ReportsView({
               }`}
             >
               <div className="w-full flex items-center justify-between">
-                <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 font-mono">UTILITY TILL (No. 481 0294)</span>
+                <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 font-mono">MEMBER SAVINGS (871671)</span>
                 <Server className={`w-4 h-4 ${activeTillTab === 'utility' ? 'text-blue-600' : 'text-slate-400'}`} />
               </div>
               <div className="mt-4">
@@ -508,7 +420,7 @@ export default function ReportsView({
               </div>
               <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between w-full">
                 <span className="text-[9px] font-mono uppercase bg-blue-700 text-white px-2 py-0.5 rounded-sm">Operational Ledger</span>
-                <span className="text-[10px] text-blue-700 font-bold hover:underline">Inspect Utility &rarr;</span>
+                <span className="text-[10px] text-blue-700 font-bold hover:underline">Inspect Savings &rarr;</span>
               </div>
             </button>
           </div>
@@ -528,15 +440,15 @@ export default function ReportsView({
                   <div className="p-6 space-y-6">
                     <div className="border-l-4 border-amber-500 bg-amber-50/50 p-4 rounded text-xs text-slate-700 leading-normal">
                       <strong className="text-amber-950 block mb-1 flex items-center">
-                        <Sparkles className="w-4 h-4 mr-1 text-amber-600" /> Sowetamu Dual-Till Segregation Policy
+                        <Sparkles className="w-4 h-4 mr-1 text-amber-600" /> Sowetamu Sacco Dual-Till Segregation Policy
                       </strong>
-                      To separate fleet collections from operations, Sowetamu runs isolated tills. While transaction streams are separate, this automated conjunction ledger merges them to evaluate total capital reserves.
+                      To separate fleet collections from operations, Sowetamu Sacco runs isolated tills. While transaction streams are separate, this automated conjunction ledger merges them to evaluate total capital reserves.
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       <div className="border border-slate-200 p-4 rounded">
                         <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wide border-b pb-2 mb-3">
-                          Vehicle Till Part-Account (No. 824 9102)
+                          Operations / Daily Account (48277)
                         </h4>
                         <div className="space-y-2 text-xs">
                           <div className="flex justify-between">
@@ -556,7 +468,7 @@ export default function ReportsView({
 
                       <div className="border border-slate-200 p-4 rounded">
                         <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wide border-b pb-2 mb-3">
-                          Utility Till Part-Account (No. 481 0294)
+                          Member Savings Account (871671)
                         </h4>
                         <div className="space-y-2 text-xs">
                           <div className="flex justify-between">
@@ -586,13 +498,13 @@ export default function ReportsView({
                     </div>
 
                     <div>
-                      <h4 className="text-xs font-black uppercase tracking-wider text-slate-800 mb-3 font-display">Combined Transaction Conjunction (All Tills)</h4>
+                      <h4 className="text-xs font-black uppercase tracking-wider text-slate-800 mb-3 font-display">Combined Transaction Conjunction (All Accounts)</h4>
                       <div className="overflow-x-auto border border-slate-200 rounded">
                         <table className="w-full text-left">
                           <thead className="bg-slate-100 text-[9px] text-slate-500 font-bold uppercase tracking-wider border-b border-slate-200">
                             <tr>
                               <th className="px-4 py-2">Date</th>
-                              <th className="px-4 py-2">Till Account</th>
+                              <th className="px-4 py-2">Co-op Account</th>
                               <th className="px-4 py-2">Category</th>
                               <th className="px-4 py-2">Memo Description</th>
                               <th className="px-4 py-2 text-right">Amount</th>
@@ -613,7 +525,7 @@ export default function ReportsView({
                                       ? 'bg-blue-50 text-blue-800 border border-blue-200' 
                                       : 'bg-slate-100 text-slate-700'
                                   }`}>
-                                    {t.tillNumber === 'VehicleTill' ? 'Till: 8249102' : t.tillNumber === 'UtilityTill' ? 'Till: 4810294' : 'Cash Box'}
+                                    {t.tillNumber === 'VehicleTill' ? 'Account: 48277' : t.tillNumber === 'UtilityTill' ? 'Account: 871671' : 'Cash Box'}
                                   </span>
                                 </td>
                                 <td className="px-4 py-3 text-slate-700 font-medium">{t.category}</td>
@@ -638,7 +550,7 @@ export default function ReportsView({
                   <div className="px-6 py-4 bg-emerald-950 border-b border-emerald-800 flex items-center justify-between">
                     <div className="flex items-center space-x-2 text-white">
                       <Wallet className="w-4 h-4 text-emerald-400" />
-                      <h3 className="text-xs font-black uppercase tracking-wider font-display">Vehicle Till Ledger (Till No. 824 9102)</h3>
+                      <h3 className="text-xs font-black uppercase tracking-wider font-display">Operations / Daily Ledger (Account 48277)</h3>
                     </div>
                     <span className="text-[10px] font-mono bg-emerald-500 text-emerald-950 font-black px-2.5 py-0.5 rounded">Fleet Core Collections</span>
                   </div>
@@ -663,10 +575,10 @@ export default function ReportsView({
                     </div>
 
                     <div>
-                      <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-3">Vehicle Till Dedicated Ledger Logs</h4>
+                      <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-3">Operations Account Ledger Logs</h4>
                       {vehicleTx.length === 0 ? (
                         <div className="text-center py-8 border border-dashed rounded text-xs text-slate-400">
-                          No transactions recorded under Till No. 824 9102
+                          No transactions recorded under account 48277
                         </div>
                       ) : (
                         <div className="overflow-x-auto border border-slate-200 rounded">
@@ -709,7 +621,7 @@ export default function ReportsView({
                   <div className="px-6 py-4 bg-blue-950 border-b border-blue-800 flex items-center justify-between">
                     <div className="flex items-center space-x-2 text-white">
                       <Server className="w-4 h-4 text-blue-400" />
-                      <h3 className="text-xs font-black uppercase tracking-wider font-display">Operating Utility Till Ledger (Till No. 481 0294)</h3>
+                      <h3 className="text-xs font-black uppercase tracking-wider font-display">Member Savings Ledger (Account 871671)</h3>
                     </div>
                     <span className="text-[10px] font-mono bg-blue-500 text-blue-950 font-black px-2.5 py-0.5 rounded">Sacco Operations Drawer</span>
                   </div>
@@ -737,7 +649,7 @@ export default function ReportsView({
                       <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-3">Operating Till Dedicated Ledger Logs</h4>
                       {utilityTx.length === 0 ? (
                         <div className="text-center py-8 border border-dashed rounded text-xs text-slate-400">
-                          No operational expenses recorded under Till No. 481 0294
+                          No savings deposits recorded under account 871671
                         </div>
                       ) : (
                         <div className="overflow-x-auto border border-slate-200 rounded">
@@ -810,7 +722,7 @@ export default function ReportsView({
                   Export Ledger Services
                 </h3>
                 <p className="text-[11px] text-slate-600 leading-normal font-medium">
-                  Sowetamu's cashless dual-till transactions can be merged into unified statements instantly for AGM compliance and state auditors. Select a format below:
+                  Export a current operational ledger summary for internal review. This is not an audited or regulatory filing.
                 </p>
 
                 <div className="space-y-2 pt-2">
@@ -839,7 +751,7 @@ export default function ReportsView({
       )}
 
       {/* RENDER COMPLIANCE ANNUAL REPORT WORKSPACE */}
-      {activeSection === 'compliance' && (
+      {showUnverifiedComplianceWorkspace && activeSection === 'compliance' && (
         <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
           
           {/* TOBACCO/BOOK TOC SIDEBAR (4 Cols) */}
@@ -979,7 +891,6 @@ export default function ReportsView({
                   { id: 'resp', label: 'Management Responsibilities Statement', page: 'Page 4' },
                   { id: 'auditor', label: 'Independent Sacco Auditor Report', page: 'Page 5' },
                   { id: 'balance', label: 'Certified Balance Sheet', page: 'Page 7' },
-                  { id: 'equity', label: 'Statement of Changes in Equity', page: 'Page 8' },
                   { id: 'notes', label: 'Accounts Notes & Asset Depreciation', page: 'Page 10' },
                 ].map((item) => (
                   <button
@@ -1371,7 +1282,7 @@ export default function ReportsView({
                         <tbody className="divide-y">
                           <tr><td className="p-2">Liquidity Ratio (Assets/Liabilities)</td><td className="p-2 text-right font-bold text-emerald-800">2.5 : 1</td></tr>
                           <tr><td className="p-2">Expense / Revenue Percentage</td><td className="p-2 text-right font-bold text-rose-700">100.80%</td></tr>
-                          <tr><td className="p-2">Cashless M-Pesa Till Segregation</td><td className="p-2 text-right font-bold text-emerald-600">100.00% Verified</td></tr>
+                          <tr><td className="p-2">Bank Collection Account Segregation</td><td className="p-2 text-right font-bold text-emerald-600">100.00% Verified</td></tr>
                         </tbody>
                       </table>
                     </div>
@@ -1382,7 +1293,6 @@ export default function ReportsView({
                     <h4 className="font-bold uppercase text-slate-900 underline font-mono">Certified Regulatory Auditor Balances (KES SHILLINGS)</h4>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono border p-4 rounded bg-slate-50">
                       <div className="space-y-2">
-                        <div className="flex justify-between border-b pb-1"><span>Sacco Share Capital:</span><span className="font-bold">KES {reportFinancials.shareCapital.toLocaleString()}.00</span></div>
                         <div className="flex justify-between border-b pb-1"><span>Members' Deposits:</span><span className="font-bold">KES {reportFinancials.membersDeposits.toLocaleString()}.00</span></div>
                         <div className="flex justify-between border-b pb-1"><span>Statutory Reserve:</span><span className="font-bold">KES ({Math.abs(reportFinancials.statutoryReserve).toLocaleString()}.00)</span></div>
                         <div className="flex justify-between border-b pb-1"><span>Retained Earnings deficit:</span><span className="font-bold">KES ({Math.abs(reportFinancials.retainedEarnings).toLocaleString()}.00)</span></div>
@@ -1391,7 +1301,6 @@ export default function ReportsView({
                         <div className="flex justify-between border-b pb-1"><span>Total Consolidated Assets:</span><span className="font-bold">KES {reportFinancials.totalAssets.toLocaleString()}.00</span></div>
                         <div className="flex justify-between border-b pb-1"><span>Active Member Loans Ledger:</span><span className="font-bold">KES {reportFinancials.loansToMembers.toLocaleString()}.00</span></div>
                         <div className="flex justify-between border-b pb-1"><span>Total Liabilities:</span><span className="font-bold">KES {reportFinancials.totalLiabilities.toLocaleString()}.00</span></div>
-                        <div className="flex justify-between border-b pb-1"><span>Shareholders' Capital Funds:</span><span className="font-bold">KES {reportFinancials.shareholdersFunds.toLocaleString()}.00</span></div>
                       </div>
                     </div>
                   </div>
@@ -1469,7 +1378,7 @@ export default function ReportsView({
                   </h3>
 
                   <p>
-                    We have audited the financial statements of <strong>{reportSaccoName} Savings &amp; Credit Co-operative Society Ltd</strong>, which comprise the Balance Sheet as at 31st December {reportYear}, the Income Statement, Statement of Changes in Equity, and Cash Flow Statement for the year then ended.
+                    We have audited the financial statements of <strong>{reportSaccoName} Savings &amp; Credit Co-operative Society Ltd</strong>, which comprise the Balance Sheet as at 31st December {reportYear}, the Income Statement, and Cash Flow Statement for the year then ended.
                   </p>
 
                   <h4 className="font-bold uppercase text-slate-900 font-mono underline">Auditor opinion:</h4>
@@ -1569,32 +1478,6 @@ export default function ReportsView({
                         <td className="px-4 py-2 text-right text-slate-900">KES {reportFinancials.totalLiabilities.toLocaleString()}.00</td>
                       </tr>
 
-                      {/* SHAREHOLDERS' FUNDS */}
-                      <tr className="bg-slate-100/50"><td className="px-4 py-1.5 font-bold uppercase" colSpan={3}>SHAREHOLDERS' EQUITY &amp; RESERVES</td></tr>
-                      <tr>
-                        <td className="px-4 py-2">Sacco Share Capital</td>
-                        <td className="px-4 py-2 text-center font-bold">9</td>
-                        <td className="px-4 py-2 text-right font-bold">{reportFinancials.shareCapital.toLocaleString()}.00</td>
-                      </tr>
-                      <tr>
-                        <td className="px-4 py-2">Retained Reserves / (Deficit)</td>
-                        <td className="px-4 py-2 text-center font-bold">12</td>
-                        <td className="px-4 py-2 text-right font-bold text-rose-700 underline">({Math.abs(reportFinancials.retainedEarnings).toLocaleString()}.00)</td>
-                      </tr>
-                      <tr className="bg-slate-50 font-bold border-b border-slate-900">
-                        <td className="px-4 py-2 uppercase">TOTAL SHAREHOLDERS' FUNDS</td>
-                        <td className="px-4 py-2"></td>
-                        <td className="px-4 py-2 text-right text-slate-900 underline">KES {reportFinancials.shareholdersFunds.toLocaleString()}.00</td>
-                      </tr>
-
-                      {/* SUM TOTAL OF LIABILITIES & EQUITY */}
-                      <tr className="bg-slate-900 text-white font-bold border-b-2 border-slate-900">
-                        <td className="px-4 py-2 uppercase font-black">TOTAL LIABILITIES &amp; CAPITAL FUNDS</td>
-                        <td className="px-4 py-2"></td>
-                        <td className="px-4 py-2 text-right font-black border-double border-b-4 border-slate-900">
-                          KES {(reportFinancials.totalLiabilities + reportFinancials.shareholdersFunds).toLocaleString()}.00
-                        </td>
-                      </tr>
                     </tbody>
                   </table>
 
@@ -1622,64 +1505,6 @@ export default function ReportsView({
                 </div>
               )}
 
-              {/* STATEMENT OF CHANGES IN EQUITY (PAGE 8) */}
-              {complianceActivePage === 'equity' && (
-                <div className="space-y-6 animate-fade-in text-xs text-slate-800">
-                  <div className="border-b pb-2 flex justify-between items-center font-mono">
-                    <span className="font-bold text-slate-500">C/S NO. {reportRegNo}</span>
-                    <span className="font-bold">CHANGES IN EQUITY STATEMENT</span>
-                  </div>
-
-                  <div className="text-center">
-                    <h2 className="text-sm font-black uppercase font-display">{reportSaccoName} SAVINGS &amp; CREDIT CO-OPERATIVE SOCIETY LTD</h2>
-                    <h3 className="text-xs font-bold font-mono tracking-wider text-slate-600 mt-0.5">STATEMENT OF CHANGES IN EQUITY YEAR ENDED 31ST DECEMBER {reportYear}</h3>
-                  </div>
-
-                  <table className="w-full text-left font-mono border-t border-b-2 border-slate-900 mt-6 text-xs">
-                    <thead>
-                      <tr className="bg-slate-50 border-b border-slate-900 font-bold">
-                        <th className="px-4 py-2">EQUITY COMPONENT</th>
-                        <th className="px-4 py-2 text-right">SHARE CAPITAL</th>
-                        <th className="px-4 py-2 text-right">STATUTORY RESERVE</th>
-                        <th className="px-4 py-2 text-right">RETAINED EARNINGS</th>
-                        <th className="px-4 py-2 text-right">TOTAL CAPITAL (KES)</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-200">
-                      <tr>
-                        <td className="px-4 py-3 font-bold">Balance at start of year</td>
-                        <td className="px-4 py-3 text-right">0.00</td>
-                        <td className="px-4 py-3 text-right">0.00</td>
-                        <td className="px-4 py-3 text-right">0.00</td>
-                        <td className="px-4 py-3 text-right font-bold">0.00</td>
-                      </tr>
-                      <tr>
-                        <td className="px-4 py-3 font-bold text-rose-700">Audit Surplus / (Deficit)</td>
-                        <td className="px-4 py-3 text-right">0.00</td>
-                        <td className="px-4 py-3 text-right">0.00</td>
-                        <td className="px-4 py-3 text-right text-rose-700">({Math.abs(reportFinancials.netSurplus).toLocaleString()}.00)</td>
-                        <td className="px-4 py-3 text-right text-rose-700">({Math.abs(reportFinancials.netSurplus).toLocaleString()}.00)</td>
-                      </tr>
-                      <tr>
-                        <td className="px-4 py-3 font-bold">Issue of share capital</td>
-                        <td className="px-4 py-3 text-right font-bold text-emerald-700">+{reportFinancials.shareCapital.toLocaleString()}.00</td>
-                        <td className="px-4 py-3 text-right">0.00</td>
-                        <td className="px-4 py-3 text-right">0.00</td>
-                        <td className="px-4 py-3 text-right font-bold text-emerald-700">+{reportFinancials.shareCapital.toLocaleString()}.00</td>
-                      </tr>
-                      <tr className="bg-slate-900 text-white font-bold font-black border-b border-slate-900">
-                        <td className="px-4 py-3 uppercase">C/F Audited Balance</td>
-                        <td className="px-4 py-3 text-right">{reportFinancials.shareCapital.toLocaleString()}.00</td>
-                        <td className="px-4 py-3 text-right">0.00</td>
-                        <td className="px-4 py-3 text-right text-rose-300">({Math.abs(reportFinancials.retainedEarnings).toLocaleString()}.00)</td>
-                        <td className="px-4 py-3 text-right text-amber-300">{reportFinancials.shareholdersFunds.toLocaleString()}.00</td>
-                      </tr>
-                    </tbody>
-                  </table>
-
-                </div>
-              )}
-
               {/* NOTES AND PPE SCHEDULE (PAGE 10) */}
               {complianceActivePage === 'notes' && (
                 <div className="space-y-6 animate-fade-in text-xs text-slate-800">
@@ -1696,12 +1521,12 @@ export default function ReportsView({
                     <div>
                       <h4 className="font-bold uppercase text-slate-900 underline text-xs">Note 6: Cash and Cash Equivalents</h4>
                       <p className="mt-1">
-                        Consists of cashless M-Pesa custody tills and floating reserve account balances merged for immediate operations clearance:
+                        Consists of bank collection accounts and floating reserve account balances merged for immediate operations clearance:
                       </p>
                       <table className="w-full text-left mt-2 border text-xs">
                         <tbody>
-                          <tr className="border-b"><td className="p-2">Vehicle Till M-Pesa Account No. 824 9102</td><td className="p-2 text-right">KES {vehicleNet.toLocaleString()}.00</td></tr>
-                          <tr className="border-b"><td className="p-2">Utility Till M-Pesa Account No. 481 0294</td><td className="p-2 text-right">KES {utilityNet.toLocaleString()}.00</td></tr>
+                          <tr className="border-b"><td className="p-2">Co-op Operations / Daily Account 48277</td><td className="p-2 text-right">KES {vehicleNet.toLocaleString()}.00</td></tr>
+                          <tr className="border-b"><td className="p-2">Co-op Member Savings Account 871671</td><td className="p-2 text-right">KES {utilityNet.toLocaleString()}.00</td></tr>
                           <tr className="border-b"><td className="p-2">Floating Cash Box / Petty drawer</td><td className="p-2 text-right font-bold">KES {cashNet.toLocaleString()}.00</td></tr>
                           <tr className="bg-slate-50 font-bold"><td className="p-2">Total cash equivalents balance in books</td><td className="p-2 text-right">KES {reportFinancials.cashAndEquiv.toLocaleString()}.00</td></tr>
                         </tbody>
@@ -1783,20 +1608,6 @@ export default function ReportsView({
               </div>
             </div>
 
-            {/* Capital Adequacy */}
-            <div className="bg-white border border-slate-200 rounded-lg p-4 shadow-sm flex items-center justify-between">
-              <div>
-                <span className="text-[9px] font-mono font-bold text-slate-400 uppercase tracking-widest block">Capital Adequacy</span>
-                <span className="text-xl font-bold font-mono text-blue-700 block mt-1">
-                  {((reportFinancials.shareCapital / reportFinancials.totalAssets) * 100).toFixed(1)}%
-                </span>
-                <span className="text-[10px] text-slate-500 mt-1 block">Sacco Act Target: <span className="font-bold">&gt; 8%</span></span>
-              </div>
-              <div className="bg-blue-50 text-blue-800 p-2.5 rounded-lg border border-blue-100">
-                <Shield className="w-5 h-5 text-blue-600" />
-              </div>
-            </div>
-
             {/* Operating Expense Ratio */}
             <div className="bg-white border border-slate-200 rounded-lg p-4 shadow-sm flex items-center justify-between">
               <div>
@@ -1811,12 +1622,12 @@ export default function ReportsView({
               </div>
             </div>
 
-            {/* Registry Total Ledger Capital */}
+            {/* Total recorded assets */}
             <div className="bg-white border border-slate-200 rounded-lg p-4 shadow-sm flex items-center justify-between">
               <div>
-                <span className="text-[9px] font-mono font-bold text-slate-400 uppercase tracking-widest block">Total Capital Assets</span>
+                <span className="text-[9px] font-mono font-bold text-slate-400 uppercase tracking-widest block">Total Recorded Assets</span>
                 <span className="text-xl font-bold font-mono text-slate-900 block mt-1">
-                  KES {(reportFinancials.shareholdersFunds + reportFinancials.totalLiabilities).toLocaleString()}
+                  KES {reportFinancials.totalAssets.toLocaleString()}
                 </span>
                 <span className="text-[10px] text-emerald-600 font-bold mt-1 block flex items-center">
                   <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full mr-1 animate-pulse"></span> Audited Safe
@@ -1861,8 +1672,26 @@ export default function ReportsView({
                     return;
                   }
                   if (!journalRefCode.trim()) {
-                    setJournalError("An M-Pesa ref or cash voucher code is required.");
+                    setJournalError("A bank reference or cash voucher code is required.");
                     return;
+                  }
+                  if (journalRequiresRegistration) {
+                    const member = members.find(item => item.id === journalMemberId && item.status === 'Active');
+                    if (!member) {
+                      setJournalError('Select an active registered member.');
+                      return;
+                    }
+                    if (journalVehiclePlate) {
+                      const vehicle = vehicles.find(item => item.plateNumber === journalVehiclePlate && item.status === 'Active');
+                      if (!vehicle) {
+                        setJournalError(`Car/V.REG "${journalVehiclePlate}" is not registered.`);
+                        return;
+                      }
+                      if (vehicle.ownerId !== member.id) {
+                        setJournalError(`Car/V.REG "${journalVehiclePlate}" is not registered under ${member.name}.`);
+                        return;
+                      }
+                    }
                   }
 
                   try {
@@ -1873,9 +1702,9 @@ export default function ReportsView({
                       description: journalDescription.trim(),
                       refCode: journalRefCode.toUpperCase().trim(),
                       tillNumber: journalTill,
-                      memberId: journalMemberId || undefined,
-                      memberName: journalMemberId ? members.find(m => m.id === journalMemberId)?.name : undefined,
-                      vehiclePlate: journalVehiclePlate || undefined
+                      memberId: journalRequiresRegistration ? journalMemberId : undefined,
+                      memberName: journalRequiresRegistration ? members.find(m => m.id === journalMemberId)?.name : undefined,
+                      vehiclePlate: journalRequiresRegistration ? journalVehiclePlate : undefined
                     });
 
                     setJournalSuccess(`Journal voucher successfully posted and written to Ledger! Ref: ${journalRefCode.toUpperCase()}`);
@@ -1966,8 +1795,8 @@ export default function ReportsView({
                         onChange={(e) => setJournalTill(e.target.value as any)}
                         className="w-full p-2 border border-slate-200 rounded font-mono text-xs focus:ring-1 focus:ring-emerald-600 focus:outline-none bg-white"
                       >
-                        <option value="VehicleTill">Vehicle Fleet Till (No. 824 9102)</option>
-                        <option value="UtilityTill">Utility General Till (No. 481 0294)</option>
+                        <option value="VehicleTill">Operations / Daily Account 48277</option>
+                        <option value="UtilityTill">Member Savings Account 871671</option>
                         <option value="None">Floating Petty Cash Drawer</option>
                       </select>
                     </div>
@@ -1978,10 +1807,27 @@ export default function ReportsView({
                       <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Journal Account / Category</label>
                       <select
                         value={journalCategory}
-                        onChange={(e) => setJournalCategory(e.target.value as any)}
+                        onChange={(e) => {
+                          const nextCategory = e.target.value as Transaction['category'];
+                          setJournalCategory(nextCategory);
+                          if (nextCategory === 'Savings Contribution') {
+                            setJournalType('Credit');
+                            setJournalTill('UtilityTill');
+                          } else if (isExpenseTransactionCategory(nextCategory)) {
+                            setJournalType('Debit');
+                            setJournalTill('VehicleTill');
+                          } else {
+                            setJournalTill('VehicleTill');
+                          }
+                          if (!requiresRegisteredMember(nextCategory)) {
+                            setJournalMemberId('');
+                            setJournalVehiclePlate('');
+                          }
+                        }}
                         className="w-full p-2 border border-slate-200 rounded text-xs focus:ring-1 focus:ring-emerald-600 focus:outline-none bg-white"
                       >
                         <option value="Daily Contribution">Daily Contribution</option>
+                        <option value="Savings Contribution">Savings Contribution</option>
                         <option value="Registration Fee">Registration Fee</option>
                         <option value="Management Fee">Management Fee</option>
                         <option value="Office Expenses">Office Expenses</option>
@@ -1995,9 +1841,10 @@ export default function ReportsView({
                     <div>
                       <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">KES Voucher Amount</label>
                       <input
-                        type="number"
-                        value={journalAmount}
-                        onChange={(e) => setJournalAmount(e.target.value)}
+                      type="number"
+                      value={journalAmount}
+                      onChange={(e) => setJournalAmount(sanitizeDecimalInput(e.target.value))}
+                      inputMode="decimal"
                         className="w-full p-2 border border-slate-200 rounded font-mono text-xs focus:ring-1 focus:ring-emerald-600 focus:outline-none"
                         required
                       />
@@ -2024,39 +1871,50 @@ export default function ReportsView({
                         </button>
                       </div>
                       <input
-                        type="text"
-                        value={journalRefCode}
-                        onChange={(e) => setJournalRefCode(e.target.value)}
+                      type="text"
+                      value={journalRefCode}
+                      onChange={(e) => setJournalRefCode(sanitizeReferenceCode(e.target.value))}
                         className="w-full p-2 border border-slate-200 rounded font-mono text-xs focus:ring-1 focus:ring-emerald-600 focus:outline-none uppercase"
                         required
                       />
                     </div>
 
-                    <div>
-                      <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Sacco Member Attachment</label>
-                      <select
-                        value={journalMemberId}
-                        onChange={(e) => setJournalMemberId(e.target.value)}
-                        className="w-full p-2 border border-slate-200 rounded text-xs focus:ring-1 focus:ring-emerald-600 focus:outline-none bg-white"
-                      >
-                        <option value="">-- No Member Attached (General Sacco Account) --</option>
-                        {members.map(m => (
-                          <option key={m.id} value={m.id}>{m.name} ({m.idNumber})</option>
-                        ))}
-                      </select>
-                    </div>
+                    {journalRequiresRegistration ? (
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Registered Member *</label>
+                        <select
+                          required
+                          value={journalMemberId}
+                          onChange={(e) => {
+                            const nextMemberId = e.target.value;
+                            setJournalMemberId(nextMemberId);
+                            setJournalVehiclePlate('');
+                          }}
+                          className="w-full p-2 border border-slate-200 rounded text-xs focus:ring-1 focus:ring-emerald-600 focus:outline-none bg-white"
+                        >
+                          <option value="">Select a registered member...</option>
+                          {eligibleJournalMembers.map(m => (
+                            <option key={m.id} value={m.id}>{m.name} ({m.idNumber})</option>
+                          ))}
+                        </select>
+                      </div>
+                    ) : (
+                      <div className="rounded border border-rose-100 bg-rose-50 p-2 text-[10px] font-semibold text-rose-700">
+                        Expense entries may be posted for an external person or supplier without a member or vehicle.
+                      </div>
+                    )}
                   </div>
 
-                  {journalCategory === 'Daily Contribution' && (
+                  {journalRequiresRegistration && (
                     <div>
-                      <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Vehicle Assignment</label>
+                      <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Onboarded Vehicle / V.REG (Optional)</label>
                       <select
                         value={journalVehiclePlate}
                         onChange={(e) => setJournalVehiclePlate(e.target.value)}
                         className="w-full p-2 border border-slate-200 rounded font-mono text-xs focus:ring-1 focus:ring-emerald-600 focus:outline-none bg-white"
                       >
-                        <option value="">-- No Fleet Plate Attached --</option>
-                        {vehicles.map(v => (
+                        <option value="">No vehicle attached</option>
+                        {eligibleJournalVehicles.map(v => (
                           <option key={v.id} value={v.plateNumber}>{v.plateNumber} - {v.route}</option>
                         ))}
                       </select>
@@ -2119,7 +1977,7 @@ export default function ReportsView({
                       <tbody className="divide-y divide-slate-100 text-slate-700">
                         {/* 1. Cash and bank equivalents */}
                         <tr>
-                          <td className="p-2.5 font-bold">Cash at Bank &amp; M-Pesa Tills</td>
+                          <td className="p-2.5 font-bold">Cash at Bank &amp; Collection Accounts</td>
                           <td className="p-2.5 text-right text-emerald-800">
                             {reportFinancials.cashAndEquiv >= 0 ? reportFinancials.cashAndEquiv.toLocaleString() + '.00' : '-'}
                           </td>
@@ -2164,16 +2022,7 @@ export default function ReportsView({
                           </td>
                         </tr>
 
-                        {/* 6. Society Paid-Up Share Capital */}
-                        <tr>
-                          <td className="p-2.5 font-bold">Sacco Society Paid-up Share Capital</td>
-                          <td className="p-2.5 text-right text-emerald-800">-</td>
-                          <td className="p-2.5 text-right text-rose-800">
-                            {reportFinancials.shareCapital.toLocaleString()}.00
-                          </td>
-                        </tr>
-
-                        {/* 7. Trade Payables and Auditing Accruals */}
+                        {/* 6. Trade Payables and Auditing Accruals */}
                         <tr>
                           <td className="p-2.5 font-bold">Trade Payables &amp; Supervision Accruals</td>
                           <td className="p-2.5 text-right text-emerald-800">-</td>
@@ -2182,7 +2031,7 @@ export default function ReportsView({
                           </td>
                         </tr>
 
-                        {/* 8. Sacco Accumulated Deficit / Retained Earnings */}
+                        {/* 7. Sacco Accumulated Deficit / Retained Earnings */}
                         <tr>
                           <td className="p-2.5 font-bold">Sacco Retained Reserves &amp; Earnings</td>
                           <td className="p-2.5 text-right text-emerald-800">
@@ -2208,7 +2057,6 @@ export default function ReportsView({
                           <td className="p-3 text-right text-amber-400">
                             KES {(
                               (reportFinancials.cashAndEquiv < 0 ? -reportFinancials.cashAndEquiv : 0) +
-                              reportFinancials.shareCapital +
                               reportFinancials.membersDeposits +
                               reportFinancials.tradePayables +
                               (reportFinancials.retainedEarnings >= 0 ? reportFinancials.retainedEarnings : 0)
@@ -2222,7 +2070,7 @@ export default function ReportsView({
                   <div className="mt-3 flex items-center space-x-2 bg-blue-50 border border-blue-300 text-blue-950 p-3 rounded text-[11px] leading-relaxed">
                     <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
                     <span>
-                      <strong>Live-data note:</strong> Only recorded ledger, member savings, share capital and equipment entries are shown. Unsupported accounts remain zero until their registers are implemented.
+                      <strong>Live-data note:</strong> Only recorded ledger, member savings and equipment entries are shown. Unsupported accounts remain zero until their registers are implemented.
                     </span>
                   </div>
                 </div>
@@ -2268,6 +2116,7 @@ export default function ReportsView({
                   >
                     <option value="All">All Categories</option>
                     <option value="Daily Contribution">Daily Contributions</option>
+                    <option value="Savings Contribution">Savings Contributions</option>
                     <option value="Registration Fee">Registration Fees</option>
                     <option value="Management Fee">Management Fees</option>
                     <option value="Office Expenses">Office Expenses</option>
@@ -2293,9 +2142,9 @@ export default function ReportsView({
                     onChange={(e) => setLedgerTillFilter(e.target.value)}
                     className="w-full p-1.5 border border-slate-200 rounded text-xs focus:ring-1 focus:ring-emerald-600 focus:outline-none bg-white"
                   >
-                    <option value="All">All Tills</option>
-                    <option value="VehicleTill">Vehicle Till</option>
-                    <option value="UtilityTill">Utility Till</option>
+                    <option value="All">All Accounts</option>
+                    <option value="VehicleTill">Operations Account 48277</option>
+                    <option value="UtilityTill">Savings Account 871671</option>
                     <option value="None">No Till</option>
                   </select>
 
@@ -2496,21 +2345,36 @@ export default function ReportsView({
             </div>
             <div className="grid grid-cols-2 gap-3">
               <label className="text-[10px] font-bold uppercase text-slate-500">Amount (KES)
-                <input type="number" min="0.01" step="0.01" value={editAmount} onChange={e => setEditAmount(e.target.value)} className="mt-1 w-full rounded-lg border p-2 text-xs" required />
+                <input type="number" min="0.01" step="0.01" value={editAmount} onChange={e => setEditAmount(sanitizeDecimalInput(e.target.value))} inputMode="decimal" className="mt-1 w-full rounded-lg border p-2 text-xs" required />
               </label>
               <label className="text-[10px] font-bold uppercase text-slate-500">V.REG
-                <input value={editVehiclePlate} onChange={e => setEditVehiclePlate(e.target.value.toUpperCase())} className="mt-1 w-full rounded-lg border p-2 font-mono text-xs uppercase" />
+                <select
+                  value={editVehiclePlate}
+                  onChange={e => setEditVehiclePlate(e.target.value)}
+                  className="mt-1 w-full rounded-lg border bg-white p-2 font-mono text-xs uppercase"
+                >
+                  <option value="">No vehicle / V.REG (optional)</option>
+                  {vehicles
+                    .filter(vehicle => vehicle.status === 'Active' && (!editingTransaction.memberId || vehicle.ownerId === editingTransaction.memberId))
+                    .map(vehicle => <option key={vehicle.id} value={vehicle.plateNumber}>{vehicle.plateNumber}</option>)}
+                </select>
               </label>
               <label className="text-[10px] font-bold uppercase text-slate-500">Entry Type
                 <select value={editType} onChange={e => setEditType(e.target.value as 'Credit' | 'Debit')} className="mt-1 w-full rounded-lg border bg-white p-2 text-xs"><option value="Credit">Credit</option><option value="Debit">Debit</option></select>
               </label>
               <label className="text-[10px] font-bold uppercase text-slate-500">Till
-                <select value={editTill} onChange={e => setEditTill(e.target.value as Transaction['tillNumber'])} className="mt-1 w-full rounded-lg border bg-white p-2 text-xs"><option value="VehicleTill">Vehicle Till</option><option value="UtilityTill">Utility Till</option><option value="None">None</option></select>
+                <select value={editTill} onChange={e => setEditTill(e.target.value as Transaction['tillNumber'])} className="mt-1 w-full rounded-lg border bg-white p-2 text-xs"><option value="VehicleTill">Operations Account 48277</option><option value="UtilityTill">Savings Account 871671</option><option value="None">None</option></select>
               </label>
             </div>
             <label className="block text-[10px] font-bold uppercase text-slate-500">Category
-              <select value={editCategory} onChange={e => setEditCategory(e.target.value as Transaction['category'])} className="mt-1 w-full rounded-lg border bg-white p-2 text-xs">
-                {['Daily Contribution','Registration Fee','Management Fee','Office Expenses','Petty Cash','Penalty','Utilities','Equipment'].map(category => <option key={category} value={category}>{category}</option>)}
+              <select value={editCategory} onChange={e => {
+                const nextCategory = e.target.value as Transaction['category'];
+                setEditCategory(nextCategory);
+                if (!requiresRegisteredMember(nextCategory)) setEditVehiclePlate('');
+              }} className="mt-1 w-full rounded-lg border bg-white p-2 text-xs">
+                {(['Daily Contribution','Savings Contribution','Registration Fee','Management Fee','Office Expenses','Petty Cash','Penalty','Utilities','Equipment'] as Transaction['category'][])
+                  .filter(category => !requiresRegisteredMember(category) || Boolean(editingTransaction.memberId))
+                  .map(category => <option key={category} value={category}>{category}</option>)}
               </select>
             </label>
             <label className="block text-[10px] font-bold uppercase text-slate-500">Description
