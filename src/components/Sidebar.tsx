@@ -22,7 +22,8 @@ import {
   CircleHelp,
   CalendarClock,
   Bug,
-  KeyRound
+  KeyRound,
+  Settings
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -34,7 +35,7 @@ interface SidebarProps {
   onClose?: () => void;
   isDatabaseEmpty: boolean;
   showDeveloperErrors: boolean;
-  onClearAllData: () => void;
+  onClearBrowserCache: () => void;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
 }
@@ -48,7 +49,7 @@ export default function Sidebar({
   onClose,
   isDatabaseEmpty,
   showDeveloperErrors,
-  onClearAllData,
+  onClearBrowserCache,
   isCollapsed,
   onToggleCollapse
 }: SidebarProps) {
@@ -78,6 +79,7 @@ export default function Sidebar({
     : [
       ...officerMenus[currentUser.role],
       { name: 'Roles & Responsibilities', icon: <BookOpenCheck className="w-4 h-4" /> },
+      { name: 'Account Settings', icon: <Settings className="w-4 h-4" /> },
       ...(showDeveloperErrors ? [{ name: 'Developer Errors', icon: <Bug className="w-4 h-4" /> }] : [])
     ];
 
@@ -234,11 +236,11 @@ export default function Sidebar({
             </p>
             <div className="pt-1">
               <button
-                onClick={onClearAllData}
+                onClick={onClearBrowserCache}
                 className="w-full py-1 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 rounded text-[9px] font-bold uppercase tracking-wider transition-all cursor-pointer"
-                title="Clear local browser state"
+                title="Clear cached data from this browser only"
               >
-                Clear Local State
+                Clear Browser Cache
               </button>
             </div>
           </div>
@@ -256,11 +258,11 @@ export default function Sidebar({
             </span>
             <div className="flex flex-col space-y-1.5 w-full items-center">
               <button
-                onClick={onClearAllData}
+                onClick={onClearBrowserCache}
                 className="p-1 bg-red-50 hover:bg-red-100 text-red-600 border border-red-100 rounded text-xs transition-all cursor-pointer hover:scale-105 active:scale-95"
-                title="Clear Local State"
+                title="Clear Browser Cache"
               >
-                CLR
+                CACHE
               </button>
             </div>
           </div>

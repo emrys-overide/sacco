@@ -26,6 +26,7 @@ const LoansView = lazy(() => import('./components/LoansView'));
 const RoleGuideView = lazy(() => import('./components/RoleGuideView'));
 const MonthEndCloseView = lazy(() => import('./components/MonthEndCloseView'));
 const DeveloperErrorLogView = lazy(() => import('./components/DeveloperErrorLogView'));
+const OfficerAccountSettingsView = lazy(() => import('./components/OfficerAccountSettingsView'));
 
 const MEMBER_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary', 'Treasurer'];
 const VEHICLE_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary'];
@@ -242,9 +243,9 @@ export default function App() {
     }
   };
 
-  const handleClearAllData = () => {
+  const handleClearBrowserCache = () => {
     const confirmed = window.confirm(
-      'Clear the local Sacco state? This removes the saved local registers and sheets from this browser. Do you want to proceed?'
+      'Clear cached SACCO data from this browser? This does not delete the online PostgreSQL database, but any unposted local daily sheets may be lost. Do you want to proceed?'
     );
     if (!confirmed) return;
 
@@ -261,10 +262,11 @@ export default function App() {
     setBlueprintApproved(false);
     setSignerName('');
     setCurrentTab('Dashboard');
-    
+    setRefreshTrigger(previous => previous + 1);
+
     setSecurityAlert({
-      title: "System Reset Successful",
-      message: "All Sacco registers, vehicles fleet, ledger transactions, and saved sheets have been cleared. You are now running on a clean, new Sacco install."
+      title: "Browser Cache Cleared",
+      message: "Cached sheets and display data were removed from this browser. No online SACCO database records or user accounts were deleted; current records are being reloaded from the server."
     });
   };
 
@@ -464,6 +466,8 @@ export default function App() {
         return <LoansView role={currentUser.role} token={authToken} members={members} />;
       case 'Roles & Responsibilities':
         return <RoleGuideView />;
+      case 'Account Settings':
+        return <OfficerAccountSettingsView currentUser={currentUser} token={authToken} />;
       case 'Month-end Close':
         return currentUser.role === 'Chairman'
           ? <MonthEndCloseView token={authToken} />
@@ -574,7 +578,7 @@ export default function App() {
           onClose={() => setIsMobileSidebarOpen(false)}
           isDatabaseEmpty={members.length === 0}
           showDeveloperErrors={canViewDeveloperErrors}
-          onClearAllData={handleClearAllData}
+          onClearBrowserCache={handleClearBrowserCache}
           isCollapsed={isSidebarCollapsed}
           onToggleCollapse={() => {
             const next = !isSidebarCollapsed;

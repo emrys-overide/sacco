@@ -221,6 +221,25 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
     method: 'POST',
     body: { identifier: 'secretary.e2e@example.com', password: 'secretary-password' }
   });
+  await request('/api/auth/change-password', 400, {
+    method: 'POST',
+    token: secretaryLogin.token,
+    body: { currentPassword: 'wrong-secretary-password', newPassword: 'secretary-private-password' }
+  });
+  await request('/api/auth/change-password', 200, {
+    method: 'POST',
+    token: secretaryLogin.token,
+    body: { currentPassword: 'secretary-password', newPassword: 'secretary-private-password' }
+  });
+  await request('/api/auth/login', 401, {
+    method: 'POST',
+    body: { identifier: 'secretary.e2e@example.com', password: 'secretary-password' }
+  });
+  const changedSecretaryLogin = await request('/api/auth/login', 200, {
+    method: 'POST',
+    body: { identifier: 'secretary.e2e@example.com', password: 'secretary-private-password' }
+  });
+  assert.equal(changedSecretaryLogin.user.role, 'Secretary');
   await request('/api/password-reset-requests', 403, { token: secretaryLogin.token });
   await request('/api/users/not-a-real-user/password', 403, {
     method: 'POST', token: secretaryLogin.token, body: { password: 'another-temporary-password' }

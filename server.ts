@@ -2398,6 +2398,46 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
     }
   });
 
+  app.post('/api/auth/change-password', authenticateSaccoUser, async (req, res) => {
+    try {
+      const user = requireAuthenticatedUser(req);
+      const currentPassword = String(req.body?.currentPassword || '');
+      const newPassword = String(req.body?.newPassword || '');
+      if (!currentPassword || newPassword.length < 8 || newPassword.length > 128) {
+        throw new HttpError(400, 'Enter your current password and a new password containing 8 to 128 characters.', 'ACCOUNT_PASSWORD_INVALID');
+      }
+      if (currentPassword === newPassword) {
+        throw new HttpError(400, 'Choose a password that is different from your current one.', 'ACCOUNT_PASSWORD_REUSED');
+      }
+
+      if (postgresPool) {
+        const result = await postgresPool.query(
+          `UPDATE users SET password_hash = crypt($1, gen_salt('bf')), must_change_password = FALSE,
+             temporary_password_expires_at = NULL, updated_at = now()
+           WHERE id = $2 AND password_hash = crypt($3, password_hash)`,
+          [newPassword, user.id, currentPassword]
+        );
+        if (!result.rowCount) {
+          throw new HttpError(400, 'Your current password is incorrect.', 'ACCOUNT_PASSWORD_INCORRECT');
+        }
+      } else {
+        const localUser = localStore.users.find(item => item.id === user.id);
+        if (!localUser) throw new HttpError(404, 'Account was not found.', 'USER_NOT_FOUND');
+        if (!localUser.devPassword || localUser.devPassword !== currentPassword) {
+          throw new HttpError(400, 'Your current password is incorrect.', 'ACCOUNT_PASSWORD_INCORRECT');
+        }
+        localUser.devPassword = newPassword;
+        localUser.mustChangePassword = false;
+        localUser.temporaryPasswordExpiresAt = undefined;
+      }
+
+      await recordAuditLog(req, 'ACCOUNT_PASSWORD_CHANGED', 'users', user.id, undefined, { role: user.role });
+      res.json({ passwordUpdated: true });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
   const validateProfilePhotoData = (value: unknown): string | null => {
     if (value == null || value === '') return null;
     if (typeof value !== 'string') throw new HttpError(400, 'Upload a valid PNG, JPEG, or WebP profile photo.', 'PROFILE_PHOTO_INVALID');
