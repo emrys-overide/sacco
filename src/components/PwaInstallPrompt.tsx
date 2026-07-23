@@ -8,7 +8,11 @@ import {
   subscribeToInstallPrompt
 } from '../lib/pwa';
 
-export default function PwaInstallPrompt() {
+interface PwaInstallPromptProps {
+  showInstallButton?: boolean;
+}
+
+export default function PwaInstallPrompt({ showInstallButton = true }: PwaInstallPromptProps) {
   const [installPrompt, setInstallPrompt] = useState<SaccoInstallPromptEvent | null>(null);
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [showInstructions, setShowInstructions] = useState(false);
@@ -60,6 +64,8 @@ export default function PwaInstallPrompt() {
     registration?.waiting?.postMessage({ type: 'SKIP_WAITING' });
     window.location.reload();
   };
+
+  if (!updateAvailable && !showInstallButton) return null;
 
   if (!updateAvailable) {
     return (

@@ -545,7 +545,7 @@ export default function App() {
 
   return (
     <div className="app-shell w-full h-screen flex flex-col md:flex-row overflow-hidden font-sans text-slate-900 relative">
-      <PwaInstallPrompt />
+      <PwaInstallPrompt showInstallButton={false} />
       {/* Mobile Top Navigation Bar */}
       <div className="app-topbar md:hidden h-14 bg-white text-slate-800 border-b border-slate-200 flex items-center justify-between px-4 shrink-0 z-30">
         <button

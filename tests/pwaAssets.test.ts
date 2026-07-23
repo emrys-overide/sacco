@@ -6,6 +6,7 @@ test('ships a Chrome-installable web app manifest and service worker', async () 
   const manifest = JSON.parse(await readFile(new URL('../public/manifest.webmanifest', import.meta.url), 'utf8'));
   const serviceWorker = await readFile(new URL('../public/service-worker.js', import.meta.url), 'utf8');
   const pwaClient = await readFile(new URL('../src/lib/pwa.ts', import.meta.url), 'utf8');
+  const appShell = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
 
   assert.equal(manifest.name, 'Sowetamu Sacco');
   assert.equal(manifest.start_url, '/');
@@ -17,4 +18,5 @@ test('ships a Chrome-installable web app manifest and service worker', async () 
   assert.match(serviceWorker, /addEventListener\('fetch'/);
   assert.match(serviceWorker, /sowetamu-shell-v4/);
   assert.doesNotMatch(pwaClient, /beforeinstallprompt[\s\S]{0,200}preventDefault/);
+  assert.match(appShell, /<PwaInstallPrompt showInstallButton=\{false\} \/>/);
 });
