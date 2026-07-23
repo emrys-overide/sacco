@@ -3019,6 +3019,86 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
     }
   });
 
+  // Officer deletion is separate from member removal. Only another officer
+  // can be removed here; Chairman and Member profiles remain protected.
+  app.delete('/api/users/:id', requirePermission('users.write'), async (req, res) => {
+    try {
+      const chairman = requireAuthenticatedUser(req);
+      if (chairman.role !== 'Chairman') {
+        throw new HttpError(403, 'Only the Chairman can delete an officer account.', 'OFFICER_DELETE_CHAIRMAN_ONLY');
+      }
+
+      const targetId = String(req.params.id || '').trim();
+      const deletableOfficerRoles: readonly UserRole[] = ['Secretary', 'Treasurer', 'Accountant', 'Auditor'];
+      let deleted: AuthorizedUser;
+
+      if (postgresPool) {
+        if (!targetId.match(/^[0-9a-f-]{36}$/i)) {
+          throw new HttpError(404, 'Officer account was not found.', 'OFFICER_NOT_FOUND');
+        }
+        const existing = await postgresPool.query(
+          `SELECT id, full_name, email, phone, role, is_active, account_status, linked_member_id
+           FROM users WHERE id = $1`,
+          [targetId]
+        );
+        if (!existing.rowCount) throw new HttpError(404, 'Officer account was not found.', 'OFFICER_NOT_FOUND');
+        const target = mapDbUser(existing.rows[0]);
+        if (!deletableOfficerRoles.includes(target.role)) {
+          throw new HttpError(
+            409,
+            target.role === 'Chairman'
+              ? 'The Chairman account cannot be deleted from officer account management.'
+              : 'Member accounts must be removed from the Members page.',
+            'OFFICER_DELETE_ROLE_PROTECTED'
+          );
+        }
+        const result = await postgresPool.query(
+          `DELETE FROM users
+           WHERE id = $1 AND role = ANY($2::user_role[])
+           RETURNING id, full_name, email, phone, role, is_active, account_status, linked_member_id`,
+          [targetId, deletableOfficerRoles]
+        );
+        if (!result.rowCount) throw new HttpError(409, 'The officer account could not be deleted.', 'OFFICER_DELETE_CONFLICT');
+        deleted = mapDbUser(result.rows[0]);
+      } else {
+        const targetIndex = localStore.users.findIndex(user => user.id === targetId);
+        if (targetIndex < 0) throw new HttpError(404, 'Officer account was not found.', 'OFFICER_NOT_FOUND');
+        const target = localStore.users[targetIndex];
+        if (!deletableOfficerRoles.includes(target.role)) {
+          throw new HttpError(
+            409,
+            target.role === 'Chairman'
+              ? 'The Chairman account cannot be deleted from officer account management.'
+              : 'Member accounts must be removed from the Members page.',
+            'OFFICER_DELETE_ROLE_PROTECTED'
+          );
+        }
+        deleted = { ...target };
+        localStore.users.splice(targetIndex, 1);
+        localStore.mfaChallenges.splice(
+          0,
+          localStore.mfaChallenges.length,
+          ...localStore.mfaChallenges.filter(challenge => challenge.userId !== targetId)
+        );
+      }
+
+      const openStreams = liveNotificationStreams.get(targetId);
+      openStreams?.forEach(stream => stream.end());
+      liveNotificationStreams.delete(targetId);
+      await recordAuditLog(req, 'OFFICER_ACCOUNT_DELETED', 'users', targetId, {
+        name: deleted.name,
+        email: deleted.email,
+        role: deleted.role
+      }, {
+        deleted: true,
+        role: deleted.role
+      });
+      return res.json({ deleted: true, userId: targetId, role: deleted.role });
+    } catch (error: any) {
+      return sendApiError(res, error);
+    }
+  });
+
   app.get('/api/loans/member/:memberId', async (req, res) => {
     try {
       const user = requireAuthenticatedUser(req);

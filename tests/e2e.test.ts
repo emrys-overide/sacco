@@ -680,5 +680,23 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       method: 'POST', body: { identifier: 'chairman.e2e@example.com', password: 'chairman-new-private-password' }
     });
     assert.equal(restoredChairmanLogin.passwordChangeRequired, false);
+
+    // Only the Chairman can permanently remove another officer account.
+    await request(`/api/users/${secretary.user.id}`, 403, {
+      method: 'DELETE', token: secretaryLogin.token
+    });
+    await request(`/api/users/${bootstrap.user.id}`, 409, {
+      method: 'DELETE', token: restoredChairmanLogin.token
+    });
+    const deletedSecretary = await request(`/api/users/${secretary.user.id}`, 200, {
+      method: 'DELETE', token: restoredChairmanLogin.token
+    });
+    assert.equal(deletedSecretary.deleted, true);
+    assert.equal(deletedSecretary.role, 'Secretary');
+    await request('/api/users', 401, { token: secretaryLogin.token });
+    await request('/api/auth/login', 401, {
+      method: 'POST',
+      body: { identifier: 'secretary.e2e@example.com', password: 'secretary-password' }
+    });
   }
 });

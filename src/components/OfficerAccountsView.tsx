@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { CheckCircle2, ShieldCheck, UserPlus, UsersRound } from 'lucide-react';
+import { CheckCircle2, ShieldCheck, Trash2, UserPlus, UsersRound } from 'lucide-react';
 import type { User, UserRole } from '../types';
 import { fetchSaccoJson, postSaccoJson } from '../lib/api';
 import { sanitizePersonName, sanitizePhoneNumber } from '../lib/inputValidation';
@@ -15,6 +15,7 @@ const officerRoles: Array<{ value: OfficerRole; label: string }> = [
   { value: 'Accountant', label: 'Accountant' },
   { value: 'Auditor', label: 'Auditor' }
 ];
+const deletableOfficerRoles: readonly UserRole[] = ['Secretary', 'Treasurer', 'Accountant', 'Auditor'];
 
 const inputClass = 'w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-600 focus:ring-4 focus:ring-emerald-100';
 
@@ -23,6 +24,7 @@ export default function OfficerAccountsView({ fallbackAuthToken }: { fallbackAut
   const [passwordResetRequests, setPasswordResetRequests] = useState<PasswordResetRequest[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [deletingOfficerId, setDeletingOfficerId] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [form, setForm] = useState<OfficerCreation>({
@@ -94,6 +96,29 @@ export default function OfficerAccountsView({ fallbackAuthToken }: { fallbackAut
     } finally { setIsSaving(false); }
   };
 
+  const deleteOfficer = async (officer: Pick<User, 'id' | 'name' | 'role'>) => {
+    const confirmed = window.confirm(
+      `Delete ${officer.name}'s ${officer.role} account?\n\nThey will immediately lose access and will no longer be able to sign in. This action cannot be undone.`
+    );
+    if (!confirmed) return;
+    setError('');
+    setNotice('');
+    setDeletingOfficerId(officer.id);
+    try {
+      await fetchSaccoJson<{ deleted: true; userId: string; role: UserRole }>(
+        `/api/users/${officer.id}`,
+        { method: 'DELETE' },
+        fallbackAuthToken
+      );
+      setOfficers(current => current.filter(item => item.id !== officer.id));
+      setNotice(`${officer.name}'s ${officer.role} account has been deleted and can no longer sign in.`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'The officer account could not be deleted.');
+    } finally {
+      setDeletingOfficerId('');
+    }
+  };
+
   return (
     <div className="flex-1 overflow-y-auto bg-slate-50 p-4 sm:p-8">
       <div className="mx-auto grid max-w-6xl gap-6 lg:grid-cols-[1.05fr_0.95fr]">
@@ -161,7 +186,24 @@ export default function OfficerAccountsView({ fallbackAuthToken }: { fallbackAut
                   <p className="truncate text-sm font-bold text-slate-800">{officer.name}</p>
                   <p className="truncate text-xs text-slate-500">{officer.email}</p>
                 </div>
-                <div className="flex shrink-0 flex-col items-end gap-1.5"><span className="rounded-full bg-emerald-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-emerald-700">{officer.role}</span><button type="button" disabled={isSaving} onClick={() => void resetPassword(officer)} className="text-[10px] font-bold text-slate-500 hover:text-emerald-700">Reset password</button></div>
+                <div className="flex shrink-0 flex-col items-end gap-1.5">
+                  <span className="rounded-full bg-emerald-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-emerald-700">{officer.role}</span>
+                  <div className="flex items-center gap-3">
+                    <button type="button" disabled={isSaving || Boolean(deletingOfficerId)} onClick={() => void resetPassword(officer)} className="text-[10px] font-bold text-slate-500 hover:text-emerald-700 disabled:opacity-50">Reset password</button>
+                    {deletableOfficerRoles.includes(officer.role) && (
+                      <button
+                        type="button"
+                        disabled={isSaving || Boolean(deletingOfficerId)}
+                        onClick={() => void deleteOfficer(officer)}
+                        className="flex items-center gap-1 text-[10px] font-black text-rose-600 hover:text-rose-800 disabled:opacity-50"
+                        aria-label={`Delete ${officer.name}'s ${officer.role} account`}
+                      >
+                        <Trash2 className="h-3 w-3" />
+                        {deletingOfficerId === officer.id ? 'Deleting...' : 'Delete account'}
+                      </button>
+                    )}
+                  </div>
+                </div>
               </div>
             ))}
             {!isLoading && officers.length === 0 && <p className="text-sm text-slate-500">No officer accounts are active yet.</p>}
