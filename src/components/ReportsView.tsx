@@ -37,7 +37,7 @@ import {
   Pencil
 } from 'lucide-react';
 
-const JOURNAL_WRITE_ROLES: readonly UserRole[] = ['Treasurer', 'Chairman', 'Accountant'];
+const JOURNAL_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary', 'Treasurer', 'Accountant'];
 
 interface ReportsViewProps {
   transactions: Transaction[];

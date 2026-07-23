@@ -347,7 +347,7 @@ export default function DashboardView({
     setShowAddModal(false);
   };
 
-  const isTreasurer = currentUserRole === 'Treasurer' || currentUserRole === 'Chairman';
+  const canRecordTransaction = ['Chairman', 'Secretary', 'Treasurer', 'Accountant'].includes(currentUserRole);
   const hour = new Date().getHours();
   const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
 
@@ -377,7 +377,7 @@ export default function DashboardView({
               onNavigateToTab={onNavigateToTab}
             />
           )}
-          {isTreasurer ? (
+          {canRecordTransaction ? (
             <button
               onClick={() => setShowAddModal(true)}
               id="dashboard-new-tx-btn"

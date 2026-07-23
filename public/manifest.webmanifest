@@ -2,6 +2,8 @@
   "id": "/",
   "name": "Sowetamu Sacco",
   "short_name": "Sowetamu",
+  "lang": "en-KE",
+  "dir": "ltr",
   "description": "Secure Sowetamu Sacco member, vehicle, collection, and financial ledger operations.",
   "start_url": "/",
   "scope": "/",
@@ -10,19 +12,32 @@
   "orientation": "any",
   "background_color": "#f8fafc",
   "theme_color": "#052e2b",
+  "prefer_related_applications": false,
   "categories": ["business", "finance", "productivity"],
   "icons": [
     {
       "src": "/icons/sacco-icon-192.png",
       "sizes": "192x192",
       "type": "image/png",
-      "purpose": "any maskable"
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/sacco-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
     },
     {
       "src": "/icons/sacco-icon-512.png",
       "sizes": "512x512",
       "type": "image/png",
-      "purpose": "any maskable"
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/sacco-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ],
   "shortcuts": [

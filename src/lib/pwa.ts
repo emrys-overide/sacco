@@ -19,7 +19,9 @@ function publishInstallPrompt(prompt: SaccoInstallPromptEvent | null) {
 // before React finishes mounting the install control.
 if (typeof window !== 'undefined') {
   window.addEventListener('beforeinstallprompt', event => {
-    event.preventDefault();
+    // Do not prevent Chrome's default action. The previous implementation
+    // suppressed Chrome's own install surface and left some Android devices
+    // dependent on the custom prompt alone.
     publishInstallPrompt(event as SaccoInstallPromptEvent);
   });
   window.addEventListener('appinstalled', () => publishInstallPrompt(null));
@@ -44,19 +46,20 @@ export function isSaccoInstalled() {
 export function registerSaccoServiceWorker() {
   if (!('serviceWorker' in navigator) || import.meta.env.DEV) return;
 
-  window.addEventListener('load', () => {
-    void navigator.serviceWorker.register('/service-worker.js', { scope: '/' })
-      .then(registration => {
-        if (registration.waiting) window.dispatchEvent(new Event(PWA_UPDATE_EVENT));
-        registration.addEventListener('updatefound', () => {
-          const worker = registration.installing;
-          worker?.addEventListener('statechange', () => {
-            if (worker.state === 'installed' && navigator.serviceWorker.controller) {
-              window.dispatchEvent(new Event(PWA_UPDATE_EVENT));
-            }
-          });
+  // Register immediately so a first-time phone visit becomes installable
+  // without waiting for every image and font to finish loading.
+  void navigator.serviceWorker.register('/service-worker.js', { scope: '/' })
+    .then(registration => {
+      void registration.update();
+      if (registration.waiting) window.dispatchEvent(new Event(PWA_UPDATE_EVENT));
+      registration.addEventListener('updatefound', () => {
+        const worker = registration.installing;
+        worker?.addEventListener('statechange', () => {
+          if (worker.state === 'installed' && navigator.serviceWorker.controller) {
+            window.dispatchEvent(new Event(PWA_UPDATE_EVENT));
+          }
         });
-      })
-      .catch(error => console.warn('[PWA] Service worker registration failed.', error));
-  });
+      });
+    })
+    .catch(error => console.warn('[PWA] Service worker registration failed.', error));
 }

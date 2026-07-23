@@ -55,7 +55,7 @@ export default function ExpensesView({
   const [notes, setNotes] = useState('');
 
   // Sacco role restrictions
-  const canRecordExpense = currentUserRole === 'Treasurer' || currentUserRole === 'Chairman';
+  const canRecordExpense = ['Chairman', 'Secretary', 'Treasurer', 'Accountant'].includes(currentUserRole);
 
   // Extract all debit (expense) transactions
   const expenses = transactions.filter(t => t.type === 'Debit');
