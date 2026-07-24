@@ -9,7 +9,10 @@ type SystemRouteContext = {
 };
 
 export function registerSystemRoutes(app: Express, context: SystemRouteContext) {
-  const publicSiteUrl = getPublicSiteUrl(process.env.APP_URL);
+  const renderSiteUrl = process.env.RENDER_EXTERNAL_HOSTNAME
+    ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME}`
+    : null;
+  const publicSiteUrl = getPublicSiteUrl(process.env.APP_URL || renderSiteUrl);
 
   app.get('/robots.txt', (_req, res) => {
     res.type('text/plain').send(buildRobotsTxt(publicSiteUrl));
