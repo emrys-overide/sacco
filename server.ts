@@ -669,26 +669,32 @@ function loginAttemptKey(requestIp: string | undefined, identifier: unknown): st
   return crypto.createHash('sha256').update(`${requestIp || 'unknown'}:${normalizedIdentifier}`).digest('hex');
 }
 
-async function assertLoginIsAllowed(attemptKey: string): Promise<void> {
+function loginIpAttemptKey(requestIp: string | undefined): string {
+  return crypto.createHash('sha256').update(`ip:${requestIp || 'unknown'}`).digest('hex');
+}
+
+async function assertLoginIsAllowed(attemptKeys: string[]): Promise<void> {
   const now = Date.now();
   if (!postgresPool) {
-    const state = localLoginRateLimits.get(attemptKey);
-    if (state?.lockedUntil && state.lockedUntil > now) {
+    const state = attemptKeys.map(key => localLoginRateLimits.get(key)).find(item => item?.lockedUntil && item.lockedUntil > now);
+    if (state?.lockedUntil) {
       throw new HttpError(429, 'Too many sign-in attempts. Wait 15 minutes and try again.', 'LOGIN_RATE_LIMITED');
     }
     return;
   }
-  const result = await postgresPool.query('SELECT locked_until FROM login_rate_limits WHERE attempt_key = $1', [attemptKey]);
+  const result = await postgresPool.query(
+    'SELECT max(locked_until) AS locked_until FROM login_rate_limits WHERE attempt_key = ANY($1::text[])',
+    [attemptKeys]
+  );
   const lockedUntil = result.rows[0]?.locked_until ? new Date(result.rows[0].locked_until).getTime() : 0;
   if (lockedUntil > now) {
     throw new HttpError(429, 'Too many sign-in attempts. Wait 15 minutes and try again.', 'LOGIN_RATE_LIMITED');
   }
 }
 
-async function recordFailedLogin(attemptKey: string): Promise<void> {
+async function recordFailedLogin(attemptKey: string, limit = 10): Promise<void> {
   const now = Date.now();
   const windowMs = 15 * 60 * 1000;
-  const limit = 10;
   if (!postgresPool) {
     const previous = localLoginRateLimits.get(attemptKey);
     const state = !previous || previous.windowStartedAt + windowMs <= now
@@ -706,11 +712,11 @@ async function recordFailedLogin(attemptKey: string): Promise<void> {
        window_started_at = CASE WHEN login_rate_limits.window_started_at < now() - interval '15 minutes' THEN now() ELSE login_rate_limits.window_started_at END,
        locked_until = CASE
          WHEN login_rate_limits.window_started_at < now() - interval '15 minutes' THEN NULL
-         WHEN login_rate_limits.attempt_count + 1 >= 10 THEN now() + interval '15 minutes'
+         WHEN login_rate_limits.attempt_count + 1 >= $2 THEN now() + interval '15 minutes'
          ELSE login_rate_limits.locked_until
        END,
        updated_at = now()`,
-    [attemptKey]
+    [attemptKey, limit]
   );
 }
 
@@ -2294,15 +2300,22 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       if (!passwordAuthenticationEnabled()) throw new HttpError(503, 'Password authentication is not enabled.', 'PASSWORD_AUTH_DISABLED');
       const identifier = req.body?.identifier ?? req.body?.email;
       const attemptKey = loginAttemptKey(req.ip, identifier);
-      await assertLoginIsAllowed(attemptKey);
+      const ipAttemptKey = loginIpAttemptKey(req.ip);
+      await assertLoginIsAllowed([attemptKey, ipAttemptKey]);
       const user = await authenticatePasswordUser(identifier, String(req.body?.password || ''));
       if (!user || !hasActiveAccount(user) || (isMemberUser(user) && !user.linkedMemberId)) {
-        await recordFailedLogin(attemptKey);
+        await Promise.all([
+          recordFailedLogin(attemptKey, 10),
+          recordFailedLogin(ipAttemptKey, 20)
+        ]);
         return res.status(401).json({ error: 'Invalid Sacco profile or password.' });
       }
       await clearLoginFailures(attemptKey);
       res.json(await completePasswordAuthentication(user));
     } catch (error: any) {
+      if (error?.code === 'LOGIN_RATE_LIMITED') {
+        res.setHeader('Retry-After', '900');
+      }
       sendApiError(res, error);
     }
   });
@@ -4125,6 +4138,15 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
     });
     console.error('[Sacco API] Unhandled request failure.');
     return res.status(500).json({ error: 'Unexpected server error.', code: 'INTERNAL_ERROR' });
+  });
+
+  app.use('/api', (req, res) => {
+    res.status(404).json({
+      error: 'The requested API endpoint does not exist.',
+      code: 'API_ROUTE_NOT_FOUND',
+      method: req.method,
+      path: req.originalUrl.split('?')[0]
+    });
   });
 
   // The standalone Node runtime serves the SPA with Vite in development and

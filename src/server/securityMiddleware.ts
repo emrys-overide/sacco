@@ -22,7 +22,10 @@ export function securityHeaders(isProduction: boolean) {
       : "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:";
 
     res.setHeader('Content-Security-Policy', cspDirectives);
-    if (isProduction && req.secure) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    const forwardedProto = String(req.headers?.['x-forwarded-proto'] || '').split(',')[0]?.trim().toLowerCase();
+    if (isProduction && (req.secure || forwardedProto === 'https')) {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
     if (req.path.startsWith('/api/')) {
       res.setHeader('Cache-Control', 'no-store');
       res.setHeader('X-Robots-Tag', 'noindex, nofollow');

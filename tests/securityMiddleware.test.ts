@@ -36,3 +36,20 @@ test('prevents search indexing and caching of protected API responses', () => {
   assert.match(headers['Content-Security-Policy'] || '', /https:\/\/fonts\.googleapis\.com/);
   assert.match(headers['Content-Security-Policy'] || '', /https:\/\/fonts\.gstatic\.com/);
 });
+
+test('emits HSTS when HTTPS is terminated by the trusted deployment proxy', () => {
+  const headers: Record<string, string> = {};
+  const res = {
+    setHeader(name: string, value: string) {
+      headers[name] = value;
+    }
+  };
+
+  securityHeaders(true)({
+    path: '/',
+    secure: false,
+    headers: { 'x-forwarded-proto': 'https' }
+  } as any, res as any, () => {});
+
+  assert.equal(headers['Strict-Transport-Security'], 'max-age=31536000; includeSubDomains');
+});

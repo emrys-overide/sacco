@@ -18,7 +18,7 @@ services:
       - key: JWT_SECRET
         generateValue: true
       - key: APP_URL
-        sync: false
+        value: https://sacco-vq1v.onrender.com
       - key: TRUST_PROXY
         value: "true"
       - key: PASSWORD_AUTH_ENABLED
