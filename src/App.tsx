@@ -291,7 +291,7 @@ export default function App() {
 
   const handleDeleteMember = async (memberId: string) => {
     if (!currentUser || (currentUser.role !== 'Chairman' && currentUser.role !== 'Secretary')) {
-      throw new Error('Only the Chairman or the Secretary who registered the member can delete the account.');
+      throw new Error('Only the Chairman or Secretary can delete a member account.');
     }
     await fetchSaccoJson<{ deleted: true; memberId: string }>(`/api/members/${memberId}`, {
       method: 'DELETE'
@@ -304,7 +304,7 @@ export default function App() {
     setVehicles(vehicleData);
   };
 
-  const handleUpdateMember = async (memberId: string, changes: Pick<Member, 'name' | 'idNumber' | 'phoneNumber' | 'email'>) => {
+  const handleUpdateMember = async (memberId: string, changes: Pick<Member, 'membershipNumber' | 'name' | 'idNumber' | 'phoneNumber' | 'email'>) => {
     const updated = await fetchSaccoJson<Member>(`/api/members/${memberId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -494,7 +494,6 @@ export default function App() {
             onUpdateMember={handleUpdateMember}
             onChangeMemberStatus={handleMemberStatus}
             currentUserRole={currentUser.role}
-            currentUserId={currentUser.id}
             transactions={transactions}
           />
         );

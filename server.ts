@@ -3716,14 +3716,14 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
     }
   });
 
-  // Removing a member retains financial history. A Secretary may remove only
-  // a member they created; the Chairman may remove any eligible member.
-  // history is retained under an anonymized, inactive profile so ledger and
-  // loan audit trails are never silently destroyed.
+  // Removing a member retains financial history. The Chairman or Secretary
+  // may remove any registered member, including legacy records that predate
+  // creator tracking. History is retained under an anonymized, inactive
+  // profile so ledger and loan audit trails are never silently destroyed.
   app.delete('/api/members/:id', requirePermission('members.write'), async (req, res) => {
     const actor = requireAuthenticatedUser(req);
     if (actor.role !== 'Chairman' && actor.role !== 'Secretary') {
-      return sendApiError(res, new HttpError(403, 'Only the Chairman or the Secretary who created this member can delete the account.', 'MEMBER_DELETE_ACCESS_DENIED'));
+      return sendApiError(res, new HttpError(403, 'Only the Chairman or Secretary can delete a member account.', 'MEMBER_DELETE_ACCESS_DENIED'));
     }
 
     const memberId = String(req.params.id || '').trim();
@@ -3736,12 +3736,6 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
         const visibleMember = await getPostgresMember(postgresPool, memberId);
         if (!visibleMember) throw new HttpError(404, 'Member was not found.', 'MEMBER_NOT_FOUND');
         before = visibleMember;
-        if (actor.role === 'Secretary' && visibleMember.createdByUserId !== actor.id) {
-          throw new HttpError(403, 'A Secretary can delete only members they personally registered.', 'MEMBER_DELETE_NOT_CREATOR');
-        }
-        if (visibleMember.sharesAmount > 0.005 || visibleMember.savingsAmount > 0.005 || Number(visibleMember.loanBalance || 0) > 0.005) {
-          throw new HttpError(409, 'Settle the member’s savings, shares, and outstanding loan balance before deleting the member.', 'MEMBER_HAS_UNSETTLED_BALANCES');
-        }
 
         const client = await postgresPool.connect();
         let committed = false;
@@ -3804,12 +3798,6 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
         const memberIndex = localStore.members.findIndex(member => member.id === memberId);
         if (memberIndex < 0) throw new HttpError(404, 'Member was not found.', 'MEMBER_NOT_FOUND');
         before = { ...localStore.members[memberIndex] };
-        if (actor.role === 'Secretary' && before.createdByUserId !== actor.id) {
-          throw new HttpError(403, 'A Secretary can delete only members they personally registered.', 'MEMBER_DELETE_NOT_CREATOR');
-        }
-        if (before.sharesAmount > 0.005 || before.savingsAmount > 0.005 || Number(before.loanBalance || 0) > 0.005) {
-          throw new HttpError(409, 'Settle the member’s savings, shares, and outstanding loan balance before deleting the member.', 'MEMBER_HAS_UNSETTLED_BALANCES');
-        }
         const accountIds = new Set(localStore.users.filter(user => user.role === 'Member' && user.linkedMemberId === memberId).map(user => user.id));
         localStore.users.splice(0, localStore.users.length, ...localStore.users.filter(user => !accountIds.has(user.id)));
         localStore.mfaChallenges.splice(0, localStore.mfaChallenges.length, ...localStore.mfaChallenges.filter(challenge => !accountIds.has(challenge.userId)));
@@ -4325,12 +4313,16 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
         throw new HttpError(403, 'Only the Chairman or Secretary can edit member details.', 'MEMBER_EDIT_ACCESS_DENIED');
       }
       const memberId = String(req.params.id || '').trim();
+      const membershipNumber = sanitizeMemberNumber(req.body?.membershipNumber);
       const name = sanitizePersonName(req.body?.name).trim();
       const idNumber = sanitizeIntegerInput(req.body?.idNumber, 12);
       const phoneNumber = sanitizePhoneNumber(req.body?.phoneNumber);
       const email = normalizedEmail(req.body?.email);
+      if (!isValidMemberNumber(membershipNumber)) {
+        throw new HttpError(400, 'Member Number must contain letters and numbers only (maximum 30 characters).', 'MEMBER_NUMBER_INVALID');
+      }
       if (!isValidPersonName(name) || !idNumber || !isValidPhoneNumber(phoneNumber) || !/^\S+@\S+\.\S+$/.test(email)) {
-        throw new HttpError(400, 'Enter a valid name, National ID, phone number and email address.', 'MEMBER_DETAILS_INVALID');
+        throw new HttpError(400, 'Enter a valid member number, name, National ID, phone number and email address.', 'MEMBER_DETAILS_INVALID');
       }
       let updated: Member;
       if (postgresPool) {
@@ -4339,6 +4331,15 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
           await client.query('BEGIN');
           const existing = await client.query('SELECT * FROM members WHERE id = $1 AND deleted_at IS NULL FOR UPDATE', [memberId]);
           if (!existing.rowCount) throw new HttpError(404, 'Member was not found.', 'MEMBER_NOT_FOUND');
+          const memberNumberConflict = await client.query(
+            `SELECT 1 FROM members
+             WHERE id <> $1 AND upper(member_number) = $2
+             LIMIT 1`,
+            [memberId, membershipNumber]
+          );
+          if (memberNumberConflict.rowCount) {
+            throw new HttpError(409, `Member Number ${membershipNumber} is already registered.`, 'MEMBER_NUMBER_ALREADY_REGISTERED');
+          }
           const conflict = await client.query(
             `SELECT 1 FROM members
              WHERE id <> $1 AND deleted_at IS NULL AND (national_id = $2 OR lower(COALESCE(email, '')) = $3)
@@ -4348,9 +4349,9 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
           if (conflict.rowCount) throw new HttpError(409, 'That National ID or email is already used by another member.', 'MEMBER_DETAILS_CONFLICT');
           await client.query(
             `UPDATE members
-             SET full_name = $2, national_id = $3, phone = $4, email = $5, updated_at = now()
+             SET member_number = $2, full_name = $3, national_id = $4, phone = $5, email = $6, updated_at = now()
              WHERE id = $1`,
-            [memberId, name, idNumber, phoneNumber, email]
+            [memberId, membershipNumber, name, idNumber, phoneNumber, email]
           );
           const userConflict = await client.query(
             `SELECT 1 FROM users WHERE linked_member_id IS DISTINCT FROM $1::uuid AND lower(email) = $2 LIMIT 1`,
@@ -4373,17 +4374,23 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       } else {
         const member = localStore.members.find(item => item.id === memberId);
         if (!member) throw new HttpError(404, 'Member was not found.', 'MEMBER_NOT_FOUND');
+        if (localStore.members.some(item => item.id !== memberId && sanitizeMemberNumber(item.membershipNumber) === membershipNumber)) {
+          throw new HttpError(409, `Member Number ${membershipNumber} is already registered.`, 'MEMBER_NUMBER_ALREADY_REGISTERED');
+        }
         if (localStore.members.some(item => item.id !== memberId && (item.idNumber === idNumber || normalizedEmail(item.email) === email))) {
           throw new HttpError(409, 'That National ID or email is already used by another member.', 'MEMBER_DETAILS_CONFLICT');
         }
-        Object.assign(member, { name, idNumber, phoneNumber, email });
+        Object.assign(member, { membershipNumber, name, idNumber, phoneNumber, email });
         localStore.users.filter(user => user.role === 'Member' && user.linkedMemberId === memberId)
           .forEach(user => Object.assign(user, { name, phone: phoneNumber, email }));
         updated = member;
       }
-      await recordAuditLog(req, 'MEMBER_DETAILS_UPDATED', 'members', memberId, undefined, { name, idNumber, phoneNumber, email });
+      await recordAuditLog(req, 'MEMBER_DETAILS_UPDATED', 'members', memberId, undefined, { membershipNumber, name, idNumber, phoneNumber, email });
       res.json(updated);
     } catch (error: any) {
+      if (error?.code === '23505' && String(error?.constraint || '').includes('member_number')) {
+        return sendApiError(res, new HttpError(409, 'That Member Number is already registered. Enter a different unique number.', 'MEMBER_NUMBER_ALREADY_REGISTERED'));
+      }
       sendApiError(res, error);
     }
   });

@@ -47,14 +47,13 @@ interface MembersViewProps {
   members: Member[];
   onAddMember: (newMember: Omit<Member, 'id' | 'dateRegistered' | 'sharesAmount' | 'savingsAmount'>) => Promise<void>;
   onDeleteMember: (memberId: string) => Promise<void>;
-  onUpdateMember: (memberId: string, changes: Pick<Member, 'name' | 'idNumber' | 'phoneNumber' | 'email'>) => Promise<void>;
+  onUpdateMember: (memberId: string, changes: Pick<Member, 'membershipNumber' | 'name' | 'idNumber' | 'phoneNumber' | 'email'>) => Promise<void>;
   onChangeMemberStatus: (memberId: string, action: 'suspend' | 'activate', reason?: string) => Promise<void>;
   currentUserRole: UserRole;
-  currentUserId: string;
   transactions: Transaction[];
 }
 
-export default function MembersView({ members, onAddMember, onDeleteMember, onUpdateMember, onChangeMemberStatus, currentUserRole, currentUserId, transactions }: MembersViewProps) {
+export default function MembersView({ members, onAddMember, onDeleteMember, onUpdateMember, onChangeMemberStatus, currentUserRole, transactions }: MembersViewProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'All' | Member['status']>('All');
   const [showAddModal, setShowAddModal] = useState(false);
@@ -65,7 +64,7 @@ export default function MembersView({ members, onAddMember, onDeleteMember, onUp
   const [deletingMemberId, setDeletingMemberId] = useState<string | null>(null);
   const [memberActionMessage, setMemberActionMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
   const [editingMember, setEditingMember] = useState<Member | null>(null);
-  const [editDraft, setEditDraft] = useState({ name: '', idNumber: '', email: '', phoneNumber: '' });
+  const [editDraft, setEditDraft] = useState({ membershipNumber: '', name: '', idNumber: '', email: '', phoneNumber: '' });
   const [isSavingMember, setIsSavingMember] = useState(false);
 
   // New Member Form State
@@ -81,8 +80,7 @@ export default function MembersView({ members, onAddMember, onDeleteMember, onUp
   // Role validation
   const canRegister = currentUserRole === 'Chairman' || currentUserRole === 'Secretary' || currentUserRole === 'Treasurer';
   const canManageLifecycle = currentUserRole === 'Chairman' || currentUserRole === 'Secretary';
-  const canDeleteMember = (member: Member) => currentUserRole === 'Chairman'
-    || (currentUserRole === 'Secretary' && member.createdByUserId === currentUserId);
+  const canDeleteMember = currentUserRole === 'Chairman' || currentUserRole === 'Secretary';
 
   const filteredMembers = members.filter(member => {
     const matchesSearch = member.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
@@ -247,13 +245,17 @@ export default function MembersView({ members, onAddMember, onDeleteMember, onUp
 
   const openEditMember = (member: Member) => {
     setEditingMember(member);
-    setEditDraft({ name: member.name, idNumber: member.idNumber, email: member.email || '', phoneNumber: member.phoneNumber });
+    setEditDraft({ membershipNumber: member.membershipNumber || '', name: member.name, idNumber: member.idNumber, email: member.email || '', phoneNumber: member.phoneNumber });
     setError('');
   };
 
   const saveEditedMember = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!editingMember) return;
+    if (!isValidMemberNumber(editDraft.membershipNumber)) {
+      setError('Member number must contain letters and numbers only.');
+      return;
+    }
     setIsSavingMember(true);
     try {
       await onUpdateMember(editingMember.id, editDraft);
@@ -431,7 +433,7 @@ export default function MembersView({ members, onAddMember, onDeleteMember, onUp
                           <div className="mt-2 flex justify-end gap-1">
                             <button type="button" title="Edit member details" onClick={(event) => { event.stopPropagation(); openEditMember(member); }} className="rounded border border-slate-200 p-1 text-slate-600 hover:bg-slate-100"><Pencil className="h-3.5 w-3.5" /></button>
                             <button type="button" title={member.status === 'Active' ? 'Suspend member' : 'Activate member'} onClick={(event) => { event.stopPropagation(); void changeStatus(member); }} className={`rounded border p-1 ${member.status === 'Active' ? 'border-amber-200 text-amber-700 hover:bg-amber-50' : 'border-emerald-200 text-emerald-700 hover:bg-emerald-50'}`}>{member.status === 'Active' ? <PauseCircle className="h-3.5 w-3.5" /> : <PlayCircle className="h-3.5 w-3.5" />}</button>
-                            <button type="button" disabled={!canDeleteMember(member) || deletingMemberId === member.id} title={canDeleteMember(member) ? 'Delete member' : 'A Secretary can delete only members they registered'} onClick={(event) => { event.stopPropagation(); void handleDeleteMember(member); }} className="rounded border border-rose-200 p-1 text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-30"><Trash2 className="h-3.5 w-3.5" /></button>
+                            <button type="button" disabled={!canDeleteMember || deletingMemberId === member.id} title={canDeleteMember ? 'Delete member' : 'Only the Chairman or Secretary can delete members'} onClick={(event) => { event.stopPropagation(); void handleDeleteMember(member); }} className="rounded border border-rose-200 p-1 text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-30"><Trash2 className="h-3.5 w-3.5" /></button>
                           </div>
                         )}
                       </div>
@@ -508,7 +510,7 @@ export default function MembersView({ members, onAddMember, onDeleteMember, onUp
 
                   {/* Actions Deck */}
                   <div className="flex space-x-2 w-full md:w-auto self-stretch md:self-auto justify-end">
-                    {canDeleteMember(activeSelectedMember) && (
+                    {canDeleteMember && (
                       <button
                         type="button"
                         disabled={deletingMemberId === activeSelectedMember.id}
@@ -760,6 +762,7 @@ export default function MembersView({ members, onAddMember, onDeleteMember, onUp
             <h3 className="font-display text-lg font-black text-slate-900">Edit member details</h3>
             <p className="mt-1 text-xs text-slate-500">Correct contact or identity details for {editingMember.membershipNumber} · {editingMember.name}.</p>
             <form onSubmit={saveEditedMember} className="mt-5 space-y-4">
+              <div><label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">Member number</label><input required value={editDraft.membershipNumber} onChange={event => setEditDraft(current => ({ ...current, membershipNumber: sanitizeMemberNumber(event.target.value) }))} pattern="[A-Za-z0-9]+" maxLength={30} title="Letters and numbers only." className="w-full rounded-xl border border-emerald-200 bg-emerald-50/40 px-3 py-2.5 font-mono text-sm font-bold uppercase outline-none focus:border-emerald-600" /><p className="mt-1 text-[9px] text-slate-500">Must remain unique across every member record.</p></div>
               <div><label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">Full name</label><input required value={editDraft.name} onChange={event => setEditDraft(current => ({ ...current, name: sanitizePersonName(event.target.value) }))} className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-emerald-600" /></div>
               <div className="grid grid-cols-2 gap-3">
                 <div><label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">National ID</label><input required value={editDraft.idNumber} onChange={event => setEditDraft(current => ({ ...current, idNumber: sanitizeIntegerInput(event.target.value, 12) }))} className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-emerald-600" /></div>
@@ -798,7 +801,7 @@ export default function MembersView({ members, onAddMember, onDeleteMember, onUp
                   placeholder="e.g. SOW001 or 1042"
                   className="w-full p-2.5 border-2 border-emerald-200 bg-emerald-50/40 rounded text-sm font-mono font-bold uppercase focus:outline-none focus:border-emerald-600"
                 />
-                <p className="mt-1 text-[9px] text-slate-500">Permanent unique identifier. It cannot duplicate another member number.</p>
+                <p className="mt-1 text-[9px] text-slate-500">Unique identifier. It cannot duplicate another member number.</p>
               </div>
               <div>
                 <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">

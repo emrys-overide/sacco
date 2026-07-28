@@ -307,13 +307,26 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
     method: 'PATCH',
     token: changedSecretaryLogin.token,
     body: {
+      membershipNumber: 'SEC002',
       name: 'Secretary Corrected Member',
       idNumber: '88889999',
       email: 'secretary.corrected@example.com',
       phoneNumber: '0755555566'
     }
   });
+  assert.equal(editedSecretaryMember.membershipNumber, 'SEC002');
   assert.equal(editedSecretaryMember.phoneNumber, '0755555566');
+  await request(`/api/members/${secretaryOwnedMember.id}`, 409, {
+    method: 'PATCH',
+    token: changedSecretaryLogin.token,
+    body: {
+      membershipNumber: firstMember.membershipNumber,
+      name: 'Secretary Corrected Member',
+      idNumber: '88889999',
+      email: 'secretary.corrected@example.com',
+      phoneNumber: '0755555566'
+    }
+  });
   await request(`/api/members/${secretaryOwnedMember.id}/status`, 200, {
     method: 'PATCH',
     token: changedSecretaryLogin.token,
@@ -412,7 +425,9 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       idNumber: '55556666',
       email: 'removable.member@example.com',
       phoneNumber: '0733333333',
-      status: 'Active'
+      status: 'Active',
+      initialLoanAmount: 500,
+      loanBalance: 500
     }
   });
   let removableMemberToken = '';
@@ -444,13 +459,9 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       body: { action: 'activate' }
     });
   }
-  await request(`/api/members/${removableMember.id}`, 403, {
-    method: 'DELETE',
-    token: secretaryLogin.token
-  });
   const deletedMember = await request(`/api/members/${removableMember.id}`, 200, {
     method: 'DELETE',
-    token: loginToken
+    token: secretaryLogin.token
   });
   assert.equal(deletedMember.deleted, true);
   const membersAfterDeletion = await request<any[]>('/api/members', 200, { token: loginToken });
@@ -594,10 +605,6 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
   const correctedMember = afterCorrection.find(member => member.id === firstMember.id);
   assert.equal(correctedMember.sharesAmount, 360);
   assert.equal(correctedMember.savingsAmount, 840);
-  await request(`/api/members/${firstMember.id}`, 409, {
-    method: 'DELETE',
-    token: loginToken
-  });
 
   const reversal = await request(`/api/transactions/${corrected.id}/reverse`, 201, { method: 'POST', token });
   assert.equal(reversal.type, 'Debit');
