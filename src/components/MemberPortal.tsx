@@ -29,6 +29,7 @@ interface MemberPortalProps {
   data: MemberPortalData;
   token: string;
   onApplicationCreated: () => void | Promise<void>;
+  onAccountSuspended: () => void;
 }
 
 const repaymentPeriods = [1, 2, 3, 6, 9, 12, 18, 24, 36, 48, 60, 72, 84];
@@ -132,6 +133,7 @@ export default function MemberPortal({
   data,
   token,
   onApplicationCreated,
+  onAccountSuspended,
 }: MemberPortalProps) {
   const [amount, setAmount] = useState("");
   const [loanType, setLoanType] = useState("General");
@@ -272,6 +274,19 @@ export default function MemberPortal({
           ? error.message
           : "Password could not be changed.",
       );
+    }
+  };
+
+  const suspendOwnAccount = async () => {
+    const reason = window.prompt("Why are you leaving or suspending your SACCO membership? This reason is optional.");
+    if (reason === null) return;
+    if (!window.confirm("Suspend your member account? You will be signed out and a Secretary must reactivate it before you can return.")) return;
+    setSettingsMessage("");
+    try {
+      await postSaccoJson("/api/member-portal/suspend", { reason }, token);
+      onAccountSuspended();
+    } catch (error) {
+      setSettingsMessage(error instanceof Error ? error.message : "Your account could not be suspended.");
     }
   };
 
@@ -928,6 +943,11 @@ export default function MemberPortal({
                 Change password
               </button>
             </form>
+            <div className="mt-6 border-t border-rose-100 pt-5">
+              <h3 className="text-sm font-black text-slate-900">Leave or pause membership</h3>
+              <p className="mt-1 text-xs leading-5 text-slate-500">Suspend your account if you are leaving the SACCO or need a temporary pause. A Secretary can reactivate it later.</p>
+              <button type="button" onClick={() => void suspendOwnAccount()} className="mt-3 w-full rounded-xl border border-rose-200 bg-rose-50 px-3 py-2.5 text-sm font-bold text-rose-700 hover:bg-rose-100">Suspend my account</button>
+            </div>
             {settingsMessage && (
               <p className="mt-4 rounded-xl bg-slate-50 p-3 text-xs text-slate-700">
                 {settingsMessage}

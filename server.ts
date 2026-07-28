@@ -674,6 +674,77 @@ function loginAttemptKey(requestIp: string | undefined, identifier: unknown): st
   return crypto.createHash('sha256').update(`${requestIp || 'unknown'}:${normalizedIdentifier}`).digest('hex');
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function memberInactivityDays(member: Member, now = Date.now()): number {
+  const baseline = member.lastDailyCollectionAt || member.dateRegistered;
+  const time = baseline ? new Date(baseline).getTime() : now;
+  return Math.max(0, Math.floor((now - time) / DAY_MS));
+}
+
+async function processMemberInactivity(): Promise<void> {
+  if (postgresPool) {
+    const warningCandidates = await postgresPool.query(
+      `UPDATE members
+       SET status = 'Inactive', inactivity_warned_at = now(), updated_at = now()
+       WHERE deleted_at IS NULL
+         AND status = 'Active'
+         AND COALESCE(last_daily_collection_at, date_registered::timestamptz, created_at) <= now() - interval '30 days'
+         AND COALESCE(last_daily_collection_at, date_registered::timestamptz, created_at) > now() - interval '90 days'
+       RETURNING id, member_number, full_name`
+    );
+    for (const member of warningCandidates.rows) {
+      await notifyMember(String(member.id), {
+        category: 'MEMBER_INACTIVITY_WARNING',
+        title: 'Daily collections overdue',
+        message: `No daily collection has been recorded for 30 days. Your member account (${member.member_number || member.full_name}) is now inactive and will be deactivated after 90 days without a collection.`,
+        destination: 'My Account'
+      });
+    }
+
+    const deactivated = await postgresPool.query(
+      `UPDATE members
+       SET status = 'Pending', suspended_at = now(),
+           suspension_reason = 'Automatically deactivated after 90 days without a daily collection',
+           updated_at = now()
+       WHERE deleted_at IS NULL
+         AND status IN ('Active', 'Inactive')
+         AND COALESCE(last_daily_collection_at, date_registered::timestamptz, created_at) <= now() - interval '90 days'
+       RETURNING id`
+    );
+    if (deactivated.rowCount) {
+      await postgresPool.query(
+        `UPDATE users
+         SET account_status = 'Disabled', updated_at = now()
+         WHERE role = 'Member' AND linked_member_id = ANY($1::uuid[])`,
+        [deactivated.rows.map(row => row.id)]
+      );
+    }
+    return;
+  }
+
+  const now = Date.now();
+  for (const member of localStore.members) {
+    const days = memberInactivityDays(member, now);
+    member.inactivityDays = days;
+    if (days >= 90 && (member.status === 'Active' || member.status === 'Inactive')) {
+      member.status = 'Pending';
+      member.suspendedAt = new Date(now).toISOString();
+      member.suspensionReason = 'Automatically deactivated after 90 days without a daily collection';
+      localStore.users.filter(user => user.role === 'Member' && user.linkedMemberId === member.id)
+        .forEach(user => { user.accountStatus = 'Disabled'; });
+    } else if (days >= 30 && member.status === 'Active') {
+      member.status = 'Inactive';
+      await notifyMember(member.id, {
+        category: 'MEMBER_INACTIVITY_WARNING',
+        title: 'Daily collections overdue',
+        message: 'No daily collection has been recorded for 30 days. Your account will be deactivated after 90 days without a collection.',
+        destination: 'My Account'
+      });
+    }
+  }
+}
+
 function loginIpAttemptKey(requestIp: string | undefined): string {
   return crypto.createHash('sha256').update(`ip:${requestIp || 'unknown'}`).digest('hex');
 }
@@ -1402,6 +1473,13 @@ async function createLedgerTransaction(input: LedgerInput): Promise<Transaction>
       }
 
       applyLocalMemberBalance(tx);
+      if (tx.memberId && tx.category === 'Daily Contribution' && tx.type === 'Credit' && !tx.reversalOf) {
+        const member = localStore.members.find(item => item.id === tx.memberId);
+        if (member) {
+          member.lastDailyCollectionAt = tx.timestamp;
+          member.inactivityDays = 0;
+        }
+      }
       localStore.transactions.push(tx);
       return tx;
     })());
@@ -1674,7 +1752,7 @@ async function validateLedgerRegistration(tx: Transaction): Promise<void> {
 
     const member = memberResult.rows[0];
     if (member.status !== 'Active') {
-      throw new HttpError(409, `Member "${member.full_name}" is not active.`, 'MEMBER_NOT_ACTIVE');
+      throw new HttpError(409, `Member "${member.full_name}" is ${String(member.status).toLowerCase()}. Activate the member before recording a collection.`, 'MEMBER_ACTIVATION_REQUIRED');
     }
     tx.memberId = String(member.id);
     tx.memberName = member.full_name;
@@ -1710,7 +1788,7 @@ async function validateLedgerRegistration(tx: Transaction): Promise<void> {
     throw new HttpError(400, `Name "${typedName || tx.memberId}" is not registered. Register the member first.`, 'MEMBER_NAME_NOT_REGISTERED');
   }
   if (member.status !== 'Active') {
-    throw new HttpError(409, `Member "${member.name}" is not active.`, 'MEMBER_NOT_ACTIVE');
+    throw new HttpError(409, `Member "${member.name}" is ${member.status.toLowerCase()}. Activate the member before recording a collection.`, 'MEMBER_ACTIVATION_REQUIRED');
   }
   tx.memberId = member.id;
   tx.memberName = member.name;
@@ -2239,6 +2317,10 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
     if (!publicUrl.startsWith('https://')) throw new Error('APP_URL must be HTTPS when Co-op Bank IPN is enabled in production.');
   }
   await resumePendingCoopBankEvents();
+  await processMemberInactivity();
+  if (options.runBackgroundProcessor !== false) {
+    startBackgroundProcessor(processMemberInactivity, 6 * 60 * 60 * 1000);
+  }
   if (options.runBackgroundProcessor !== false && process.env.BACKGROUND_PROCESSOR_ENABLED === 'true') {
     startBackgroundProcessor(resumePendingCoopBankEvents);
   }
@@ -2565,6 +2647,22 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
         };
         localStore.users.push(user);
         res.status(201).json({ id: user.id });
+      } catch (error: any) {
+        sendApiError(res, error);
+      }
+    });
+    app.post('/api/testing/member-inactivity', authenticateSaccoUser, requirePermission('members.write'), async (req, res) => {
+      try {
+        if (postgresPool || !allowInMemoryStore) throw new HttpError(404, 'Not found.', 'NOT_FOUND');
+        const member = localStore.members.find(item => item.id === String(req.body?.memberId || ''));
+        const days = Number(req.body?.days);
+        if (!member || !Number.isInteger(days) || days < 0 || days > 3650) {
+          throw new HttpError(400, 'Invalid inactivity fixture.', 'INVALID_TEST_FIXTURE');
+        }
+        member.status = 'Active';
+        member.lastDailyCollectionAt = new Date(Date.now() - days * DAY_MS).toISOString();
+        await processMemberInactivity();
+        res.json(member);
       } catch (error: any) {
         sendApiError(res, error);
       }
@@ -3513,6 +3611,7 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
   // API 3: Get Sacco Members
   app.get('/api/members', async (req, res) => {
     try {
+      await processMemberInactivity();
       const user = requireAuthenticatedUser(req);
       if (isMemberUser(user)) {
         const portal = await getMemberPortalData(user);
@@ -3534,6 +3633,7 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
   // API 4: Register Sacco Member (Authorized roles: Chairman, Secretary, Treasurer)
   app.post('/api/members', requirePermission('members.write'), async (req, res) => {
     try {
+      const creator = requireAuthenticatedUser(req);
       const memberData = req.body;
       if (!memberData.membershipNumber || !memberData.name || !memberData.idNumber) {
         return res.status(400).json({ error: 'Member Number, Name and National ID Number are required.', code: 'MEMBER_NUMBER_REQUIRED' });
@@ -3586,11 +3686,13 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
         sharesAmount: Number(memberData.sharesAmount) || 0,
         savingsAmount: Number(memberData.savingsAmount) || 0,
         initialLoanAmount: Math.max(0, Number(memberData.initialLoanAmount ?? memberData.loanBalance) || 0),
-        loanBalance: Math.max(0, Number(memberData.loanBalance) || 0)
+        loanBalance: Math.max(0, Number(memberData.loanBalance) || 0),
+        createdByUserId: creator.id,
+        lastDailyCollectionAt: new Date().toISOString()
       };
 
       if (postgresPool) {
-        const created = await createPostgresMember(postgresPool, newMember);
+        const created = await createPostgresMember(postgresPool, newMember, creator.id);
         await recordAuditLog(req, 'MEMBER_CREATED', 'members', created.id, undefined, created);
         return res.status(201).json(created);
       }
@@ -3614,13 +3716,14 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
     }
   });
 
-  // Removing a member is a Chairman-only account-lifecycle action. Financial
+  // Removing a member retains financial history. A Secretary may remove only
+  // a member they created; the Chairman may remove any eligible member.
   // history is retained under an anonymized, inactive profile so ledger and
   // loan audit trails are never silently destroyed.
-  app.delete('/api/members/:id', requirePermission('users.write'), async (req, res) => {
-    const chairman = requireAuthenticatedUser(req);
-    if (chairman.role !== 'Chairman') {
-      return sendApiError(res, new HttpError(403, 'Only the Chairman can delete a member and their account.', 'MEMBER_DELETE_CHAIRMAN_ONLY'));
+  app.delete('/api/members/:id', requirePermission('members.write'), async (req, res) => {
+    const actor = requireAuthenticatedUser(req);
+    if (actor.role !== 'Chairman' && actor.role !== 'Secretary') {
+      return sendApiError(res, new HttpError(403, 'Only the Chairman or the Secretary who created this member can delete the account.', 'MEMBER_DELETE_ACCESS_DENIED'));
     }
 
     const memberId = String(req.params.id || '').trim();
@@ -3633,6 +3736,9 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
         const visibleMember = await getPostgresMember(postgresPool, memberId);
         if (!visibleMember) throw new HttpError(404, 'Member was not found.', 'MEMBER_NOT_FOUND');
         before = visibleMember;
+        if (actor.role === 'Secretary' && visibleMember.createdByUserId !== actor.id) {
+          throw new HttpError(403, 'A Secretary can delete only members they personally registered.', 'MEMBER_DELETE_NOT_CREATOR');
+        }
         if (visibleMember.sharesAmount > 0.005 || visibleMember.savingsAmount > 0.005 || Number(visibleMember.loanBalance || 0) > 0.005) {
           throw new HttpError(409, 'Settle the member’s savings, shares, and outstanding loan balance before deleting the member.', 'MEMBER_HAS_UNSETTLED_BALANCES');
         }
@@ -3653,7 +3759,7 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
           await client.query(
             `UPDATE driver_assignments
              SET status = 'Closed', end_date_time = now(),
-                 reason = COALESCE(NULLIF(reason, ''), 'Member removed by Chairman'), updated_at = now()
+                 reason = COALESCE(NULLIF(reason, ''), 'Member account removed by authorised officer'), updated_at = now()
              WHERE owner_member_id = $1 AND status = 'Active'`,
             [memberId]
           );
@@ -3679,7 +3785,7 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
                  national_id = NULL, phone = NULL, email = NULL, status = 'Inactive',
                  deleted_at = now(), deleted_by = $2, updated_at = now()
              WHERE id = $1`,
-            [memberId, chairman.id]
+            [memberId, actor.id]
           );
           await client.query('COMMIT');
           committed = true;
@@ -3698,6 +3804,9 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
         const memberIndex = localStore.members.findIndex(member => member.id === memberId);
         if (memberIndex < 0) throw new HttpError(404, 'Member was not found.', 'MEMBER_NOT_FOUND');
         before = { ...localStore.members[memberIndex] };
+        if (actor.role === 'Secretary' && before.createdByUserId !== actor.id) {
+          throw new HttpError(403, 'A Secretary can delete only members they personally registered.', 'MEMBER_DELETE_NOT_CREATOR');
+        }
         if (before.sharesAmount > 0.005 || before.savingsAmount > 0.005 || Number(before.loanBalance || 0) > 0.005) {
           throw new HttpError(409, 'Settle the member’s savings, shares, and outstanding loan balance before deleting the member.', 'MEMBER_HAS_UNSETTLED_BALANCES');
         }
@@ -3804,6 +3913,58 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
 
       await recordAuditLog(req, 'VEHICLE_CREATED', 'vehicles', newVehicle.id, undefined, newVehicle);
       res.status(201).json(newVehicle);
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.post('/api/vehicles/:id/offboard', requirePermission('vehicles.write'), async (req, res) => {
+    try {
+      const actor = requireAuthenticatedUser(req);
+      if (actor.role !== 'Chairman' && actor.role !== 'Secretary') {
+        throw new HttpError(403, 'Only the Chairman or Secretary can offboard a matatu.', 'VEHICLE_OFFBOARD_ACCESS_DENIED');
+      }
+      const vehicleId = String(req.params.id || '').trim();
+      const reason = String(req.body?.reason || '').trim().slice(0, 1000);
+      let updated: Vehicle;
+      if (postgresPool) {
+        const client = await postgresPool.connect();
+        try {
+          await client.query('BEGIN');
+          const result = await client.query(
+            `UPDATE vehicles
+             SET status = 'Exited', offboarded_at = now(), offboarded_by = $2,
+                 offboarding_reason = NULLIF($3, ''), updated_at = now()
+             WHERE id = $1 AND status <> 'Exited'
+             RETURNING *`,
+            [vehicleId, actor.id, reason]
+          );
+          if (!result.rowCount) throw new HttpError(409, 'This matatu is already offboarded or was not found.', 'VEHICLE_ALREADY_OFFBOARDED');
+          await client.query(
+            `UPDATE driver_assignments
+             SET status = 'Closed', end_date_time = now(),
+                 reason = COALESCE(NULLIF($2, ''), 'Vehicle offboarded'), updated_at = now()
+             WHERE vehicle_id = $1 AND status = 'Active'`,
+            [vehicleId, reason]
+          );
+          await client.query('COMMIT');
+        } catch (error) {
+          await client.query('ROLLBACK');
+          throw error;
+        } finally {
+          client.release();
+        }
+        updated = (await listPostgresVehicles(postgresPool)).find(vehicle => vehicle.id === vehicleId)!;
+      } else {
+        const vehicle = localStore.vehicles.find(item => item.id === vehicleId);
+        if (!vehicle || vehicle.status === 'Exited') throw new HttpError(409, 'This matatu is already offboarded or was not found.', 'VEHICLE_ALREADY_OFFBOARDED');
+        vehicle.status = 'Exited';
+        vehicle.offboardedAt = new Date().toISOString();
+        vehicle.offboardingReason = reason || undefined;
+        updated = vehicle;
+      }
+      await recordAuditLog(req, 'VEHICLE_OFFBOARDED', 'vehicles', vehicleId, undefined, { reason });
+      res.json(updated);
     } catch (error: any) {
       sendApiError(res, error);
     }
@@ -3932,7 +4093,7 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
         return res.json({
           totalTransactionsCount: portal.transactions.length,
           totalMembersCount: 1,
-          totalFleetCount: portal.vehicles.length,
+          totalFleetCount: portal.vehicles.filter(vehicle => vehicle.status !== 'Exited').length,
           netCashFlow: totalCredits - totalDebits,
           totalCapitalReserve: portal.member.sharesAmount,
           totalMemberSavings: portal.member.savingsAmount,
@@ -3954,7 +4115,7 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
         return res.json({
           totalTransactionsCount: transactions.length,
           totalMembersCount: members.length,
-          totalFleetCount: vehicles.length,
+          totalFleetCount: vehicles.filter(vehicle => vehicle.status !== 'Exited').length,
           netCashFlow: totalCredits - totalDebits,
           totalCapitalReserve: members.reduce((sum, member) => sum + member.sharesAmount, 0),
           totalMemberSavings: members.reduce((sum, member) => sum + member.savingsAmount, 0),
@@ -3983,7 +4144,7 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
           return {
             totalTransactionsCount: localStore.transactions.length,
             totalMembersCount: localStore.members.length,
-            totalFleetCount: localStore.vehicles.length,
+            totalFleetCount: localStore.vehicles.filter(vehicle => vehicle.status !== 'Exited').length,
             netCashFlow: totalCredits - totalDebits,
             totalCapitalReserve: totalShares,
             totalMemberSavings: totalSavings,
@@ -4155,6 +4316,170 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
     });
     console.error('[Sacco API] Unhandled request failure.');
     return res.status(500).json({ error: 'Unexpected server error.', code: 'INTERNAL_ERROR' });
+  });
+
+  app.patch('/api/members/:id', requirePermission('members.write'), async (req, res) => {
+    try {
+      const actor = requireAuthenticatedUser(req);
+      if (actor.role !== 'Chairman' && actor.role !== 'Secretary') {
+        throw new HttpError(403, 'Only the Chairman or Secretary can edit member details.', 'MEMBER_EDIT_ACCESS_DENIED');
+      }
+      const memberId = String(req.params.id || '').trim();
+      const name = sanitizePersonName(req.body?.name).trim();
+      const idNumber = sanitizeIntegerInput(req.body?.idNumber, 12);
+      const phoneNumber = sanitizePhoneNumber(req.body?.phoneNumber);
+      const email = normalizedEmail(req.body?.email);
+      if (!isValidPersonName(name) || !idNumber || !isValidPhoneNumber(phoneNumber) || !/^\S+@\S+\.\S+$/.test(email)) {
+        throw new HttpError(400, 'Enter a valid name, National ID, phone number and email address.', 'MEMBER_DETAILS_INVALID');
+      }
+      let updated: Member;
+      if (postgresPool) {
+        const client = await postgresPool.connect();
+        try {
+          await client.query('BEGIN');
+          const existing = await client.query('SELECT * FROM members WHERE id = $1 AND deleted_at IS NULL FOR UPDATE', [memberId]);
+          if (!existing.rowCount) throw new HttpError(404, 'Member was not found.', 'MEMBER_NOT_FOUND');
+          const conflict = await client.query(
+            `SELECT 1 FROM members
+             WHERE id <> $1 AND deleted_at IS NULL AND (national_id = $2 OR lower(COALESCE(email, '')) = $3)
+             LIMIT 1`,
+            [memberId, idNumber, email]
+          );
+          if (conflict.rowCount) throw new HttpError(409, 'That National ID or email is already used by another member.', 'MEMBER_DETAILS_CONFLICT');
+          await client.query(
+            `UPDATE members
+             SET full_name = $2, national_id = $3, phone = $4, email = $5, updated_at = now()
+             WHERE id = $1`,
+            [memberId, name, idNumber, phoneNumber, email]
+          );
+          const userConflict = await client.query(
+            `SELECT 1 FROM users WHERE linked_member_id IS DISTINCT FROM $1::uuid AND lower(email) = $2 LIMIT 1`,
+            [memberId, email]
+          );
+          if (userConflict.rowCount) throw new HttpError(409, 'That email is already used by another SACCO login.', 'MEMBER_EMAIL_CONFLICT');
+          await client.query(
+            `UPDATE users SET full_name = $2, phone = $3, email = $4, updated_at = now()
+             WHERE role = 'Member' AND linked_member_id = $1`,
+            [memberId, name, phoneNumber, email]
+          );
+          await client.query('COMMIT');
+        } catch (error) {
+          await client.query('ROLLBACK');
+          throw error;
+        } finally {
+          client.release();
+        }
+        updated = (await getPostgresMember(postgresPool, memberId))!;
+      } else {
+        const member = localStore.members.find(item => item.id === memberId);
+        if (!member) throw new HttpError(404, 'Member was not found.', 'MEMBER_NOT_FOUND');
+        if (localStore.members.some(item => item.id !== memberId && (item.idNumber === idNumber || normalizedEmail(item.email) === email))) {
+          throw new HttpError(409, 'That National ID or email is already used by another member.', 'MEMBER_DETAILS_CONFLICT');
+        }
+        Object.assign(member, { name, idNumber, phoneNumber, email });
+        localStore.users.filter(user => user.role === 'Member' && user.linkedMemberId === memberId)
+          .forEach(user => Object.assign(user, { name, phone: phoneNumber, email }));
+        updated = member;
+      }
+      await recordAuditLog(req, 'MEMBER_DETAILS_UPDATED', 'members', memberId, undefined, { name, idNumber, phoneNumber, email });
+      res.json(updated);
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.patch('/api/members/:id/status', requirePermission('members.write'), async (req, res) => {
+    try {
+      const actor = requireAuthenticatedUser(req);
+      if (actor.role !== 'Chairman' && actor.role !== 'Secretary') {
+        throw new HttpError(403, 'Only the Chairman or Secretary can suspend or reactivate members.', 'MEMBER_STATUS_ACCESS_DENIED');
+      }
+      const memberId = String(req.params.id || '').trim();
+      const action = String(req.body?.action || '').trim();
+      const reason = String(req.body?.reason || '').trim().slice(0, 1000);
+      if (action !== 'suspend' && action !== 'activate') {
+        throw new HttpError(400, 'Choose suspend or activate.', 'MEMBER_STATUS_ACTION_INVALID');
+      }
+      let updated: Member;
+      if (postgresPool) {
+        const status = action === 'activate' ? 'Active' : 'Pending';
+        const result = await postgresPool.query(
+          `UPDATE members
+           SET status = $2::member_status,
+               suspended_at = CASE WHEN $2 = 'Pending' THEN now() ELSE NULL END,
+               suspended_by = CASE WHEN $2 = 'Pending' THEN $3::uuid ELSE NULL END,
+               suspension_reason = CASE WHEN $2 = 'Pending' THEN NULLIF($4, '') ELSE NULL END,
+               last_daily_collection_at = CASE WHEN $2 = 'Active' THEN now() ELSE last_daily_collection_at END,
+               inactivity_warned_at = CASE WHEN $2 = 'Active' THEN NULL ELSE inactivity_warned_at END,
+               updated_at = now()
+           WHERE id = $1 AND deleted_at IS NULL
+           RETURNING id`,
+          [memberId, status, actor.id, reason]
+        );
+        if (!result.rowCount) throw new HttpError(404, 'Member was not found.', 'MEMBER_NOT_FOUND');
+        await postgresPool.query(
+          `UPDATE users
+           SET account_status = $2, is_active = TRUE, updated_at = now()
+           WHERE role = 'Member' AND linked_member_id = $1`,
+          [memberId, action === 'activate' ? 'Active' : 'Suspended']
+        );
+        updated = (await getPostgresMember(postgresPool, memberId))!;
+      } else {
+        const member = localStore.members.find(item => item.id === memberId);
+        if (!member) throw new HttpError(404, 'Member was not found.', 'MEMBER_NOT_FOUND');
+        member.status = action === 'activate' ? 'Active' : 'Pending';
+        member.suspensionReason = action === 'suspend' ? reason || undefined : undefined;
+        member.suspendedAt = action === 'suspend' ? new Date().toISOString() : undefined;
+        if (action === 'activate') member.lastDailyCollectionAt = new Date().toISOString();
+        localStore.users.filter(user => user.role === 'Member' && user.linkedMemberId === memberId)
+          .forEach(user => { user.accountStatus = action === 'activate' ? 'Active' : 'Suspended'; user.isActive = true; });
+        updated = member;
+      }
+      await recordAuditLog(req, action === 'activate' ? 'MEMBER_REACTIVATED' : 'MEMBER_SUSPENDED', 'members', memberId, undefined, { reason });
+      res.json(updated);
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.post('/api/member-portal/suspend', requirePermission('member.portal.read'), async (req, res) => {
+    try {
+      const user = requireAuthenticatedUser(req);
+      if (!isMemberUser(user)) throw new HttpError(403, 'Only a member can suspend their own account.', 'MEMBER_SELF_SUSPEND_ONLY');
+      const memberId = requireLinkedMember(user);
+      const reason = String(req.body?.reason || '').trim().slice(0, 1000);
+      if (postgresPool) {
+        await postgresPool.query(
+          `UPDATE members
+           SET status = 'Pending', suspended_at = now(), suspended_by = $2,
+               suspension_reason = NULLIF($3, ''), updated_at = now()
+           WHERE id = $1 AND deleted_at IS NULL`,
+          [memberId, user.id, reason]
+        );
+        await postgresPool.query(
+          `UPDATE users SET account_status = 'Suspended', updated_at = now() WHERE id = $1`,
+          [user.id]
+        );
+      } else {
+        const member = localStore.members.find(item => item.id === memberId);
+        if (!member) throw new HttpError(404, 'Member was not found.', 'MEMBER_NOT_FOUND');
+        member.status = 'Pending';
+        member.suspensionReason = reason || undefined;
+        member.suspendedAt = new Date().toISOString();
+        const account = localStore.users.find(item => item.id === user.id);
+        if (account) account.accountStatus = 'Suspended';
+      }
+      await notifyRole('Secretary', {
+        category: 'MEMBER_SELF_SUSPENDED',
+        title: 'Member requested suspension',
+        message: `${user.name} suspended their member account${reason ? `: ${reason}` : '.'}`,
+        destination: 'Members'
+      });
+      await recordAuditLog(req, 'MEMBER_SELF_SUSPENDED', 'members', memberId, undefined, { reason });
+      res.json({ suspended: true });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
   });
 
   app.use('/api', (req, res) => {

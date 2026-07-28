@@ -26,7 +26,10 @@ import {
   Sparkles,
   ClipboardCheck,
   Building,
-  Trash2
+  Trash2,
+  Pencil,
+  PauseCircle,
+  PlayCircle
 } from 'lucide-react';
 import {
   isValidPersonName,
@@ -44,13 +47,16 @@ interface MembersViewProps {
   members: Member[];
   onAddMember: (newMember: Omit<Member, 'id' | 'dateRegistered' | 'sharesAmount' | 'savingsAmount'>) => Promise<void>;
   onDeleteMember: (memberId: string) => Promise<void>;
+  onUpdateMember: (memberId: string, changes: Pick<Member, 'name' | 'idNumber' | 'phoneNumber' | 'email'>) => Promise<void>;
+  onChangeMemberStatus: (memberId: string, action: 'suspend' | 'activate', reason?: string) => Promise<void>;
   currentUserRole: UserRole;
+  currentUserId: string;
   transactions: Transaction[];
 }
 
-export default function MembersView({ members, onAddMember, onDeleteMember, currentUserRole, transactions }: MembersViewProps) {
+export default function MembersView({ members, onAddMember, onDeleteMember, onUpdateMember, onChangeMemberStatus, currentUserRole, currentUserId, transactions }: MembersViewProps) {
   const [searchTerm, setSearchTerm] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'All' | 'Active' | 'Pending'>('All');
+  const [statusFilter, setStatusFilter] = useState<'All' | Member['status']>('All');
   const [showAddModal, setShowAddModal] = useState(false);
   const [selectedMemberId, setSelectedMemberId] = useState<string | null>(null);
   const [memberTxSearch, setMemberTxSearch] = useState('');
@@ -58,6 +64,9 @@ export default function MembersView({ members, onAddMember, onDeleteMember, curr
   const [copiedSuccess, setCopiedSuccess] = useState(false);
   const [deletingMemberId, setDeletingMemberId] = useState<string | null>(null);
   const [memberActionMessage, setMemberActionMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
+  const [editingMember, setEditingMember] = useState<Member | null>(null);
+  const [editDraft, setEditDraft] = useState({ name: '', idNumber: '', email: '', phoneNumber: '' });
+  const [isSavingMember, setIsSavingMember] = useState(false);
 
   // New Member Form State
   const [name, setName] = useState('');
@@ -71,6 +80,9 @@ export default function MembersView({ members, onAddMember, onDeleteMember, curr
 
   // Role validation
   const canRegister = currentUserRole === 'Chairman' || currentUserRole === 'Secretary' || currentUserRole === 'Treasurer';
+  const canManageLifecycle = currentUserRole === 'Chairman' || currentUserRole === 'Secretary';
+  const canDeleteMember = (member: Member) => currentUserRole === 'Chairman'
+    || (currentUserRole === 'Secretary' && member.createdByUserId === currentUserId);
 
   const filteredMembers = members.filter(member => {
     const matchesSearch = member.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
@@ -219,10 +231,7 @@ export default function MembersView({ members, onAddMember, onDeleteMember, curr
   };
 
   const handleDeleteMember = async (member: Member) => {
-    const confirmation = window.prompt(
-      `Delete ${member.name} and their login account? Their active profile will be removed, but financial history will remain for audit. Type DELETE to continue.`
-    );
-    if (confirmation !== 'DELETE') return;
+    if (!window.confirm(`Are you sure you want to delete ${member.name}'s account? Financial history will remain for audit.`)) return;
     setDeletingMemberId(member.id);
     setMemberActionMessage(null);
     try {
@@ -233,6 +242,40 @@ export default function MembersView({ members, onAddMember, onDeleteMember, curr
       setMemberActionMessage({ kind: 'error', text: caught instanceof Error ? caught.message : 'The member could not be deleted.' });
     } finally {
       setDeletingMemberId(null);
+    }
+  };
+
+  const openEditMember = (member: Member) => {
+    setEditingMember(member);
+    setEditDraft({ name: member.name, idNumber: member.idNumber, email: member.email || '', phoneNumber: member.phoneNumber });
+    setError('');
+  };
+
+  const saveEditedMember = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!editingMember) return;
+    setIsSavingMember(true);
+    try {
+      await onUpdateMember(editingMember.id, editDraft);
+      setMemberActionMessage({ kind: 'success', text: `${editDraft.name}'s details were updated.` });
+      setEditingMember(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Member details could not be updated.');
+    } finally {
+      setIsSavingMember(false);
+    }
+  };
+
+  const changeStatus = async (member: Member) => {
+    const activating = member.status !== 'Active';
+    const reason = activating ? undefined : window.prompt(`Why is ${member.name}'s account being suspended? This reason is optional.`) ?? undefined;
+    if (!activating && reason === undefined) return;
+    if (!window.confirm(`${activating ? 'Activate' : 'Suspend'} ${member.name}'s account?`)) return;
+    try {
+      await onChangeMemberStatus(member.id, activating ? 'activate' : 'suspend', reason);
+      setMemberActionMessage({ kind: 'success', text: `${member.name}'s account was ${activating ? 'activated' : 'suspended'}.` });
+    } catch (caught) {
+      setMemberActionMessage({ kind: 'error', text: caught instanceof Error ? caught.message : 'Member status could not be changed.' });
     }
   };
 
@@ -306,7 +349,7 @@ export default function MembersView({ members, onAddMember, onDeleteMember, curr
             </div>
 
             <div className="flex space-x-1 shrink-0 w-full md:w-auto">
-              {(['All', 'Active', 'Pending'] as const).map((filter) => (
+              {(['All', 'Active', 'Inactive', 'Pending', 'Suspended'] as const).map((filter) => (
                 <button
                   key={filter}
                   onClick={() => setStatusFilter(filter)}
@@ -338,13 +381,18 @@ export default function MembersView({ members, onAddMember, onDeleteMember, curr
                 filteredMembers.map((member) => {
                   const isActive = activeSelectedMember?.id === member.id;
                   return (
-                    <button
+                    <div
                       key={member.id}
+                      role="button"
+                      tabIndex={0}
                       onClick={() => {
                         setSelectedMemberId(member.id);
                         setMemberTxSearch('');
                       }}
-                      className={`w-full text-left p-4 transition-all flex items-center justify-between border-l-4 ${
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') setSelectedMemberId(member.id);
+                      }}
+                      className={`w-full text-left p-4 transition-all flex items-center justify-between gap-3 border-l-4 ${
                         isActive 
                           ? 'bg-slate-50 border-slate-900 shadow-inner' 
                           : 'border-transparent hover:bg-slate-50/50'
@@ -379,8 +427,15 @@ export default function MembersView({ members, onAddMember, onDeleteMember, curr
                         <p className="text-[9px] text-amber-700 font-mono uppercase mt-0.5">
                           Loan: KES {(member.loanBalance || 0).toLocaleString()}
                         </p>
+                        {canManageLifecycle && (
+                          <div className="mt-2 flex justify-end gap-1">
+                            <button type="button" title="Edit member details" onClick={(event) => { event.stopPropagation(); openEditMember(member); }} className="rounded border border-slate-200 p-1 text-slate-600 hover:bg-slate-100"><Pencil className="h-3.5 w-3.5" /></button>
+                            <button type="button" title={member.status === 'Active' ? 'Suspend member' : 'Activate member'} onClick={(event) => { event.stopPropagation(); void changeStatus(member); }} className={`rounded border p-1 ${member.status === 'Active' ? 'border-amber-200 text-amber-700 hover:bg-amber-50' : 'border-emerald-200 text-emerald-700 hover:bg-emerald-50'}`}>{member.status === 'Active' ? <PauseCircle className="h-3.5 w-3.5" /> : <PlayCircle className="h-3.5 w-3.5" />}</button>
+                            <button type="button" disabled={!canDeleteMember(member) || deletingMemberId === member.id} title={canDeleteMember(member) ? 'Delete member' : 'A Secretary can delete only members they registered'} onClick={(event) => { event.stopPropagation(); void handleDeleteMember(member); }} className="rounded border border-rose-200 p-1 text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-30"><Trash2 className="h-3.5 w-3.5" /></button>
+                          </div>
+                        )}
                       </div>
-                    </button>
+                    </div>
                   );
                 })
               ) : (
@@ -441,12 +496,19 @@ export default function MembersView({ members, onAddMember, onDeleteMember, curr
                           Reg: {activeSelectedMember.dateRegistered || '2026-01-10'}
                         </span>
                       </div>
+                      {activeSelectedMember.status !== 'Active' && (
+                        <p className="mt-2 max-w-xl text-[11px] leading-4 text-amber-200">
+                          {activeSelectedMember.status === 'Inactive'
+                            ? `${activeSelectedMember.inactivityDays || 30} days without a recorded daily collection. Activate before accepting a new collection.`
+                            : activeSelectedMember.suspensionReason || 'This account is awaiting reactivation or deletion.'}
+                        </p>
+                      )}
                     </div>
                   </div>
 
                   {/* Actions Deck */}
                   <div className="flex space-x-2 w-full md:w-auto self-stretch md:self-auto justify-end">
-                    {currentUserRole === 'Chairman' && (
+                    {canDeleteMember(activeSelectedMember) && (
                       <button
                         type="button"
                         disabled={deletingMemberId === activeSelectedMember.id}
@@ -456,6 +518,12 @@ export default function MembersView({ members, onAddMember, onDeleteMember, curr
                         <Trash2 className="w-3.5 h-3.5" />
                         <span>{deletingMemberId === activeSelectedMember.id ? 'Deleting...' : 'Delete member'}</span>
                       </button>
+                    )}
+                    {canManageLifecycle && (
+                      <>
+                        <button type="button" onClick={() => openEditMember(activeSelectedMember)} className="px-3 py-1.5 bg-white/10 hover:bg-white/20 text-white text-[10px] font-bold uppercase tracking-wider rounded border border-white/20 flex items-center gap-1"><Pencil className="h-3.5 w-3.5" />Edit</button>
+                        <button type="button" onClick={() => void changeStatus(activeSelectedMember)} className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 text-[10px] font-bold uppercase tracking-wider rounded flex items-center gap-1">{activeSelectedMember.status === 'Active' ? <PauseCircle className="h-3.5 w-3.5" /> : <PlayCircle className="h-3.5 w-3.5" />}{activeSelectedMember.status === 'Active' ? 'Suspend' : 'Activate'}</button>
+                      </>
                     )}
                     <button
                       onClick={() => copyMemberDossierToClipboard(activeSelectedMember)}
@@ -685,6 +753,25 @@ export default function MembersView({ members, onAddMember, onDeleteMember, curr
           )}
         </div>
       </div>
+
+      {editingMember && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
+            <h3 className="font-display text-lg font-black text-slate-900">Edit member details</h3>
+            <p className="mt-1 text-xs text-slate-500">Correct contact or identity details for {editingMember.membershipNumber} · {editingMember.name}.</p>
+            <form onSubmit={saveEditedMember} className="mt-5 space-y-4">
+              <div><label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">Full name</label><input required value={editDraft.name} onChange={event => setEditDraft(current => ({ ...current, name: sanitizePersonName(event.target.value) }))} className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-emerald-600" /></div>
+              <div className="grid grid-cols-2 gap-3">
+                <div><label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">National ID</label><input required value={editDraft.idNumber} onChange={event => setEditDraft(current => ({ ...current, idNumber: sanitizeIntegerInput(event.target.value, 12) }))} className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-emerald-600" /></div>
+                <div><label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">Phone</label><input required value={editDraft.phoneNumber} onChange={event => setEditDraft(current => ({ ...current, phoneNumber: sanitizePhoneNumber(event.target.value) }))} className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-emerald-600" /></div>
+              </div>
+              <div><label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">Email</label><input required type="email" value={editDraft.email} onChange={event => setEditDraft(current => ({ ...current, email: event.target.value.trimStart() }))} className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-emerald-600" /></div>
+              {error && <p className="rounded-lg bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700">{error}</p>}
+              <div className="flex justify-end gap-2 border-t border-slate-100 pt-4"><button type="button" onClick={() => { setEditingMember(null); setError(''); }} className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600">Cancel</button><button type="submit" disabled={isSavingMember} className="rounded-xl bg-emerald-700 px-4 py-2 text-xs font-bold text-white disabled:opacity-60">{isSavingMember ? 'Saving...' : 'Save changes'}</button></div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Add Modal */}
       {showAddModal && (

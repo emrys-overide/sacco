@@ -2,7 +2,7 @@ import React, { lazy, Suspense, useState, useEffect, useRef } from 'react';
 import type { MemberPortalData, User, Member, Vehicle, Transaction, UserRole } from './types';
 import { Menu, ShieldAlert, Search, X } from 'lucide-react';
 import { canRole, STORAGE_KEYS } from './lib/auth';
-import { fetchSaccoJson, postSaccoJson } from './lib/api';
+import { ApiError, fetchSaccoJson, postSaccoJson } from './lib/api';
 
 // Subcomponents
 import LoginModal from './components/LoginModal';
@@ -290,8 +290,8 @@ export default function App() {
   };
 
   const handleDeleteMember = async (memberId: string) => {
-    if (!currentUser || currentUser.role !== 'Chairman') {
-      throw new Error('Only the Chairman can delete a member and their account.');
+    if (!currentUser || (currentUser.role !== 'Chairman' && currentUser.role !== 'Secretary')) {
+      throw new Error('Only the Chairman or the Secretary who registered the member can delete the account.');
     }
     await fetchSaccoJson<{ deleted: true; memberId: string }>(`/api/members/${memberId}`, {
       method: 'DELETE'
@@ -302,6 +302,24 @@ export default function App() {
     ]);
     setMembers(memberData);
     setVehicles(vehicleData);
+  };
+
+  const handleUpdateMember = async (memberId: string, changes: Pick<Member, 'name' | 'idNumber' | 'phoneNumber' | 'email'>) => {
+    const updated = await fetchSaccoJson<Member>(`/api/members/${memberId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(changes)
+    }, authToken);
+    setMembers(current => current.map(member => member.id === memberId ? updated : member));
+  };
+
+  const handleMemberStatus = async (memberId: string, action: 'suspend' | 'activate', reason?: string) => {
+    const updated = await fetchSaccoJson<Member>(`/api/members/${memberId}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, reason })
+    }, authToken);
+    setMembers(current => current.map(member => member.id === memberId ? updated : member));
   };
 
   const handleAddVehicle = async (newVehicleData: Omit<Vehicle, 'id'>) => {
@@ -322,6 +340,15 @@ export default function App() {
       console.error("Error registering vehicle:", err);
       throw err;
     }
+  };
+
+  const handleOffboardVehicle = async (vehicleId: string, reason?: string) => {
+    const updated = await fetchSaccoJson<Vehicle>(`/api/vehicles/${vehicleId}/offboard`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason })
+    }, authToken);
+    setVehicles(current => current.map(vehicle => vehicle.id === vehicleId ? updated : vehicle));
   };
 
   const handleAddTransaction = async (newTxData: Omit<Transaction, 'id' | 'timestamp' | 'recorderName'>) => {
@@ -347,10 +374,16 @@ export default function App() {
       return newTx;
     } catch (err) {
       console.error("Error posting ledger entry:", err);
+      const requiresActivation = err instanceof ApiError
+        && typeof err.details === 'object'
+        && err.details !== null
+        && 'code' in err.details
+        && (err.details as { code?: string }).code === 'MEMBER_ACTIVATION_REQUIRED';
       setSecurityAlert({
-        title: 'Ledger Entry Not Saved',
+        title: requiresActivation ? 'Activate Member First' : 'Ledger Entry Not Saved',
         message: err instanceof Error ? err.message : 'The server rejected the ledger entry. No local entry was created.'
       });
+      if (requiresActivation) setCurrentTab('Members');
       throw err;
     }
   };
@@ -417,7 +450,7 @@ export default function App() {
     }
 
     if (currentUser.role === 'Member') {
-      return memberPortal ? <MemberPortal data={memberPortal} token={authToken} onApplicationCreated={handleRefreshData} /> : (
+      return memberPortal ? <MemberPortal data={memberPortal} token={authToken} onApplicationCreated={handleRefreshData} onAccountSuspended={handleLogout} /> : (
         <div className="flex-1 flex items-center justify-center bg-slate-50 text-sm text-slate-600">Loading your member account...</div>
       );
     }
@@ -458,7 +491,10 @@ export default function App() {
             members={members}
             onAddMember={handleAddMember}
             onDeleteMember={handleDeleteMember}
+            onUpdateMember={handleUpdateMember}
+            onChangeMemberStatus={handleMemberStatus}
             currentUserRole={currentUser.role}
+            currentUserId={currentUser.id}
             transactions={transactions}
           />
         );
@@ -503,6 +539,7 @@ export default function App() {
             vehicles={vehicles}
             members={members}
             onAddVehicle={handleAddVehicle}
+            onOffboardVehicle={handleOffboardVehicle}
             currentUserRole={currentUser.role}
           />
         );

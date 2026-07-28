@@ -289,6 +289,106 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       status: 'Active'
     }
   });
+  const secretaryOwnedMember = await request('/api/members', 201, {
+    method: 'POST',
+    token: changedSecretaryLogin.token,
+    body: {
+      id: 'member-e2e-secretary-owned',
+      membershipNumber: 'SEC001',
+      name: 'Secretary Member',
+      idNumber: '88889999',
+      email: 'secretary.member@example.com',
+      phoneNumber: '0755555555',
+      status: 'Active'
+    }
+  });
+  assert.equal(secretaryOwnedMember.createdByUserId, changedSecretaryLogin.user.id);
+  const editedSecretaryMember = await request(`/api/members/${secretaryOwnedMember.id}`, 200, {
+    method: 'PATCH',
+    token: changedSecretaryLogin.token,
+    body: {
+      name: 'Secretary Corrected Member',
+      idNumber: '88889999',
+      email: 'secretary.corrected@example.com',
+      phoneNumber: '0755555566'
+    }
+  });
+  assert.equal(editedSecretaryMember.phoneNumber, '0755555566');
+  await request(`/api/members/${secretaryOwnedMember.id}/status`, 200, {
+    method: 'PATCH',
+    token: changedSecretaryLogin.token,
+    body: { action: 'suspend', reason: 'Temporary discipline review' }
+  });
+  await request('/api/transactions', 409, {
+    method: 'POST',
+    token: changedSecretaryLogin.token,
+    body: {
+      memberId: secretaryOwnedMember.id,
+      memberName: 'Secretary Corrected Member',
+      description: 'Must be blocked while suspended',
+      refCode: 'SUSPENDED-001',
+      type: 'Credit',
+      category: 'Daily Contribution',
+      amount: 100,
+      tillNumber: 'VehicleTill'
+    }
+  });
+  await request(`/api/members/${secretaryOwnedMember.id}/status`, 200, {
+    method: 'PATCH',
+    token: changedSecretaryLogin.token,
+    body: { action: 'activate' }
+  });
+  const lifecycleVehicle = await request('/api/vehicles', 201, {
+    method: 'POST',
+    token: changedSecretaryLogin.token,
+    body: {
+      plateNumber: 'KDG 777G',
+      ownerId: secretaryOwnedMember.id,
+      driverName: 'Lifecycle Driver',
+      driverPhone: '0755555577',
+      status: 'Active',
+      capacity: 14
+    }
+  });
+  const offboardedVehicle = await request(`/api/vehicles/${lifecycleVehicle.id}/offboard`, 200, {
+    method: 'POST',
+    token: changedSecretaryLogin.token,
+    body: { reason: 'Owner changed vehicle' }
+  });
+  assert.equal(offboardedVehicle.status, 'Exited');
+  const secretaryDeletion = await request(`/api/members/${secretaryOwnedMember.id}`, 200, {
+    method: 'DELETE',
+    token: changedSecretaryLogin.token
+  });
+  assert.equal(secretaryDeletion.deleted, true);
+  if (!databaseUrl) {
+    const inactivityMember = await request('/api/members', 201, {
+      method: 'POST',
+      token: loginToken,
+      body: {
+        id: 'member-e2e-inactivity',
+        membershipNumber: 'IDLE001',
+        name: 'Inactive Lifecycle Member',
+        idNumber: '66667777',
+        email: 'inactive.lifecycle@example.com',
+        phoneNumber: '0766666666',
+        status: 'Active'
+      }
+    });
+    const warnedMember = await request('/api/testing/member-inactivity', 200, {
+      method: 'POST',
+      token: loginToken,
+      body: { memberId: inactivityMember.id, days: 31 }
+    });
+    assert.equal(warnedMember.status, 'Inactive');
+    const deactivatedMember = await request('/api/testing/member-inactivity', 200, {
+      method: 'POST',
+      token: loginToken,
+      body: { memberId: inactivityMember.id, days: 91 }
+    });
+    assert.equal(deactivatedMember.status, 'Pending');
+    await request(`/api/members/${inactivityMember.id}`, 200, { method: 'DELETE', token: loginToken });
+  }
   await request('/api/members', 409, {
     method: 'POST',
     token: loginToken,
@@ -332,6 +432,17 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       body: { identifier: removableMember.email, password: 'removable-member-password' }
     });
     removableMemberToken = removableLogin.token as string;
+    await request('/api/member-portal/suspend', 200, {
+      method: 'POST',
+      token: removableMemberToken,
+      body: { reason: 'Leaving the SACCO temporarily' }
+    });
+    await request('/api/member-portal', 401, { token: removableMemberToken });
+    await request(`/api/members/${removableMember.id}/status`, 200, {
+      method: 'PATCH',
+      token: changedSecretaryLogin.token,
+      body: { action: 'activate' }
+    });
   }
   await request(`/api/members/${removableMember.id}`, 403, {
     method: 'DELETE',

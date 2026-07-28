@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import { Vehicle, Member, UserRole } from '../types';
-import { Search, Bus, PlusCircle, Wrench, Ban, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { Search, Bus, PlusCircle, Wrench, Ban, AlertTriangle, CheckCircle2, LogOut } from 'lucide-react';
 import {
   isValidPersonName,
   isValidPhoneNumber,
@@ -14,10 +14,11 @@ interface VehiclesViewProps {
   vehicles: Vehicle[];
   members: Member[];
   onAddVehicle: (newVehicle: Omit<Vehicle, 'id'>) => Promise<void>;
+  onOffboardVehicle: (vehicleId: string, reason?: string) => Promise<void>;
   currentUserRole: UserRole;
 }
 
-export default function VehiclesView({ vehicles, members, onAddVehicle, currentUserRole }: VehiclesViewProps) {
+export default function VehiclesView({ vehicles, members, onAddVehicle, onOffboardVehicle, currentUserRole }: VehiclesViewProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [routeFilter, setRouteFilter] = useState('All');
   const [showAddModal, setShowAddModal] = useState(false);
@@ -30,6 +31,8 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
   const [route, setRoute] = useState('17 Stage & Cabbanas');
   const [capacity, setCapacity] = useState<7 | 14 | 33 | 50>(14);
   const [error, setError] = useState('');
+  const [actionMessage, setActionMessage] = useState('');
+  const [offboardingVehicleId, setOffboardingVehicleId] = useState<string | null>(null);
 
   // Role validation
   const canRegister = currentUserRole === 'Chairman' || currentUserRole === 'Secretary';
@@ -132,6 +135,24 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
             Suspended
           </span>
         );
+      case 'Exited':
+        return <span className="inline-flex items-center rounded border border-slate-300 bg-slate-100 px-2 py-0.5 text-[10px] font-bold uppercase text-slate-600"><LogOut className="mr-1 h-3 w-3" />Offboarded</span>;
+    }
+  };
+
+  const handleOffboard = async (vehicle: Vehicle) => {
+    const reason = window.prompt(`Reason for offboarding ${vehicle.plateNumber}? This is optional.`);
+    if (reason === null) return;
+    if (!window.confirm(`Are you sure you want to offboard ${vehicle.plateNumber}? It will no longer accept collections.`)) return;
+    setOffboardingVehicleId(vehicle.id);
+    setActionMessage('');
+    try {
+      await onOffboardVehicle(vehicle.id, reason);
+      setActionMessage(`${vehicle.plateNumber} was offboarded. Its history remains available.`);
+    } catch (caught) {
+      setActionMessage(caught instanceof Error ? caught.message : 'The matatu could not be offboarded.');
+    } finally {
+      setOffboardingVehicleId(null);
     }
   };
 
@@ -166,6 +187,7 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
       </div>
 
       {/* Fleet Controls */}
+      {actionMessage && <p className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs font-bold text-emerald-800">{actionMessage}</p>}
       <div className="bg-white p-4 rounded-lg border border-slate-200 flex flex-col md:flex-row gap-4 items-center justify-between">
         <div className="relative w-full md:w-72">
           <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400">
@@ -208,7 +230,7 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
                 <th className="px-6 py-4">Driver Details</th>
                 <th className="px-6 py-4">Capacity</th>
                 <th className="px-6 py-4">Status</th>
-                <th className="px-6 py-4 text-center">Compliance</th>
+                <th className="px-6 py-4 text-center">Lifecycle action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-xs">
@@ -237,9 +259,11 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
                     <td className="px-6 py-4 font-mono font-medium text-slate-600">{vehicle.capacity} Seater</td>
                     <td className="px-6 py-4">{getStatusBadge(vehicle.status)}</td>
                     <td className="px-6 py-4 text-center">
-                      <span className="text-[10px] text-emerald-600 font-semibold bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded">
-                        Matched OK
-                      </span>
+                      {canRegister && vehicle.status !== 'Exited' ? (
+                        <button type="button" disabled={offboardingVehicleId === vehicle.id} onClick={() => void handleOffboard(vehicle)} className="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[10px] font-bold uppercase text-rose-700 hover:bg-rose-100 disabled:opacity-50"><LogOut className="h-3.5 w-3.5" />{offboardingVehicleId === vehicle.id ? 'Offboarding...' : 'Offboard'}</button>
+                      ) : (
+                        <span className="text-[10px] font-semibold text-slate-400">{vehicle.status === 'Exited' ? 'History retained' : 'View only'}</span>
+                      )}
                     </td>
                   </tr>
                 ))

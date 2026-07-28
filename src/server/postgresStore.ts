@@ -82,7 +82,12 @@ function mapMember(row: QueryResultRow): Member {
     sharesAmount: toNumber(row.shares_amount),
     savingsAmount: toNumber(row.savings_amount),
     initialLoanAmount: toNumber(row.initial_loan_amount),
-    loanBalance: toNumber(row.derived_loan_balance)
+    loanBalance: toNumber(row.derived_loan_balance),
+    createdByUserId: row.created_by ? String(row.created_by) : undefined,
+    suspensionReason: row.suspension_reason || undefined,
+    suspendedAt: row.suspended_at ? new Date(row.suspended_at).toISOString() : undefined,
+    lastDailyCollectionAt: row.last_daily_collection_at ? new Date(row.last_daily_collection_at).toISOString() : undefined,
+    inactivityDays: row.inactivity_days == null ? undefined : Number(row.inactivity_days)
   };
 }
 
@@ -111,7 +116,9 @@ function mapVehicle(row: QueryResultRow): Vehicle {
     driverPhone: row.driver_phone || '',
     route: row.route_name || '',
     status: row.status,
-    capacity: Number(row.capacity || 14) as Vehicle['capacity']
+    capacity: Number(row.capacity || 14) as Vehicle['capacity'],
+    offboardedAt: row.offboarded_at ? new Date(row.offboarded_at).toISOString() : undefined,
+    offboardingReason: row.offboarding_reason || undefined
   };
 }
 
@@ -194,6 +201,7 @@ export async function listPostgresUsers(pool: Pool) {
 export async function listPostgresMembers(pool: Pool): Promise<Member[]> {
   const result = await pool.query(
     `SELECT m.*,
+       FLOOR(EXTRACT(EPOCH FROM (now() - COALESCE(m.last_daily_collection_at, m.date_registered::timestamptz, m.created_at))) / 86400)::int AS inactivity_days,
        assigned_vehicle.plate_number AS vehicle_assigned,
        COALESCE(fin.shares_amount, 0) AS shares_amount,
        COALESCE(fin.savings_amount, 0) AS savings_amount,
@@ -237,6 +245,7 @@ export async function listPostgresMembers(pool: Pool): Promise<Member[]> {
 export async function getPostgresMember(pool: Pool, memberId: string): Promise<Member | null> {
   const result = await pool.query(
     `SELECT m.*,
+       FLOOR(EXTRACT(EPOCH FROM (now() - COALESCE(m.last_daily_collection_at, m.date_registered::timestamptz, m.created_at))) / 86400)::int AS inactivity_days,
        assigned_vehicle.plate_number AS vehicle_assigned,
        COALESCE(fin.shares_amount, 0) AS shares_amount,
        COALESCE(fin.savings_amount, 0) AS savings_amount,
@@ -278,13 +287,13 @@ export async function getPostgresMember(pool: Pool, memberId: string): Promise<M
   return result.rowCount ? mapMember(result.rows[0]) : null;
 }
 
-export async function createPostgresMember(pool: Pool, member: Omit<Member, 'id'>): Promise<Member> {
+export async function createPostgresMember(pool: Pool, member: Omit<Member, 'id'>, createdByUserId?: string): Promise<Member> {
   try {
     const result = await pool.query(
-      `INSERT INTO members (member_number, full_name, national_id, phone, email, status, date_registered, initial_loan_amount, loan_balance)
-       VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, $7, $8, $8)
+      `INSERT INTO members (member_number, full_name, national_id, phone, email, status, date_registered, initial_loan_amount, loan_balance, created_by)
+       VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, $7, $8, $8, $9)
        RETURNING *`,
-      [member.membershipNumber, member.name, member.idNumber, member.phoneNumber, member.email || '', member.status, member.dateRegistered, member.initialLoanAmount || 0]
+      [member.membershipNumber, member.name, member.idNumber, member.phoneNumber, member.email || '', member.status, member.dateRegistered, member.initialLoanAmount || 0, createdByUserId || null]
     );
     return mapMember({ ...result.rows[0], shares_amount: 0, savings_amount: 0, derived_loan_balance: member.initialLoanAmount || 0 });
   } catch (error) {
@@ -495,6 +504,21 @@ async function insertTransaction(client: Pool | PoolClient, transaction: Transac
         transaction.reversalOf || null, JSON.stringify(transactionMetadata(transaction))
       ]
     );
+    if (
+      transaction.memberId
+      && transaction.category === 'Daily Contribution'
+      && transaction.type === 'Credit'
+      && !transaction.reversalOf
+    ) {
+      await client.query(
+        `UPDATE members
+         SET last_daily_collection_at = GREATEST(COALESCE(last_daily_collection_at, '-infinity'::timestamptz), $2::timestamptz),
+             inactivity_warned_at = NULL,
+             updated_at = now()
+         WHERE id = $1`,
+        [transaction.memberId, transaction.timestamp]
+      );
+    }
     return mapTransaction(result.rows[0]);
   } catch (error) {
     return translatePgError(error);
@@ -568,6 +592,14 @@ export async function reconcilePostgresCoopBankEvent(
         input.actorId, JSON.stringify(metadata)]
     );
     const ledgerEntryId = String(ledger.rows[0].id);
+    if (input.category === 'Daily Contribution') {
+      await client.query(
+        `UPDATE members
+         SET last_daily_collection_at = now(), inactivity_warned_at = NULL, updated_at = now()
+         WHERE id = $1`,
+        [input.memberId]
+      );
+    }
     const updated = await client.query(
       `UPDATE coop_bank_ipn_events
        SET status = 'Reconciled', processing_status = 'PROCESSED',

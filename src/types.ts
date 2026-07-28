@@ -24,13 +24,18 @@ export interface Member {
   membershipNumber?: string;
   idNumber: string;
   phoneNumber: string;
-  status: 'Active' | 'Inactive' | 'Pending';
+  status: 'Active' | 'Inactive' | 'Pending' | 'Suspended';
   dateRegistered: string;
   vehicleAssigned?: string; // Vehicle registration number
   sharesAmount: number;     // Future capability prepared
   savingsAmount: number;    // Future capability prepared
   loanBalance?: number;     // Outstanding member loan, reduced by daily loan repayments
   initialLoanAmount?: number;
+  createdByUserId?: string;
+  suspensionReason?: string;
+  suspendedAt?: string;
+  lastDailyCollectionAt?: string;
+  inactivityDays?: number;
 }
 
 export interface DriverAssignment {
@@ -96,8 +101,10 @@ export interface Vehicle {
   driverName: string;
   driverPhone: string;
   route: string;       // e.g. "Nairobi - Thika (Route 237)"
-  status: 'Active' | 'Maintenance' | 'Suspended';
+  status: 'Active' | 'Maintenance' | 'Suspended' | 'Exited';
   capacity: 7 | 14 | 33 | 50;
+  offboardedAt?: string;
+  offboardingReason?: string;
 }
 
 export type TillType = 'VehicleTill' | 'UtilityTill' | 'None';
