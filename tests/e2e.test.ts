@@ -255,6 +255,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
     token: loginToken,
     body: {
       id: 'member-e2e-missing-email',
+      membershipNumber: 'E2EMISSING',
       name: 'No Email Member',
       idNumber: '99990000',
       phoneNumber: '0799999999',
@@ -267,6 +268,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
     token: loginToken,
     body: {
       id: 'member-e2e-one',
+      membershipNumber: 'SOW001',
       name: 'Alice Kamau',
       idNumber: '11112222',
       email: 'alice.member@example.com',
@@ -279,10 +281,24 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
     token: loginToken,
     body: {
       id: 'member-e2e-two',
+      membershipNumber: 'SOW002',
       name: 'Brian Otieno',
       idNumber: '33334444',
       email: 'brian.member@example.com',
       phoneNumber: '0722222222',
+      status: 'Active'
+    }
+  });
+  await request('/api/members', 409, {
+    method: 'POST',
+    token: loginToken,
+    body: {
+      id: 'member-e2e-duplicate-number',
+      membershipNumber: 'sow001',
+      name: 'Different Person',
+      idNumber: '77778888',
+      email: 'different.member@example.com',
+      phoneNumber: '0744444444',
       status: 'Active'
     }
   });
@@ -291,6 +307,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
     token: loginToken,
     body: {
       id: 'member-e2e-removable',
+      membershipNumber: 'SOW003',
       name: 'Removable Member',
       idNumber: '55556666',
       email: 'removable.member@example.com',
@@ -303,6 +320,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
     await request('/api/auth/member-registration', 201, {
       method: 'POST',
       body: {
+        memberNumber: removableMember.membershipNumber,
         fullName: removableMember.name,
         phone: removableMember.phoneNumber,
         email: removableMember.email,
@@ -338,6 +356,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
     token: loginToken,
     body: {
       id: 'member-e2e-duplicate',
+      membershipNumber: 'SOW004',
       name: 'Duplicate Member',
       idNumber: '11112222',
       email: 'duplicate.member@example.com',
@@ -542,6 +561,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
     const registration = await request('/api/auth/member-registration', 201, {
       method: 'POST',
       body: {
+        memberNumber: firstMember.membershipNumber,
         fullName: firstMember.name,
         phone: firstMember.phoneNumber,
         email: 'alice.member@example.com',

@@ -92,6 +92,7 @@ export interface Vehicle {
   plateNumber: string; // e.g. KCJ 402X
   ownerId: string;     // Member ID
   ownerName: string;
+  ownerMembershipNumber?: string;
   driverName: string;
   driverPhone: string;
   route: string;       // e.g. "Nairobi - Thika (Route 237)"

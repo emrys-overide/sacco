@@ -106,6 +106,7 @@ function mapVehicle(row: QueryResultRow): Vehicle {
     plateNumber: row.plate_number,
     ownerId: row.member_id ? String(row.member_id) : '',
     ownerName: row.owner_name || '',
+    ownerMembershipNumber: row.owner_member_number || undefined,
     driverName: row.driver_name || '',
     driverPhone: row.driver_phone || '',
     route: row.route_name || '',
@@ -280,10 +281,10 @@ export async function getPostgresMember(pool: Pool, memberId: string): Promise<M
 export async function createPostgresMember(pool: Pool, member: Omit<Member, 'id'>): Promise<Member> {
   try {
     const result = await pool.query(
-      `INSERT INTO members (full_name, national_id, phone, email, status, date_registered, initial_loan_amount, loan_balance)
-       VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, $7, $7)
+      `INSERT INTO members (member_number, full_name, national_id, phone, email, status, date_registered, initial_loan_amount, loan_balance)
+       VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, $7, $8, $8)
        RETURNING *`,
-      [member.name, member.idNumber, member.phoneNumber, member.email || '', member.status, member.dateRegistered, member.initialLoanAmount || 0]
+      [member.membershipNumber, member.name, member.idNumber, member.phoneNumber, member.email || '', member.status, member.dateRegistered, member.initialLoanAmount || 0]
     );
     return mapMember({ ...result.rows[0], shares_amount: 0, savings_amount: 0, derived_loan_balance: member.initialLoanAmount || 0 });
   } catch (error) {
@@ -293,7 +294,7 @@ export async function createPostgresMember(pool: Pool, member: Omit<Member, 'id'
 
 export async function listPostgresVehicles(pool: Pool): Promise<Vehicle[]> {
   const result = await pool.query(
-    `SELECT v.*, m.full_name AS owner_name, r.route_name
+    `SELECT v.*, m.full_name AS owner_name, m.member_number AS owner_member_number, r.route_name
      FROM vehicles v
      LEFT JOIN members m ON m.id = v.member_id
      LEFT JOIN routes r ON r.id = v.route_id
@@ -304,7 +305,7 @@ export async function listPostgresVehicles(pool: Pool): Promise<Vehicle[]> {
 
 export async function listPostgresVehiclesByOwner(pool: Pool, memberId: string): Promise<Vehicle[]> {
   const result = await pool.query(
-    `SELECT v.*, m.full_name AS owner_name, r.route_name
+    `SELECT v.*, m.full_name AS owner_name, m.member_number AS owner_member_number, r.route_name
      FROM vehicles v
      JOIN members m ON m.id = v.member_id
      LEFT JOIN routes r ON r.id = v.route_id

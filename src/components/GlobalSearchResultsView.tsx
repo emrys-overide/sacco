@@ -61,6 +61,7 @@ export default function GlobalSearchResultsView({
   // 1. Filter Members
   const filteredMembers = members.filter(m => 
     m.name.toLowerCase().includes(normalizedQuery) ||
+    m.membershipNumber?.toLowerCase().includes(normalizedQuery) ||
     m.phoneNumber.toLowerCase().includes(normalizedQuery) ||
     m.idNumber.toLowerCase().includes(normalizedQuery) ||
     m.status.toLowerCase().includes(normalizedQuery) ||
@@ -205,7 +206,7 @@ export default function GlobalSearchResultsView({
                   <div key={member.id} className="bg-white border border-slate-200 rounded-2xl p-5 hover:border-emerald-600 hover:shadow-md transition-all flex flex-col justify-between space-y-4">
                     <div className="space-y-1.5">
                       <div className="flex items-center justify-between">
-                        <span className="text-[9px] font-mono font-bold text-slate-400 uppercase">ID: {member.id}</span>
+                        <span className="text-[9px] font-mono font-bold text-emerald-700 uppercase">Member No. {highlightText(member.membershipNumber || 'Not assigned', query)}</span>
                         <span className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-full ${
                           member.status === 'Active' ? 'bg-emerald-100 text-emerald-800' :
                           member.status === 'Pending' ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-600'

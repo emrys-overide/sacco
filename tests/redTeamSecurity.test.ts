@@ -90,7 +90,7 @@ test('red-team checks deny token forgery, privilege escalation, and cross-member
   const createMember = async (id: string, name: string, nationalId: string, email: string, phone: string) => {
     const result = await request('/api/members', {
       method: 'POST', token: chairmanToken,
-      body: { id, name, idNumber: nationalId, email, phoneNumber: phone, status: 'Active' }
+      body: { id, membershipNumber: `RED${nationalId}`, name, idNumber: nationalId, email, phoneNumber: phone, status: 'Active' }
     });
     assert.equal(result.status, 201, JSON.stringify(result.data));
     return result.data;
@@ -112,8 +112,8 @@ test('red-team checks deny token forgery, privilege escalation, and cross-member
   assert.equal(transactionB.status, 201, JSON.stringify(transactionB.data));
 
   for (const details of [
-    { fullName: memberA.name, email: 'alice.red@example.com', phone: '0711000001', password: 'member-a-password' },
-    { fullName: memberB.name, email: 'brian.red@example.com', phone: '0711000002', password: 'member-b-password' }
+    { memberNumber: memberA.membershipNumber, fullName: memberA.name, email: 'alice.red@example.com', phone: '0711000001', password: 'member-a-password' },
+    { memberNumber: memberB.membershipNumber, fullName: memberB.name, email: 'brian.red@example.com', phone: '0711000002', password: 'member-b-password' }
   ]) {
     const registration = await request('/api/auth/member-registration', { method: 'POST', body: details });
     assert.equal(registration.status, 201, JSON.stringify(registration.data));

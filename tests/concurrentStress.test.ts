@@ -92,14 +92,14 @@ test('keeps concurrent member workflows consistent and rejects security abuse', 
 
   const member = await request('/api/members', {
     method: 'POST', token: chairmanToken,
-    body: { id: 'member-stress-one', name: 'Stress Member', idNumber: '55556666', email: 'member.stress@example.com', phoneNumber: '0711000000', status: 'Active' }
+    body: { id: 'member-stress-one', membershipNumber: 'STRESS001', name: 'Stress Member', idNumber: '55556666', email: 'member.stress@example.com', phoneNumber: '0711000000', status: 'Active' }
   });
   assert.equal(member.status, 201, JSON.stringify(member.data));
 
   // Parallel registration attempts for one identity must create exactly one account.
   const registrations = await Promise.all(Array.from({ length: 24 }, () => request('/api/auth/member-registration', {
     method: 'POST',
-    body: { fullName: 'Stress Member', email: 'member.stress@example.com', phone: '0711000000', password: 'parallel-member-password' }
+    body: { memberNumber: 'STRESS001', fullName: 'Stress Member', email: 'member.stress@example.com', phone: '0711000000', password: 'parallel-member-password' }
   })));
   assert.equal(registrations.filter(result => result.status === 201).length, 1);
   assert.equal(registrations.filter(result => result.status === 409).length, 23);

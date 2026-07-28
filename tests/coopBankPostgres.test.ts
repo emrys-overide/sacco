@@ -25,7 +25,7 @@ test('atomically reconciles one PostgreSQL bank event and rejects a second posti
   await pool.query(
     `INSERT INTO members (id, full_name, member_number, national_id, phone, email, status)
      VALUES ($1, 'Integration Member', $2, $3, '0712340000', $4, 'Active')`,
-    [memberId, `IT-${memberId.slice(0, 8)}`, memberId.replace(/-/g, '').slice(0, 12), `${memberId}@example.test`]
+    [memberId, `IT${memberId.replace(/-/g, '').slice(0, 8)}`, memberId.replace(/-/g, '').slice(0, 12), `${memberId}@example.test`]
   );
   await pool.query(
     `INSERT INTO users (id, full_name, email, role, is_active, account_status)

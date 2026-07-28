@@ -21,6 +21,7 @@ import {
 type LoanRow = {
   id: string;
   member_name: string;
+  member_number?: string;
   principal_amount: number;
   interest_rate: number;
   status: string;
@@ -313,7 +314,7 @@ export default function LoansView({ role, token, members }: { role: UserRole; to
               <label className="text-xs font-bold text-slate-600">Member
                 <select value={memberId} onChange={event => setMemberId(event.target.value)} className="mt-1.5 w-full rounded-xl border px-3 py-2.5 text-sm" required>
                   <option value="">Select active member</option>
-                  {members.filter(member => member.status === 'Active').map(member => <option key={member.id} value={member.id}>{member.name} · ID {member.idNumber}</option>)}
+                  {members.filter(member => member.status === 'Active').map(member => <option key={member.id} value={member.id}>{member.membershipNumber} · {member.name} · ID {member.idNumber}</option>)}
                 </select>
               </label>
               <label className="text-xs font-bold text-slate-600">Loan type
@@ -407,7 +408,7 @@ export default function LoansView({ role, token, members }: { role: UserRole; to
                   {loans.map(loan => (
                     <tr key={loan.id} className={loan.status === 'Rejected' ? 'bg-rose-50/30' : ''}>
                       <td className="p-4">
-                        <p className="font-bold text-slate-900">{loan.member_name}</p>
+                        <p className="font-bold text-slate-900">{loan.member_name} <span className="font-mono text-emerald-700">· {loan.member_number}</span></p>
                         <p className="mt-1 text-xs text-slate-500">{loan.loan_type || 'General'} · {loan.repayment_method || 'Not set'}</p>
                         {loan.application_snapshot && <p className="mt-1 text-xs text-slate-500">{loan.application_snapshot.phone || ''}{loan.application_snapshot.email ? ` · ${loan.application_snapshot.email}` : ''}</p>}
                       </td>
@@ -428,7 +429,7 @@ export default function LoansView({ role, token, members }: { role: UserRole; to
               {loans.map(loan => (
                 <article key={loan.id} className={`min-w-0 rounded-xl border p-4 ${loan.status === 'Rejected' ? 'border-rose-200 bg-rose-50/40' : 'border-slate-200 bg-white'}`}>
                   <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div className="min-w-0"><h3 className="break-words font-black text-slate-900">{loan.member_name}</h3><p className="mt-1 text-xs text-slate-500">{loan.loan_type || 'General'} · {loan.repayment_method || 'Not set'}</p></div>
+                    <div className="min-w-0"><h3 className="break-words font-black text-slate-900">{loan.member_name} <span className="font-mono text-emerald-700">· {loan.member_number}</span></h3><p className="mt-1 text-xs text-slate-500">{loan.loan_type || 'General'} · {loan.repayment_method || 'Not set'}</p></div>
                     <span className={`rounded-full px-2 py-1 text-[10px] font-black ${loan.status === 'Rejected' ? 'bg-rose-100 text-rose-800' : isLoanAgreementAvailable(loan.status) ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-50 text-amber-800'}`}>{loan.status}</span>
                   </div>
                   <dl className="mt-4 grid grid-cols-2 gap-3 text-xs">

@@ -30,9 +30,11 @@ import {
 } from 'lucide-react';
 import {
   isValidPersonName,
+  isValidMemberNumber,
   isValidPhoneNumber,
   sanitizeDecimalInput,
   sanitizeIntegerInput,
+  sanitizeMemberNumber,
   sanitizePersonName,
   sanitizePhoneNumber,
   sanitizeVehiclePlate
@@ -59,6 +61,7 @@ export default function MembersView({ members, onAddMember, onDeleteMember, curr
 
   // New Member Form State
   const [name, setName] = useState('');
+  const [membershipNumber, setMembershipNumber] = useState('');
   const [idNumber, setIdNumber] = useState('');
   const [email, setEmail] = useState('');
   const [phoneNumber, setPhoneNumber] = useState('');
@@ -71,6 +74,7 @@ export default function MembersView({ members, onAddMember, onDeleteMember, curr
 
   const filteredMembers = members.filter(member => {
     const matchesSearch = member.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                          member.membershipNumber?.toLowerCase().includes(searchTerm.toLowerCase()) ||
                           member.idNumber.includes(searchTerm) ||
                           member.phoneNumber.includes(searchTerm);
     const matchesFilter = statusFilter === 'All' || member.status === statusFilter;
@@ -100,8 +104,12 @@ export default function MembersView({ members, onAddMember, onDeleteMember, curr
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || !idNumber.trim() || !email.trim() || !phoneNumber.trim()) {
+    if (!membershipNumber.trim() || !name.trim() || !idNumber.trim() || !email.trim() || !phoneNumber.trim()) {
       setError('Please fill in all required fields.');
+      return;
+    }
+    if (!isValidMemberNumber(membershipNumber)) {
+      setError('Member number must contain letters and numbers only.');
       return;
     }
     if (!isValidPersonName(name)) {
@@ -118,6 +126,7 @@ export default function MembersView({ members, onAddMember, onDeleteMember, curr
     }
     try {
       await onAddMember({
+        membershipNumber,
         name,
         idNumber,
         email: email.trim().toLowerCase(),
@@ -133,6 +142,7 @@ export default function MembersView({ members, onAddMember, onDeleteMember, curr
     }
     // Reset Form
     setName('');
+    setMembershipNumber('');
     setIdNumber('');
     setEmail('');
     setPhoneNumber('');
@@ -143,7 +153,7 @@ export default function MembersView({ members, onAddMember, onDeleteMember, curr
   };
 
   const copyMemberDossierToClipboard = (member: Member) => {
-  const details = `MEMBER PROFILE - SOWETAMU SACCO\n-----------------------\nName: ${member.name}\nNational ID: ${member.idNumber}\nPhone No: ${member.phoneNumber}\nAssigned Plate: ${member.vehicleAssigned || 'None'}\nSavings: KES ${member.savingsAmount.toLocaleString()}\nShares: KES ${member.sharesAmount.toLocaleString()}\nOutstanding Loan: KES ${(member.loanBalance || 0).toLocaleString()}\nRegistered: ${member.dateRegistered || 'N/A'}\nStatus: ${member.status}`;
+  const details = `MEMBER PROFILE - SOWETAMU SACCO\n-----------------------\nMember Number: ${member.membershipNumber || 'Not assigned'}\nName: ${member.name}\nNational ID: ${member.idNumber}\nPhone No: ${member.phoneNumber}\nAssigned Plate: ${member.vehicleAssigned || 'None'}\nSavings: KES ${member.savingsAmount.toLocaleString()}\nShares: KES ${member.sharesAmount.toLocaleString()}\nOutstanding Loan: KES ${(member.loanBalance || 0).toLocaleString()}\nRegistered: ${member.dateRegistered || 'N/A'}\nStatus: ${member.status}`;
     navigator.clipboard.writeText(details).then(() => {
       setCopiedSuccess(true);
       setTimeout(() => setCopiedSuccess(false), 2000);
@@ -160,6 +170,7 @@ export default function MembersView({ members, onAddMember, onDeleteMember, curr
     content += `PERSONAL BIO-DATA:\n`;
     content += `------------------------------------------------------\n`;
     content += `Full Name              : ${member.name}\n`;
+    content += `Member Number          : ${member.membershipNumber || 'Not assigned'}\n`;
     content += `National ID Number     : ${member.idNumber}\n`;
     content += `Phone Number            : ${member.phoneNumber}\n`;
     content += `Sacco Registration Date: ${member.dateRegistered || 'N/A'}\n`;
@@ -349,6 +360,7 @@ export default function MembersView({ members, onAddMember, onDeleteMember, curr
 
                         <div className="min-w-0">
                           <p className="font-bold text-slate-900 text-xs truncate">{member.name}</p>
+                          <p className="font-mono text-[10px] font-black text-emerald-700">{member.membershipNumber || 'NUMBER NOT ASSIGNED'}</p>
                           <div className="flex items-center space-x-1.5 mt-0.5 text-[10px] text-slate-500">
                             <span className="font-mono">{member.idNumber}</span>
                             <span>&bull;</span>
@@ -411,6 +423,9 @@ export default function MembersView({ members, onAddMember, onDeleteMember, curr
                         }`}>
                           {activeSelectedMember.status}
                         </span>
+                      </div>
+                      <div className="mt-1 font-mono text-xs font-black tracking-wider text-emerald-300">
+                        Member No. {activeSelectedMember.membershipNumber || 'Not assigned'}
                       </div>
 
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-300 mt-1.5 font-mono">
@@ -680,6 +695,24 @@ export default function MembersView({ members, onAddMember, onDeleteMember, curr
             </h3>
             
             <form onSubmit={handleCreate} className="space-y-4">
+              <div>
+                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
+                  Member Number *
+                </label>
+                <input
+                  type="text"
+                  required
+                  autoFocus
+                  value={membershipNumber}
+                  onChange={(e) => setMembershipNumber(sanitizeMemberNumber(e.target.value))}
+                  pattern="[A-Za-z0-9]+"
+                  maxLength={30}
+                  title="Letters and numbers only."
+                  placeholder="e.g. SOW001 or 1042"
+                  className="w-full p-2.5 border-2 border-emerald-200 bg-emerald-50/40 rounded text-sm font-mono font-bold uppercase focus:outline-none focus:border-emerald-600"
+                />
+                <p className="mt-1 text-[9px] text-slate-500">Permanent unique identifier. It cannot duplicate another member number.</p>
+              </div>
               <div>
                 <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
                   Full Name (ID card match) *

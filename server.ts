@@ -37,8 +37,10 @@ import {
 import {
   isValidKenyanVehiclePlate,
   isValidPersonName,
+  isValidMemberNumber,
   isValidPhoneNumber,
   sanitizeIntegerInput,
+  sanitizeMemberNumber,
   sanitizePersonName,
   sanitizePhoneNumber,
   sanitizeVehiclePlate
@@ -187,14 +189,15 @@ function normalizedPersonName(value: unknown): string {
   return sanitizePersonName(value).trim().replace(/\s+/g, ' ').toLocaleLowerCase();
 }
 
-async function registerPasswordMemberAccount(input: { fullName: unknown; phone: unknown; email: unknown; password: unknown }): Promise<AuthorizedUser> {
+async function registerPasswordMemberAccount(input: { memberNumber: unknown; fullName: unknown; phone: unknown; email: unknown; password: unknown }): Promise<AuthorizedUser> {
+  const memberNumber = sanitizeMemberNumber(input.memberNumber);
   const fullName = sanitizePersonName(input.fullName).trim();
   const phone = sanitizePhoneNumber(input.phone).trim();
   const phoneDigits = normalizedPhone(phone);
   const email = normalizedEmail(input.email);
   const password = String(input.password || '');
-  if (!isValidPersonName(fullName) || !isValidPhoneNumber(phone) || !/^\S+@\S+\.\S+$/.test(email) || password.length < 8) {
-    throw new HttpError(400, 'Enter your full name, registered phone number and email, plus a password of at least 8 characters.', 'MEMBER_REGISTRATION_INVALID');
+  if (!isValidMemberNumber(memberNumber) || !isValidPersonName(fullName) || !isValidPhoneNumber(phone) || !/^\S+@\S+\.\S+$/.test(email) || password.length < 8) {
+    throw new HttpError(400, 'Enter your member number, full name, registered phone and email, plus a password of at least 8 characters.', 'MEMBER_REGISTRATION_INVALID');
   }
 
   if (postgresPool) {
@@ -203,16 +206,17 @@ async function registerPasswordMemberAccount(input: { fullName: unknown; phone: 
     try {
       await client.query('BEGIN');
       const memberResult = await client.query(
-        `SELECT id, full_name, phone, email
+        `SELECT id, member_number, full_name, phone, email
          FROM members
          WHERE status = 'Active'
-           AND regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = $1
-           AND lower(COALESCE(email, '')) = $2
+           AND upper(member_number) = $1
+           AND regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = $2
+           AND lower(COALESCE(email, '')) = $3
          FOR UPDATE`,
-        [phoneDigits, email]
+        [memberNumber, phoneDigits, email]
       );
       if (memberResult.rowCount !== 1) {
-        throw new HttpError(403, 'The phone number and email must match one active SACCO member record.', 'MEMBER_EMAIL_PHONE_MISMATCH');
+        throw new HttpError(403, 'The member number, phone and email must match one active SACCO member record.', 'MEMBER_EMAIL_PHONE_MISMATCH');
       }
       const member = memberResult.rows[0];
       if (normalizedPersonName(member.full_name) !== normalizedPersonName(fullName)) {
@@ -273,6 +277,7 @@ async function registerPasswordMemberAccount(input: { fullName: unknown; phone: 
   }
   const member = localStore.members.find(item =>
     item.status === 'Active'
+    && sanitizeMemberNumber(item.membershipNumber) === memberNumber
     && normalizedPhone(item.phoneNumber) === phoneDigits
     && normalizedEmail(item.email) === email
     && normalizedPersonName(item.name) === normalizedPersonName(fullName)
@@ -2256,6 +2261,7 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
   app.post('/api/auth/member-registration', async (req, res) => {
     try {
       const user = await registerPasswordMemberAccount({
+        memberNumber: req.body?.memberNumber,
         fullName: req.body?.fullName,
         phone: req.body?.phone,
         email: req.body?.email,
@@ -3166,7 +3172,7 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
     try {
       if (!postgresPool) throw new HttpError(503, 'Loan records require PostgreSQL.', 'LOANS_UNAVAILABLE');
       const result = await postgresPool.query(
-        `SELECT l.*, m.full_name AS member_name, m.status AS member_status,
+        `SELECT l.*, m.full_name AS member_name, m.member_number, m.status AS member_status,
            secretary_user.full_name AS secretary_reviewed_by_name,
            treasurer_user.full_name AS treasurer_reviewed_by_name,
            chairman_user.full_name AS approved_by_name,
@@ -3529,14 +3535,18 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
   app.post('/api/members', requirePermission('members.write'), async (req, res) => {
     try {
       const memberData = req.body;
-      if (!memberData.name || !memberData.idNumber) {
-        return res.status(400).json({ error: 'Name and National ID Number are required.' });
+      if (!memberData.membershipNumber || !memberData.name || !memberData.idNumber) {
+        return res.status(400).json({ error: 'Member Number, Name and National ID Number are required.', code: 'MEMBER_NUMBER_REQUIRED' });
       }
+      const membershipNumber = sanitizeMemberNumber(memberData.membershipNumber);
       const name = sanitizePersonName(memberData.name).trim();
       const idNumber = sanitizeIntegerInput(memberData.idNumber, 12);
       const phoneNumber = sanitizePhoneNumber(memberData.phoneNumber);
       const email = normalizedEmail(memberData.email);
       const vehicleAssigned = sanitizeVehiclePlate(memberData.vehicleAssigned).trim();
+      if (!isValidMemberNumber(membershipNumber) || String(memberData.membershipNumber).trim().toUpperCase() !== membershipNumber) {
+        return res.status(400).json({ error: 'Member Number must contain letters and numbers only (maximum 30 characters).', code: 'MEMBER_NUMBER_INVALID' });
+      }
       if (!isValidPersonName(name)) {
         return res.status(400).json({ error: 'Member name must contain letters only.' });
       }
@@ -3556,12 +3566,16 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       if (registeredMembers.some(member => member.idNumber === idNumber)) {
         return res.status(409).json({ error: `National ID Number ${idNumber} is already registered.`, code: 'MEMBER_ALREADY_REGISTERED' });
       }
+      if (registeredMembers.some(member => sanitizeMemberNumber(member.membershipNumber) === membershipNumber)) {
+        return res.status(409).json({ error: `Member Number ${membershipNumber} is already registered.`, code: 'MEMBER_NUMBER_ALREADY_REGISTERED' });
+      }
       if (memberData.id && registeredMembers.some(member => member.id === memberData.id)) {
         return res.status(409).json({ error: 'This member profile already exists.', code: 'MEMBER_ALREADY_REGISTERED' });
       }
       const memberId = memberData.id || 'm-' + Date.now();
       const newMember = {
         id: memberId,
+        membershipNumber,
         name,
         idNumber,
         email,
@@ -3593,6 +3607,9 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       await recordAuditLog(req, 'MEMBER_CREATED', 'members', newMember.id, undefined, newMember);
       res.status(201).json(newMember);
     } catch (error: any) {
+      if (error?.code === '23505' && String(error?.constraint || '').includes('member_number')) {
+        return sendApiError(res, new HttpError(409, 'That Member Number is already registered. Enter a different unique number.', 'MEMBER_NUMBER_ALREADY_REGISTERED'));
+      }
       sendApiError(res, error);
     }
   });

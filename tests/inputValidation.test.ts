@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  isValidMemberNumber,
   isValidKenyanVehiclePlate,
   isValidPersonName,
   isValidPhoneNumber,
   sanitizeDecimalInput,
   sanitizeIntegerInput,
+  sanitizeMemberNumber,
   sanitizePersonName,
   sanitizePhoneNumber,
   sanitizeReferenceCode,
@@ -30,6 +32,14 @@ test('retains mixed entry only for plates and reference codes', () => {
   assert.equal(sanitizeVehiclePlate('kcj@ 402x'), 'KCJ 402X');
   assert.equal(isValidKenyanVehiclePlate('KCJ 402X'), true);
   assert.equal(sanitizeReferenceCode('qg-12@ab'), 'QG-12AB');
+});
+
+test('normalizes and validates officer-assigned member numbers', () => {
+  assert.equal(sanitizeMemberNumber('sow- 001'), 'SOW001');
+  assert.equal(isValidMemberNumber('SOW001'), true);
+  assert.equal(isValidMemberNumber('1042'), true);
+  assert.equal(isValidMemberNumber(''), false);
+  assert.equal(isValidMemberNumber('SOW-001'), false);
 });
 
 test('requires a registered member for every non-expense transaction', () => {

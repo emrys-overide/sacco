@@ -30,6 +30,15 @@ export function sanitizeIntegerInput(value: unknown, maxLength?: number): string
   return maxLength ? digits.slice(0, maxLength) : digits;
 }
 
+/** Member numbers are officer-assigned identifiers made only from letters and digits. */
+export function sanitizeMemberNumber(value: unknown, maxLength = 30): string {
+  return String(value ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, maxLength);
+}
+
+export function isValidMemberNumber(value: unknown): boolean {
+  return /^[A-Z0-9]{1,30}$/.test(String(value ?? '').trim().toUpperCase());
+}
+
 /** Amounts accept digits and a single decimal separator only. */
 export function sanitizeDecimalInput(value: unknown): string {
   const cleaned = String(value ?? '').replace(/[^\d.]/g, '');

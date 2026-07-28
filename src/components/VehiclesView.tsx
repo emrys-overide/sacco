@@ -224,6 +224,7 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
                     <td className="px-6 py-4">
                       <div className="flex flex-col">
                         <span className="font-bold text-slate-800">{vehicle.ownerName}</span>
+                        {vehicle.ownerMembershipNumber && <span className="ml-1 font-mono text-[10px] font-bold text-emerald-700">· {vehicle.ownerMembershipNumber}</span>}
                         <span className="text-[10px] text-slate-400 font-mono">ID: {vehicle.ownerId}</span>
                       </div>
                     </td>
@@ -290,7 +291,7 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, currentU
                   >
                     <option value="">Select Sacco Member...</option>
                     {members.map(member => (
-                      <option key={member.id} value={member.id}>{member.name}</option>
+                      <option key={member.id} value={member.id}>{member.membershipNumber} · {member.name}</option>
                     ))}
                   </select>
                 </div>

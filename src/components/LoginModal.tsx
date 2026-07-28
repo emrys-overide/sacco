@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ArrowLeft, CheckCircle2, HelpCircle, LogIn, ShieldCheck, UserPlus } from 'lucide-react';
 import type { User } from '../types';
-import { sanitizePersonName, sanitizePhoneNumber } from '../lib/inputValidation';
+import { sanitizeMemberNumber, sanitizePersonName, sanitizePhoneNumber } from '../lib/inputValidation';
 
 interface LoginModalProps {
   onLoginSuccess: (user: User, token: string) => void;
@@ -40,6 +40,7 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
   const [needsFirstAdmin, setNeedsFirstAdmin] = useState(false);
   const [identifier, setIdentifier] = useState('');
   const [fullName, setFullName] = useState('');
+  const [memberNumber, setMemberNumber] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
@@ -100,10 +101,10 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
         if (!identifier || !password) throw new Error('Enter your phone or email and password.');
         completeAuthentication(await api('/api/auth/login', { identifier, password }));
       } else if (screen === 'register') {
-        if (!fullName || !phone || !email || password.length < 8) {
-          throw new Error('Enter your registered name, phone, email, and a password of at least 8 characters.');
+        if (!memberNumber || !fullName || !phone || !email || password.length < 8) {
+          throw new Error('Enter your member number, registered name, phone, email, and a password of at least 8 characters.');
         }
-        await api('/api/auth/member-registration', { fullName, phone, email, password });
+        await api('/api/auth/member-registration', { memberNumber, fullName, phone, email, password });
         setIdentifier(email);
         setPassword('');
         setScreen('login');
@@ -146,7 +147,7 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
               : screen === 'force-change' ? 'Create a private password'
             : 'Getting started';
   const subtitle = screen === 'login' ? 'Sign in to access your SACCO account.'
-    : screen === 'register' ? 'Use the same details already saved on your active member record.'
+    : screen === 'register' ? 'Use your member number and the same details saved on your active member record.'
       : screen === 'bootstrap' ? 'This private setup is available only while no Chairman exists.'
         : screen === 'totp' ? 'This extra step is enabled by your SACCO administrator.'
           : screen === 'reset-request' ? 'Contact the Chairman or SACCO Administrator directly; the system also sends them a reset notification.'
@@ -184,7 +185,7 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
 
               {screen === 'help' && (
                 <div className="mt-7 space-y-4 text-sm leading-6 text-slate-600">
-                  <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-4"><p className="font-bold text-slate-800">New member</p><p>Your name, phone, and email must match one active member record. Then choose your password and sign in.</p></div>
+                  <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-4"><p className="font-bold text-slate-800">New member</p><p>Your member number, name, phone, and email must match one active member record. Then choose your password and sign in.</p></div>
                   <div className="rounded-2xl border border-slate-200 p-4"><p className="font-bold text-slate-800">Officer</p><p>The Chairman creates your account. Use the work email or phone and password they give you on the same login screen.</p></div>
                   <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4"><p className="font-bold text-slate-800">Chairman account recovery</p><p>If the Chairman cannot sign in, submit a Chairman recovery request. It is sent only to the Secretary, who must verify the Chairman’s identity before issuing a temporary recovery password.</p><button type="button" onClick={() => chooseScreen('chairman-recovery')} className="mt-2 font-bold text-amber-800 underline underline-offset-2">Request Chairman recovery</button></div>
                   <div className="rounded-2xl border border-slate-200 p-4"><p className="font-bold text-slate-800">Documentation and technical help</p><p className="mt-1">Read the <a href="/documentation" className="font-bold text-emerald-700 underline underline-offset-2">SACCO user guide</a> or contact the Technical Department at <a href="mailto:emryspaul7@gmail.com" className="font-bold text-emerald-700 underline underline-offset-2">emryspaul7@gmail.com</a> / <a href="tel:+254759670456" className="font-bold text-emerald-700 underline underline-offset-2">0759670456</a>.</p></div>
@@ -213,6 +214,7 @@ export default function LoginModal({ onLoginSuccess }: LoginModalProps) {
 
               {!['help', 'reset-request', 'chairman-recovery', 'force-change'].includes(screen) && (
                 <form className="mt-7 space-y-4" onSubmit={handleSubmit}>
+                  {screen === 'register' && <div><label htmlFor="auth-member-number" className="mb-2 block text-xs font-bold text-slate-600">Member number</label><input id="auth-member-number" value={memberNumber} onChange={event => setMemberNumber(sanitizeMemberNumber(event.target.value))} className={`${inputClass} font-mono uppercase`} maxLength={30} pattern="[A-Za-z0-9]+" required /></div>}
                   {(screen === 'register' || screen === 'bootstrap') && <div><label htmlFor="auth-full-name" className="mb-2 block text-xs font-bold text-slate-600">Full name</label><input id="auth-full-name" value={fullName} onChange={event => setFullName(sanitizePersonName(event.target.value))} autoComplete="name" className={inputClass} required /></div>}
                   {screen === 'login' && <div><label htmlFor="login-identifier" className="mb-2 block text-xs font-bold text-slate-600">Phone or email</label><input id="login-identifier" value={identifier} onChange={event => setIdentifier(event.target.value)} autoComplete="username" className={inputClass} required /></div>}
                   {screen === 'register' && <div><label htmlFor="registered-phone" className="mb-2 block text-xs font-bold text-slate-600">Registered phone</label><input id="registered-phone" type="tel" value={phone} onChange={event => setPhone(sanitizePhoneNumber(event.target.value))} autoComplete="tel" inputMode="tel" pattern="[+]?[0-9]{9,15}" className={inputClass} required /></div>}
