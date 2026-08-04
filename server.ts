@@ -4331,33 +4331,62 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
           await client.query('BEGIN');
           const existing = await client.query('SELECT * FROM members WHERE id = $1 AND deleted_at IS NULL FOR UPDATE', [memberId]);
           if (!existing.rowCount) throw new HttpError(404, 'Member was not found.', 'MEMBER_NOT_FOUND');
-          const memberNumberConflict = await client.query(
-            `SELECT 1 FROM members
-             WHERE id <> $1 AND upper(member_number) = $2
-             LIMIT 1`,
-            [memberId, membershipNumber]
-          );
-          if (memberNumberConflict.rowCount) {
-            throw new HttpError(409, `Member Number ${membershipNumber} is already registered.`, 'MEMBER_NUMBER_ALREADY_REGISTERED');
+          const current = existing.rows[0];
+          const memberNumberChanged = sanitizeMemberNumber(current.member_number) !== membershipNumber;
+          const idNumberChanged = sanitizeIntegerInput(current.national_id, 12) !== idNumber;
+          const emailChanged = normalizedEmail(current.email) !== email;
+
+          if (memberNumberChanged) {
+            const memberNumberConflict = await client.query(
+              `SELECT 1 FROM members
+               WHERE id <> $1 AND upper(member_number) = $2
+               LIMIT 1`,
+              [memberId, membershipNumber]
+            );
+            if (memberNumberConflict.rowCount) {
+              throw new HttpError(409, `Member Number ${membershipNumber} is already registered.`, 'MEMBER_NUMBER_ALREADY_REGISTERED');
+            }
           }
-          const conflict = await client.query(
-            `SELECT 1 FROM members
-             WHERE id <> $1 AND deleted_at IS NULL AND (national_id = $2 OR lower(COALESCE(email, '')) = $3)
-             LIMIT 1`,
-            [memberId, idNumber, email]
-          );
-          if (conflict.rowCount) throw new HttpError(409, 'That National ID or email is already used by another member.', 'MEMBER_DETAILS_CONFLICT');
+
+          if (idNumberChanged) {
+            const nationalIdConflict = await client.query(
+              `SELECT 1 FROM members
+               WHERE id <> $1 AND deleted_at IS NULL AND national_id = $2
+               LIMIT 1`,
+              [memberId, idNumber]
+            );
+            if (nationalIdConflict.rowCount) {
+              throw new HttpError(409, `National ID ${idNumber} is already registered to another member.`, 'MEMBER_NATIONAL_ID_ALREADY_REGISTERED');
+            }
+          }
+
+          if (emailChanged) {
+            const memberEmailConflict = await client.query(
+              `SELECT 1 FROM members
+               WHERE id <> $1 AND deleted_at IS NULL AND lower(COALESCE(email, '')) = $2
+               LIMIT 1`,
+              [memberId, email]
+            );
+            if (memberEmailConflict.rowCount) {
+              throw new HttpError(409, `Email ${email} is already registered to another member.`, 'MEMBER_EMAIL_ALREADY_REGISTERED');
+            }
+            const userConflict = await client.query(
+              `SELECT 1 FROM users
+               WHERE linked_member_id IS DISTINCT FROM $1::uuid AND lower(email) = $2
+               LIMIT 1`,
+              [memberId, email]
+            );
+            if (userConflict.rowCount) {
+              throw new HttpError(409, `Email ${email} is already used by another SACCO login.`, 'MEMBER_EMAIL_CONFLICT');
+            }
+          }
+
           await client.query(
             `UPDATE members
              SET member_number = $2, full_name = $3, national_id = $4, phone = $5, email = $6, updated_at = now()
              WHERE id = $1`,
             [memberId, membershipNumber, name, idNumber, phoneNumber, email]
           );
-          const userConflict = await client.query(
-            `SELECT 1 FROM users WHERE linked_member_id IS DISTINCT FROM $1::uuid AND lower(email) = $2 LIMIT 1`,
-            [memberId, email]
-          );
-          if (userConflict.rowCount) throw new HttpError(409, 'That email is already used by another SACCO login.', 'MEMBER_EMAIL_CONFLICT');
           await client.query(
             `UPDATE users SET full_name = $2, phone = $3, email = $4, updated_at = now()
              WHERE role = 'Member' AND linked_member_id = $1`,
@@ -4374,11 +4403,20 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       } else {
         const member = localStore.members.find(item => item.id === memberId);
         if (!member) throw new HttpError(404, 'Member was not found.', 'MEMBER_NOT_FOUND');
-        if (localStore.members.some(item => item.id !== memberId && sanitizeMemberNumber(item.membershipNumber) === membershipNumber)) {
+        const memberNumberChanged = sanitizeMemberNumber(member.membershipNumber) !== membershipNumber;
+        const idNumberChanged = sanitizeIntegerInput(member.idNumber, 12) !== idNumber;
+        const emailChanged = normalizedEmail(member.email) !== email;
+        if (memberNumberChanged && localStore.members.some(item => item.id !== memberId && sanitizeMemberNumber(item.membershipNumber) === membershipNumber)) {
           throw new HttpError(409, `Member Number ${membershipNumber} is already registered.`, 'MEMBER_NUMBER_ALREADY_REGISTERED');
         }
-        if (localStore.members.some(item => item.id !== memberId && (item.idNumber === idNumber || normalizedEmail(item.email) === email))) {
-          throw new HttpError(409, 'That National ID or email is already used by another member.', 'MEMBER_DETAILS_CONFLICT');
+        if (idNumberChanged && localStore.members.some(item => item.id !== memberId && item.idNumber === idNumber)) {
+          throw new HttpError(409, `National ID ${idNumber} is already registered to another member.`, 'MEMBER_NATIONAL_ID_ALREADY_REGISTERED');
+        }
+        if (emailChanged && localStore.members.some(item => item.id !== memberId && normalizedEmail(item.email) === email)) {
+          throw new HttpError(409, `Email ${email} is already registered to another member.`, 'MEMBER_EMAIL_ALREADY_REGISTERED');
+        }
+        if (emailChanged && localStore.users.some(user => user.linkedMemberId !== memberId && normalizedEmail(user.email) === email)) {
+          throw new HttpError(409, `Email ${email} is already used by another SACCO login.`, 'MEMBER_EMAIL_CONFLICT');
         }
         Object.assign(member, { membershipNumber, name, idNumber, phoneNumber, email });
         localStore.users.filter(user => user.role === 'Member' && user.linkedMemberId === memberId)
@@ -4390,6 +4428,12 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
     } catch (error: any) {
       if (error?.code === '23505' && String(error?.constraint || '').includes('member_number')) {
         return sendApiError(res, new HttpError(409, 'That Member Number is already registered. Enter a different unique number.', 'MEMBER_NUMBER_ALREADY_REGISTERED'));
+      }
+      if (error?.code === '23505' && String(error?.constraint || '').includes('national_id')) {
+        return sendApiError(res, new HttpError(409, 'That National ID is already registered to another member.', 'MEMBER_NATIONAL_ID_ALREADY_REGISTERED'));
+      }
+      if (error?.code === '23505' && String(error?.constraint || '').includes('email')) {
+        return sendApiError(res, new HttpError(409, 'That email is already used by another SACCO account.', 'MEMBER_EMAIL_CONFLICT'));
       }
       sendApiError(res, error);
     }

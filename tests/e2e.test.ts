@@ -14,7 +14,10 @@ type RequestOptions = {
 };
 
 async function waitForHealth(baseUrl: string, server: ChildProcess, getLogs: () => string) {
-  for (let attempt = 0; attempt < 60; attempt += 1) {
+  // Vite/tsx startup can exceed nine seconds on a cold or resource-constrained
+  // CI worker. Give the isolated server time to become ready without weakening
+  // any request or assertion timeout once the application is running.
+  for (let attempt = 0; attempt < 120; attempt += 1) {
     if (server.exitCode !== null) {
       throw new Error(`E2E server exited before becoming healthy.\n${getLogs()}`);
     }
@@ -303,6 +306,32 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
     }
   });
   assert.equal(secretaryOwnedMember.createdByUserId, changedSecretaryLogin.user.id);
+  const legacyDuplicateEmailMember = await request('/api/members', 201, {
+    method: 'POST',
+    token: loginToken,
+    body: {
+      id: 'member-e2e-legacy-duplicate-email',
+      membershipNumber: 'LEGACYEMAIL1',
+      name: 'Legacy Email Member',
+      idNumber: '88889998',
+      email: 'secretary.member@example.com',
+      phoneNumber: '0755555598',
+      status: 'Active'
+    }
+  });
+  const unchangedLegacyIdentityEdit = await request(`/api/members/${secretaryOwnedMember.id}`, 200, {
+    method: 'PATCH',
+    token: changedSecretaryLogin.token,
+    body: {
+      membershipNumber: secretaryOwnedMember.membershipNumber,
+      name: 'Secretary First Correction',
+      idNumber: secretaryOwnedMember.idNumber,
+      email: secretaryOwnedMember.email,
+      phoneNumber: '0755555565'
+    }
+  });
+  assert.equal(unchangedLegacyIdentityEdit.name, 'Secretary First Correction');
+  assert.equal(unchangedLegacyIdentityEdit.phoneNumber, '0755555565');
   const editedSecretaryMember = await request(`/api/members/${secretaryOwnedMember.id}`, 200, {
     method: 'PATCH',
     token: changedSecretaryLogin.token,
@@ -327,6 +356,87 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       phoneNumber: '0755555566'
     }
   });
+  await request(`/api/members/${secretaryOwnedMember.id}`, 409, {
+    method: 'PATCH',
+    token: changedSecretaryLogin.token,
+    body: {
+      membershipNumber: editedSecretaryMember.membershipNumber,
+      name: editedSecretaryMember.name,
+      idNumber: legacyDuplicateEmailMember.idNumber,
+      email: editedSecretaryMember.email,
+      phoneNumber: editedSecretaryMember.phoneNumber
+    }
+  });
+  await request(`/api/members/${secretaryOwnedMember.id}`, 409, {
+    method: 'PATCH',
+    token: changedSecretaryLogin.token,
+    body: {
+      membershipNumber: editedSecretaryMember.membershipNumber,
+      name: editedSecretaryMember.name,
+      idNumber: editedSecretaryMember.idNumber,
+      email: legacyDuplicateEmailMember.email,
+      phoneNumber: editedSecretaryMember.phoneNumber
+    }
+  });
+  await request('/api/auth/member-registration', 403, {
+    method: 'POST',
+    body: {
+      memberNumber: 'SEC001',
+      fullName: editedSecretaryMember.name,
+      phone: editedSecretaryMember.phoneNumber,
+      email: editedSecretaryMember.email,
+      password: 'secretary-member-password'
+    }
+  });
+  await request('/api/auth/member-registration', 201, {
+    method: 'POST',
+    body: {
+      memberNumber: editedSecretaryMember.membershipNumber,
+      fullName: editedSecretaryMember.name,
+      phone: editedSecretaryMember.phoneNumber,
+      email: editedSecretaryMember.email,
+      password: 'secretary-member-password'
+    }
+  });
+  const finalSecretaryMember = await request(`/api/members/${secretaryOwnedMember.id}`, 200, {
+    method: 'PATCH',
+    token: changedSecretaryLogin.token,
+    body: {
+      membershipNumber: 'SEC003',
+      name: 'Secretary Final Member',
+      idNumber: '88889997',
+      email: 'secretary.final@example.com',
+      phoneNumber: '0755555567'
+    }
+  });
+  assert.equal(finalSecretaryMember.membershipNumber, 'SEC003');
+  assert.equal(finalSecretaryMember.name, 'Secretary Final Member');
+  assert.equal(finalSecretaryMember.idNumber, '88889997');
+  assert.equal(finalSecretaryMember.email, 'secretary.final@example.com');
+  assert.equal(finalSecretaryMember.phoneNumber, '0755555567');
+  await request('/api/auth/login', 401, {
+    method: 'POST',
+    body: { identifier: editedSecretaryMember.email, password: 'secretary-member-password' }
+  });
+  const finalMemberLogin = await request('/api/auth/login', 200, {
+    method: 'POST',
+    body: { identifier: finalSecretaryMember.email, password: 'secretary-member-password' }
+  });
+  const finalMemberPortal = await request('/api/member-portal', 200, { token: finalMemberLogin.token });
+  assert.equal(finalMemberPortal.member.membershipNumber, 'SEC003');
+  assert.equal(finalMemberPortal.member.name, 'Secretary Final Member');
+  assert.equal(finalMemberPortal.profile.membershipNumber, 'SEC003');
+  assert.equal(finalMemberPortal.profile.fullName, 'Secretary Final Member');
+  assert.equal(finalMemberPortal.profile.nationalId, '88889997');
+  assert.equal(finalMemberPortal.profile.email, 'secretary.final@example.com');
+  assert.equal(finalMemberPortal.profile.phone, '0755555567');
+  const membersAfterFullEdit = await request<any[]>('/api/members', 200, { token: changedSecretaryLogin.token });
+  assert.equal(membersAfterFullEdit.some(member => member.id === secretaryOwnedMember.id && member.membershipNumber === 'SEC003'), true);
+  assert.equal(membersAfterFullEdit.some(member => member.membershipNumber === 'SEC002'), false);
+  await request(`/api/members/${legacyDuplicateEmailMember.id}`, 200, {
+    method: 'DELETE',
+    token: changedSecretaryLogin.token
+  });
   await request(`/api/members/${secretaryOwnedMember.id}/status`, 200, {
     method: 'PATCH',
     token: changedSecretaryLogin.token,
@@ -337,7 +447,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
     token: changedSecretaryLogin.token,
     body: {
       memberId: secretaryOwnedMember.id,
-      memberName: 'Secretary Corrected Member',
+      memberName: 'Secretary Final Member',
       description: 'Must be blocked while suspended',
       refCode: 'SUSPENDED-001',
       type: 'Credit',
