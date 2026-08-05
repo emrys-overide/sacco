@@ -92,6 +92,39 @@ async function migrate(pool) {
       client.release();
     }
   }
+
+  // This application never exposes its public tables through Supabase's Data
+  // API. Reassert the boundary after every migration run so a future table
+  // cannot remain public because its migration omitted an RLS statement.
+  await pool.query(`
+    DO $$
+    DECLARE
+      table_record record;
+      api_role text;
+    BEGIN
+      FOR table_record IN
+        SELECT schemaname, tablename
+        FROM pg_tables
+        WHERE schemaname = 'public'
+      LOOP
+        EXECUTE format(
+          'ALTER TABLE %I.%I ENABLE ROW LEVEL SECURITY',
+          table_record.schemaname,
+          table_record.tablename
+        );
+      END LOOP;
+
+      FOREACH api_role IN ARRAY ARRAY['anon', 'authenticated', 'service_role']
+      LOOP
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = api_role) THEN
+          EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA public FROM %I', api_role);
+          EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM %I', api_role);
+          EXECUTE format('REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM %I', api_role);
+        END IF;
+      END LOOP;
+    END $$;
+  `);
+  console.log('Supabase public Data API boundary: enforced');
 }
 
 async function withPool(action) {
