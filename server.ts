@@ -25,7 +25,8 @@ import {
   reconcilePostgresCoopBankEvent,
   reconcilePostgresPayment,
   reversePostgresTransaction,
-  savePostgresPayment
+  savePostgresPayment,
+  updatePostgresVehicle
 } from './src/server/postgresStore';
 import {
   LedgerPolicyError,
@@ -57,6 +58,7 @@ import {
 } from './src/server/accessControl';
 import { createBase32Secret, createTotpUri, verifyTotpCode } from './src/server/totp';
 import { COOP_BANK_NAME } from './src/lib/collectionAccounts';
+import { isApprovedVehicleRoute } from './src/lib/vehicleRegistration';
 import { startBackgroundProcessor } from './src/server/backgroundProcessor';
 import { configureProxyTrust, securityHeaders } from './src/server/securityMiddleware';
 import { registerSystemRoutes } from './src/server/systemRoutes';
@@ -1767,7 +1769,7 @@ async function validateLedgerRegistration(tx: Transaction): Promise<void> {
       [normalizedPlate]
     );
     if (!vehicleResult.rowCount) {
-      throw new HttpError(400, `Car/V.REG "${tx.vehiclePlate}" is not registered. Onboard the vehicle first.`, 'VEHICLE_NOT_REGISTERED');
+      throw new HttpError(400, `Car/V.REG "${tx.vehiclePlate}" is not registered. Register the vehicle first.`, 'VEHICLE_NOT_REGISTERED');
     }
     const vehicle = vehicleResult.rows[0];
     if (String(vehicle.member_id) !== tx.memberId) {
@@ -1797,7 +1799,7 @@ async function validateLedgerRegistration(tx: Transaction): Promise<void> {
   const normalizedPlate = tx.vehiclePlate.replace(/\s+/g, '').toUpperCase();
   const vehicle = vehicles.find(item => item.plateNumber.replace(/\s+/g, '').toUpperCase() === normalizedPlate);
   if (!vehicle) {
-    throw new HttpError(400, `Car/V.REG "${tx.vehiclePlate}" is not registered. Onboard the vehicle first.`, 'VEHICLE_NOT_REGISTERED');
+    throw new HttpError(400, `Car/V.REG "${tx.vehiclePlate}" is not registered. Register the vehicle first.`, 'VEHICLE_NOT_REGISTERED');
   }
   if (vehicle.ownerId !== member.id) {
     throw new HttpError(400, `Car/V.REG "${vehicle.plateNumber}" is not registered under ${member.name}.`, 'MEMBER_VEHICLE_MISMATCH');
@@ -3837,16 +3839,19 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
     }
   });
 
-  // API 6: Register Matatu Vehicle (Authorized roles: Chairman, Secretary)
+  // API 6: Register Vehicle (Authorized roles: Chairman, Secretary)
   app.post('/api/vehicles', requirePermission('vehicles.write'), async (req, res) => {
     try {
       const vehicleData = req.body;
-      if (!vehicleData.plateNumber || !vehicleData.ownerId) {
-        return res.status(400).json({ error: 'Plate Number and a registered owner are required.' });
+      if (!vehicleData.plateNumber) {
+        return res.status(400).json({ error: 'Plate Number is required.' });
       }
       const plateNumber = sanitizeVehiclePlate(vehicleData.plateNumber).trim();
       const driverName = sanitizePersonName(vehicleData.driverName).trim();
       const driverPhone = sanitizePhoneNumber(vehicleData.driverPhone);
+      const ownerId = String(vehicleData.ownerId || '').trim();
+      const typedOwnerName = sanitizePersonName(vehicleData.ownerName).trim();
+      const route = String(vehicleData.route || '').trim();
       if (!isValidKenyanVehiclePlate(plateNumber)) {
         return res.status(400).json({ error: 'Plate Number must use a valid Kenyan plate format.' });
       }
@@ -3856,13 +3861,20 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       if (!isValidPhoneNumber(driverPhone)) {
         return res.status(400).json({ error: 'Enter a valid driver phone number using digits only.' });
       }
-      const [registeredMembers, registeredVehicles] = await Promise.all([getAllMembers(), getAllVehicles()]);
-      const owner = registeredMembers.find(member => member.id === String(vehicleData.ownerId));
-      if (!owner) {
-        return res.status(400).json({ error: 'Select a registered member as the vehicle owner.', code: 'MEMBER_NOT_FOUND' });
+      if (!isApprovedVehicleRoute(route)) {
+        return res.status(400).json({ error: 'Select one of the approved SACCO vehicle routes.', code: 'VEHICLE_ROUTE_INVALID' });
       }
-      if (owner.status !== 'Active') {
+      const [registeredMembers, registeredVehicles] = await Promise.all([getAllMembers(), getAllVehicles()]);
+      const owner = ownerId ? registeredMembers.find(member => member.id === ownerId) : undefined;
+      if (ownerId && !owner) {
+        return res.status(400).json({ error: 'The selected registered member was not found.', code: 'MEMBER_NOT_FOUND' });
+      }
+      if (owner && owner.status !== 'Active') {
         return res.status(409).json({ error: `Member "${owner.name}" is not active.`, code: 'MEMBER_NOT_ACTIVE' });
+      }
+      const ownerName = owner?.name || typedOwnerName;
+      if (!isValidPersonName(ownerName)) {
+        return res.status(400).json({ error: 'Enter a valid vehicle owner name or select a registered member.', code: 'VEHICLE_OWNER_INVALID' });
       }
       const normalizedPlate = plateNumber.replace(/\s+/g, '');
       if (registeredVehicles.some(vehicle => vehicle.plateNumber.replace(/\s+/g, '').toUpperCase() === normalizedPlate)) {
@@ -3873,12 +3885,12 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       const newVehicle = {
         id: vehicleId,
         plateNumber,
-        ownerId: owner.id,
-        ownerName: owner.name,
+        ownerId: owner?.id || '',
+        ownerName,
         driverName,
         driverPhone,
-        route: '17 Stage & Cabbanas',
-        status: vehicleData.status || 'Active',
+        route,
+        status: 'Active' as const,
         capacity: ([7, 14, 33, 50].includes(Number(vehicleData.capacity)) ? Number(vehicleData.capacity) : 14) as 7 | 14 | 33 | 50
       };
 
@@ -3952,6 +3964,144 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
         updated = vehicle;
       }
       await recordAuditLog(req, 'VEHICLE_OFFBOARDED', 'vehicles', vehicleId, undefined, { reason });
+      res.json(updated);
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.patch('/api/vehicles/:id', requirePermission('vehicles.write'), async (req, res) => {
+    try {
+      const actor = requireAuthenticatedUser(req);
+      if (actor.role !== 'Chairman' && actor.role !== 'Secretary') {
+        throw new HttpError(403, 'Only the Chairman or Secretary can edit vehicle details.', 'VEHICLE_EDIT_ACCESS_DENIED');
+      }
+      const vehicleId = String(req.params.id || '').trim();
+      const plateNumber = sanitizeVehiclePlate(req.body?.plateNumber).trim();
+      const driverName = sanitizePersonName(req.body?.driverName).trim();
+      const driverPhone = sanitizePhoneNumber(req.body?.driverPhone);
+      const ownerId = String(req.body?.ownerId || '').trim();
+      const typedOwnerName = sanitizePersonName(req.body?.ownerName).trim();
+      const route = String(req.body?.route || '').trim();
+      const capacity = Number(req.body?.capacity);
+      if (!isValidKenyanVehiclePlate(plateNumber)) {
+        throw new HttpError(400, 'Plate Number must use a valid Kenyan plate format.', 'VEHICLE_PLATE_INVALID');
+      }
+      if (!isValidPersonName(driverName) || !isValidPhoneNumber(driverPhone)) {
+        throw new HttpError(400, 'Enter a valid driver name and phone number.', 'VEHICLE_DRIVER_INVALID');
+      }
+      if (!isApprovedVehicleRoute(route)) {
+        throw new HttpError(400, 'Select one of the approved SACCO vehicle routes.', 'VEHICLE_ROUTE_INVALID');
+      }
+      if (![7, 14, 33, 50].includes(capacity)) {
+        throw new HttpError(400, 'Select a supported vehicle capacity.', 'VEHICLE_CAPACITY_INVALID');
+      }
+      const [registeredMembers, registeredVehicles] = await Promise.all([getAllMembers(), getAllVehicles()]);
+      const owner = ownerId ? registeredMembers.find(member => member.id === ownerId) : undefined;
+      if (ownerId && !owner) {
+        throw new HttpError(400, 'The selected registered member was not found.', 'MEMBER_NOT_FOUND');
+      }
+      if (owner && owner.status !== 'Active') {
+        throw new HttpError(409, `Member "${owner.name}" is not active.`, 'MEMBER_NOT_ACTIVE');
+      }
+      const ownerName = owner?.name || typedOwnerName;
+      if (!isValidPersonName(ownerName)) {
+        throw new HttpError(400, 'Enter a valid vehicle owner name or select a registered member.', 'VEHICLE_OWNER_INVALID');
+      }
+      const normalizedPlate = plateNumber.replace(/\s+/g, '').toUpperCase();
+      if (registeredVehicles.some(vehicle => vehicle.id !== vehicleId && vehicle.plateNumber.replace(/\s+/g, '').toUpperCase() === normalizedPlate)) {
+        throw new HttpError(409, `Vehicle ${plateNumber} is already registered.`, 'VEHICLE_ALREADY_REGISTERED');
+      }
+      const changes = { plateNumber, ownerId: owner?.id || '', ownerName, driverName, driverPhone, route, capacity: capacity as Vehicle['capacity'] };
+      let updated: Vehicle;
+      if (postgresPool) {
+        updated = await updatePostgresVehicle(postgresPool, vehicleId, changes, actor.id);
+      } else {
+        const vehicle = localStore.vehicles.find(item => item.id === vehicleId);
+        if (!vehicle) throw new HttpError(404, 'Vehicle was not found.', 'VEHICLE_NOT_FOUND');
+        Object.assign(vehicle, changes);
+        updated = vehicle;
+      }
+      await recordAuditLog(req, 'VEHICLE_DETAILS_UPDATED', 'vehicles', vehicleId, undefined, changes);
+      res.json(updated);
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.post('/api/vehicles/:id/onboard', requirePermission('vehicles.write'), async (req, res) => {
+    try {
+      const actor = requireAuthenticatedUser(req);
+      if (actor.role !== 'Chairman' && actor.role !== 'Secretary') {
+        throw new HttpError(403, 'Only the Chairman or Secretary can onboard a vehicle.', 'VEHICLE_ONBOARD_ACCESS_DENIED');
+      }
+      const vehicleId = String(req.params.id || '').trim();
+      let updated: Vehicle;
+      if (postgresPool) {
+        const client = await postgresPool.connect();
+        try {
+          await client.query('BEGIN');
+          const existingResult = await client.query(
+            `SELECT * FROM vehicles WHERE id = $1 FOR UPDATE`,
+            [vehicleId]
+          );
+          if (!existingResult.rowCount) throw new HttpError(404, 'Vehicle was not found.', 'VEHICLE_NOT_FOUND');
+          const vehicle = existingResult.rows[0];
+          if (vehicle.status === 'Active') {
+            throw new HttpError(409, 'This vehicle is already onboarded.', 'VEHICLE_ALREADY_ONBOARDED');
+          }
+          await client.query(
+            `UPDATE vehicles
+             SET status = 'Active', offboarded_at = NULL, offboarded_by = NULL,
+                 offboarding_reason = NULL, updated_at = now()
+             WHERE id = $1`,
+            [vehicleId]
+          );
+          const activeAssignment = await client.query(
+            `SELECT 1 FROM driver_assignments WHERE vehicle_id = $1 AND status = 'Active' LIMIT 1`,
+            [vehicleId]
+          );
+          if (!activeAssignment.rowCount && vehicle.driver_name) {
+            const existingDriver = await client.query(
+              `SELECT id FROM drivers
+               WHERE ($1 <> '' AND phone = $1) OR ($1 = '' AND full_name = $2)
+               ORDER BY created_at
+               LIMIT 1`,
+              [vehicle.driver_phone || '', vehicle.driver_name]
+            );
+            const driverId = existingDriver.rowCount
+              ? existingDriver.rows[0].id
+              : (await client.query(
+                  `INSERT INTO drivers (full_name, phone)
+                   VALUES ($1, NULLIF($2, ''))
+                   RETURNING id`,
+                  [vehicle.driver_name, vehicle.driver_phone || '']
+                )).rows[0].id;
+            await client.query(
+              `INSERT INTO driver_assignments (
+                 vehicle_id, driver_id, owner_member_id, start_date_time, status, assigned_by, reason
+               ) VALUES ($1, $2, $3, now(), 'Active', $4, 'Vehicle onboarded')`,
+              [vehicleId, driverId, vehicle.member_id || null, actor.id]
+            );
+          }
+          await client.query('COMMIT');
+        } catch (error) {
+          await client.query('ROLLBACK');
+          throw error;
+        } finally {
+          client.release();
+        }
+        updated = (await listPostgresVehicles(postgresPool)).find(vehicle => vehicle.id === vehicleId)!;
+      } else {
+        const vehicle = localStore.vehicles.find(item => item.id === vehicleId);
+        if (!vehicle) throw new HttpError(404, 'Vehicle was not found.', 'VEHICLE_NOT_FOUND');
+        if (vehicle.status === 'Active') throw new HttpError(409, 'This vehicle is already onboarded.', 'VEHICLE_ALREADY_ONBOARDED');
+        vehicle.status = 'Active';
+        vehicle.offboardedAt = undefined;
+        vehicle.offboardingReason = undefined;
+        updated = vehicle;
+      }
+      await recordAuditLog(req, 'VEHICLE_ONBOARDED', 'vehicles', vehicleId, undefined, { status: 'Active' });
       res.json(updated);
     } catch (error: any) {
       sendApiError(res, error);

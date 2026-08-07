@@ -469,6 +469,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       ownerId: secretaryOwnedMember.id,
       driverName: 'Lifecycle Driver',
       driverPhone: '0755555577',
+      route: 'Stage 17 to Machakos',
       status: 'Active',
       capacity: 14
     }
@@ -479,6 +480,11 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
     body: { reason: 'Owner changed vehicle' }
   });
   assert.equal(offboardedVehicle.status, 'Exited');
+  const onboardedVehicle = await request(`/api/vehicles/${lifecycleVehicle.id}/onboard`, 200, {
+    method: 'POST',
+    token: changedSecretaryLogin.token
+  });
+  assert.equal(onboardedVehicle.status, 'Active');
   const secretaryDeletion = await request(`/api/members/${secretaryOwnedMember.id}`, 200, {
     method: 'DELETE',
     token: changedSecretaryLogin.token
@@ -606,6 +612,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       ownerName: 'Missing Member',
       driverName: 'Test Driver',
       driverPhone: '0700000000',
+      route: 'Stage 17 to Machakos',
       status: 'Active',
       capacity: 14
     }
@@ -620,11 +627,13 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       ownerName: 'Tampered Owner Name',
       driverName: 'Test Driver',
       driverPhone: '0700000000',
+      route: 'Soweto to Utawala',
       status: 'Active',
       capacity: 14
     }
   });
   assert.equal(vehicle.ownerName, firstMember.name);
+  assert.equal(vehicle.route, 'Soweto to Utawala');
   await request('/api/vehicles', 409, {
     method: 'POST',
     token: loginToken,
@@ -634,10 +643,57 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       ownerName: firstMember.name,
       driverName: 'Another Driver',
       driverPhone: '0700000001',
+      route: 'Soweto to Utawala',
       status: 'Active',
       capacity: 14
     }
   });
+
+  await request('/api/vehicles', 400, {
+    method: 'POST',
+    token: secretaryLogin.token,
+    body: {
+      plateNumber: 'KDC 321C',
+      ownerName: 'External Vehicle Owner',
+      driverName: 'External Driver',
+      driverPhone: '0712345000',
+      route: 'Unapproved Route',
+      capacity: 14
+    }
+  });
+  const externalOwnerVehicle = await request('/api/vehicles', 201, {
+    method: 'POST',
+    token: secretaryLogin.token,
+    body: {
+      plateNumber: 'KDC 321C',
+      ownerName: 'External Vehicle Owner',
+      driverName: 'External Driver',
+      driverPhone: '0712345000',
+      route: 'Rounda / Taj Mall to Utawala',
+      capacity: 14
+    }
+  });
+  assert.equal(externalOwnerVehicle.ownerId, '');
+  assert.equal(externalOwnerVehicle.ownerName, 'External Vehicle Owner');
+  assert.equal(externalOwnerVehicle.route, 'Rounda / Taj Mall to Utawala');
+  const editedExternalVehicle = await request(`/api/vehicles/${externalOwnerVehicle.id}`, 200, {
+    method: 'PATCH',
+    token: secretaryLogin.token,
+    body: {
+      plateNumber: 'KDD 654D',
+      ownerName: 'Updated Outside Owner',
+      driverName: 'Replacement Driver',
+      driverPhone: '0712345001',
+      route: 'Kariobangi to Kangundo',
+      capacity: 33
+    }
+  });
+  assert.equal(editedExternalVehicle.plateNumber, 'KDD 654D');
+  assert.equal(editedExternalVehicle.ownerName, 'Updated Outside Owner');
+  assert.equal(editedExternalVehicle.driverName, 'Replacement Driver');
+  assert.equal(editedExternalVehicle.driverPhone, '0712345001');
+  assert.equal(editedExternalVehicle.route, 'Kariobangi to Kangundo');
+  assert.equal(editedExternalVehicle.capacity, 33);
 
   // The Secretary owns day-to-day record entry and correction, while the
   // higher-risk Chairman controls remain unavailable to that role.
@@ -780,7 +836,7 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
   const status = await request('/api/system/status', 200, { token });
   assert.ok(status.totalTransactionsCount >= 3);
   assert.equal(status.totalMembersCount, 2);
-  assert.equal(status.totalFleetCount, 1);
+  assert.equal(status.totalFleetCount, 2);
   assert.equal(typeof status.netCashFlow, 'number');
   assert.equal(typeof status.totalCapitalReserve, 'number');
   assert.equal(typeof status.totalMemberSavings, 'number');

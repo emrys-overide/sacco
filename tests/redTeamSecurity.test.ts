@@ -99,7 +99,7 @@ test('red-team checks deny token forgery, privilege escalation, and cross-member
   const memberB = await createMember('member-red-b', 'Brian Redteam', '44440002', 'brian.red@example.com', '0711000002');
   const vehicleB = await request('/api/vehicles', {
     method: 'POST', token: chairmanToken,
-    body: { id: 'vehicle-red-b', plateNumber: 'KDF 456B', ownerId: memberB.id, driverName: 'Brian Driver', driverPhone: '0700000004', status: 'Active', capacity: 14 }
+    body: { id: 'vehicle-red-b', plateNumber: 'KDF 456B', ownerId: memberB.id, driverName: 'Brian Driver', driverPhone: '0700000004', route: 'Outer Ring to Utawala', status: 'Active', capacity: 14 }
   });
   assert.equal(vehicleB.status, 201, JSON.stringify(vehicleB.data));
   const transactionB = await request('/api/transactions', {

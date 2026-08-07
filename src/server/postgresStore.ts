@@ -303,7 +303,8 @@ export async function createPostgresMember(pool: Pool, member: Omit<Member, 'id'
 
 export async function listPostgresVehicles(pool: Pool): Promise<Vehicle[]> {
   const result = await pool.query(
-    `SELECT v.*, m.full_name AS owner_name, m.member_number AS owner_member_number, r.route_name
+    `SELECT v.*, COALESCE(m.full_name, v.owner_name) AS owner_name,
+            m.member_number AS owner_member_number, r.route_name
      FROM vehicles v
      LEFT JOIN members m ON m.id = v.member_id
      LEFT JOIN routes r ON r.id = v.route_id
@@ -314,7 +315,8 @@ export async function listPostgresVehicles(pool: Pool): Promise<Vehicle[]> {
 
 export async function listPostgresVehiclesByOwner(pool: Pool, memberId: string): Promise<Vehicle[]> {
   const result = await pool.query(
-    `SELECT v.*, m.full_name AS owner_name, m.member_number AS owner_member_number, r.route_name
+    `SELECT v.*, COALESCE(m.full_name, v.owner_name) AS owner_name,
+            m.member_number AS owner_member_number, r.route_name
      FROM vehicles v
      JOIN members m ON m.id = v.member_id
      LEFT JOIN routes r ON r.id = v.route_id
@@ -340,10 +342,10 @@ export async function createPostgresVehicle(
       [vehicle.route]
     );
     const result = await client.query(
-      `INSERT INTO vehicles (plate_number, member_id, route_id, capacity, driver_name, driver_phone, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO vehicles (plate_number, member_id, owner_name, route_id, capacity, driver_name, driver_phone, status)
+       VALUES ($1, NULLIF($2, '')::uuid, $3, $4, $5, $6, $7, $8)
        RETURNING *`,
-      [vehicle.plateNumber, vehicle.ownerId, routeResult.rows[0].id, vehicle.capacity, vehicle.driverName, vehicle.driverPhone, vehicle.status]
+      [vehicle.plateNumber, vehicle.ownerId, vehicle.ownerName, routeResult.rows[0].id, vehicle.capacity, vehicle.driverName, vehicle.driverPhone, vehicle.status]
     );
     const driverResult = await client.query(
       `SELECT id FROM drivers
@@ -363,13 +365,104 @@ export async function createPostgresVehicle(
     await client.query(
       `INSERT INTO driver_assignments (
          vehicle_id, driver_id, owner_member_id, start_date_time, status, assigned_by, reason
-       ) VALUES ($1, $2, $3, now(), 'Active', $4, 'Initial vehicle onboarding')`,
+       ) VALUES ($1, $2, NULLIF($3, '')::uuid, now(), 'Active', $4, 'Initial vehicle registration')`,
       [result.rows[0].id, driverId, vehicle.ownerId, assignedByUserId || null]
     );
     await client.query('COMMIT');
     return mapVehicle({ ...result.rows[0], owner_name: vehicle.ownerName, route_name: vehicle.route });
   } catch (error) {
     await client.query('ROLLBACK');
+    return translatePgError(error);
+  } finally {
+    client.release();
+  }
+}
+
+export async function updatePostgresVehicle(
+  pool: Pool,
+  vehicleId: string,
+  vehicle: Pick<Vehicle, 'plateNumber' | 'ownerId' | 'ownerName' | 'driverName' | 'driverPhone' | 'route' | 'capacity'>,
+  assignedByUserId?: string
+): Promise<Vehicle> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const existingResult = await client.query(
+      `SELECT id, driver_name, driver_phone, status
+       FROM vehicles
+       WHERE id = $1
+       FOR UPDATE`,
+      [vehicleId]
+    );
+    if (!existingResult.rowCount) {
+      throw new PersistenceError(404, 'Vehicle was not found.', 'VEHICLE_NOT_FOUND');
+    }
+    const existing = existingResult.rows[0];
+    const routeResult = await client.query(
+      `INSERT INTO routes (route_name) VALUES ($1)
+       ON CONFLICT (route_name) DO UPDATE SET route_name = EXCLUDED.route_name, is_active = TRUE
+       RETURNING id`,
+      [vehicle.route]
+    );
+    await client.query(
+      `UPDATE vehicles
+       SET plate_number = $2,
+           member_id = NULLIF($3, '')::uuid,
+           owner_name = $4,
+           route_id = $5,
+           capacity = $6,
+           driver_name = $7,
+           driver_phone = $8,
+           updated_at = now()
+       WHERE id = $1`,
+      [vehicleId, vehicle.plateNumber, vehicle.ownerId, vehicle.ownerName, routeResult.rows[0].id, vehicle.capacity, vehicle.driverName, vehicle.driverPhone]
+    );
+
+    const driverChanged = existing.driver_name !== vehicle.driverName || (existing.driver_phone || '') !== vehicle.driverPhone;
+    if (driverChanged) {
+      await client.query(
+        `UPDATE driver_assignments
+         SET status = 'Closed', end_date_time = now(), reason = 'Driver details edited', updated_at = now()
+         WHERE vehicle_id = $1 AND status = 'Active'`,
+        [vehicleId]
+      );
+      if (existing.status !== 'Exited') {
+        const existingDriver = await client.query(
+          `SELECT id FROM drivers
+           WHERE ($1 <> '' AND phone = $1) OR ($1 = '' AND full_name = $2)
+           ORDER BY created_at
+           LIMIT 1`,
+          [vehicle.driverPhone, vehicle.driverName]
+        );
+        const driverId = existingDriver.rowCount
+          ? existingDriver.rows[0].id
+          : (await client.query(
+              `INSERT INTO drivers (full_name, phone)
+               VALUES ($1, NULLIF($2, ''))
+               RETURNING id`,
+              [vehicle.driverName, vehicle.driverPhone]
+            )).rows[0].id;
+        await client.query(
+          `INSERT INTO driver_assignments (
+             vehicle_id, driver_id, owner_member_id, start_date_time, status, assigned_by, reason
+           ) VALUES ($1, $2, NULLIF($3, '')::uuid, now(), 'Active', $4, 'Vehicle details edited')`,
+          [vehicleId, driverId, vehicle.ownerId, assignedByUserId || null]
+        );
+      }
+    } else {
+      await client.query(
+        `UPDATE driver_assignments
+         SET owner_member_id = NULLIF($2, '')::uuid, updated_at = now()
+         WHERE vehicle_id = $1 AND status = 'Active'`,
+        [vehicleId, vehicle.ownerId]
+      );
+    }
+
+    await client.query('COMMIT');
+    return (await listPostgresVehicles(pool)).find(item => item.id === vehicleId)!;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (error instanceof PersistenceError) throw error;
     return translatePgError(error);
   } finally {
     client.release();
@@ -389,7 +482,7 @@ export async function assignPostgresDriver(
       'SELECT id, member_id, plate_number FROM vehicles WHERE id = $1 FOR UPDATE',
       [vehicleId]
     );
-    if (!vehicleResult.rowCount || !vehicleResult.rows[0].member_id) {
+    if (!vehicleResult.rowCount) {
       throw new PersistenceError(404, 'Vehicle to assign a driver was not found.', 'VEHICLE_NOT_FOUND');
     }
 
@@ -420,7 +513,7 @@ export async function assignPostgresDriver(
          vehicle_id, driver_id, owner_member_id, start_date_time, status, assigned_by, reason
        ) VALUES ($1, $2, $3, now(), 'Active', $4, $5)
        RETURNING *`,
-      [vehicle.id, driverId, vehicle.member_id, assignedByUserId || null, input.reason || null]
+      [vehicle.id, driverId, vehicle.member_id || null, assignedByUserId || null, input.reason || null]
     );
     await client.query(
       `UPDATE vehicles

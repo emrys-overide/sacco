@@ -288,7 +288,7 @@ export default function DashboardView({
         return;
       }
       if (normalizedVehiclePlate && !matchedVehicle) {
-        setError(`Car/V.REG "${normalizedVehiclePlate}" is not registered. Onboard the vehicle first.`);
+        setError(`Car/V.REG "${normalizedVehiclePlate}" is not registered. Register the vehicle first.`);
         return;
       }
       if (matchedVehicle && matchedVehicle.ownerId !== matchedMember.id) {

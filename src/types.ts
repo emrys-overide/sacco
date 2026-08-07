@@ -95,7 +95,7 @@ export type LoanStatus = 'Applied' | 'Approved' | 'Active' | 'Cleared' | 'Defaul
 export interface Vehicle {
   id: string;
   plateNumber: string; // e.g. KCJ 402X
-  ownerId: string;     // Member ID
+  ownerId: string;     // Member ID when the owner is a registered member; empty otherwise
   ownerName: string;
   ownerMembershipNumber?: string;
   driverName: string;

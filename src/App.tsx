@@ -342,8 +342,17 @@ export default function App() {
     }
   };
 
-  const handleOffboardVehicle = async (vehicleId: string, reason?: string) => {
-    const updated = await fetchSaccoJson<Vehicle>(`/api/vehicles/${vehicleId}/offboard`, {
+  const handleUpdateVehicle = async (vehicleId: string, changes: Pick<Vehicle, 'plateNumber' | 'ownerId' | 'ownerName' | 'driverName' | 'driverPhone' | 'route' | 'capacity'>) => {
+    const updated = await fetchSaccoJson<Vehicle>(`/api/vehicles/${vehicleId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(changes)
+    }, authToken);
+    setVehicles(current => current.map(vehicle => vehicle.id === vehicleId ? updated : vehicle));
+  };
+
+  const handleVehicleLifecycle = async (vehicleId: string, action: 'onboard' | 'offboard', reason?: string) => {
+    const updated = await fetchSaccoJson<Vehicle>(`/api/vehicles/${vehicleId}/${action}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ reason })
@@ -538,7 +547,8 @@ export default function App() {
             vehicles={vehicles}
             members={members}
             onAddVehicle={handleAddVehicle}
-            onOffboardVehicle={handleOffboardVehicle}
+            onUpdateVehicle={handleUpdateVehicle}
+            onVehicleLifecycle={handleVehicleLifecycle}
             currentUserRole={currentUser.role}
           />
         );
