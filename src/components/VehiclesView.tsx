@@ -9,7 +9,7 @@ import {
   sanitizePhoneNumber,
   sanitizeVehiclePlate
 } from '../lib/inputValidation';
-import { APPROVED_VEHICLE_ROUTES, isApprovedVehicleRoute } from '../lib/vehicleRegistration';
+import { APPROVED_VEHICLE_ROUTES, VEHICLE_CAPACITIES, isApprovedVehicleRoute, isSupportedVehicleCapacity } from '../lib/vehicleRegistration';
 
 type OwnerMode = 'member' | 'other';
 type VehicleDraft = {
@@ -17,17 +17,20 @@ type VehicleDraft = {
   ownerMode: OwnerMode;
   ownerId: string;
   ownerName: string;
+  ownerPhone: string;
+  ownerIdNumber: string;
   driverName: string;
   driverPhone: string;
   route: string;
   capacity: Vehicle['capacity'];
+  dateRegistered: string;
 };
 
 interface VehiclesViewProps {
   vehicles: Vehicle[];
   members: Member[];
   onAddVehicle: (newVehicle: Omit<Vehicle, 'id'>) => Promise<void>;
-  onUpdateVehicle: (vehicleId: string, changes: Pick<Vehicle, 'plateNumber' | 'ownerId' | 'ownerName' | 'driverName' | 'driverPhone' | 'route' | 'capacity'>) => Promise<void>;
+  onUpdateVehicle: (vehicleId: string, changes: Pick<Vehicle, 'plateNumber' | 'ownerId' | 'ownerName' | 'ownerPhone' | 'ownerIdNumber' | 'driverName' | 'driverPhone' | 'route' | 'capacity' | 'dateRegistered'>) => Promise<void>;
   onVehicleLifecycle: (vehicleId: string, action: 'onboard' | 'offboard', reason?: string) => Promise<void>;
   currentUserRole: UserRole;
 }
@@ -37,10 +40,13 @@ const emptyDraft = (): VehicleDraft => ({
   ownerMode: 'member',
   ownerId: '',
   ownerName: '',
+  ownerPhone: '',
+  ownerIdNumber: '',
   driverName: '',
   driverPhone: '',
   route: APPROVED_VEHICLE_ROUTES[0],
-  capacity: 14
+  capacity: 14,
+  dateRegistered: new Date().toISOString().slice(0, 10)
 });
 
 function VehicleFormFields({ draft, setDraft, members, allowMemberPlatePrefill = false }: {
@@ -79,8 +85,8 @@ function VehicleFormFields({ draft, setDraft, members, allowMemberPlatePrefill =
       <fieldset className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
         <legend className="px-1 text-[10px] font-bold uppercase tracking-widest text-slate-500">Vehicle owner *</legend>
         <div className="mb-4 grid grid-cols-2 gap-2 rounded-xl bg-slate-200/70 p-1">
-          <button type="button" onClick={() => setDraft(current => ({ ...current, ownerMode: 'member', ownerName: '' }))} className={`flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-[11px] font-bold transition ${draft.ownerMode === 'member' ? 'bg-white text-emerald-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><UsersRound className="h-4 w-4" />Registered member</button>
-          <button type="button" onClick={() => setDraft(current => ({ ...current, ownerMode: 'other', ownerId: '', ownerName: '' }))} className={`flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-[11px] font-bold transition ${draft.ownerMode === 'other' ? 'bg-white text-sky-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><UserRound className="h-4 w-4" />Other owner</button>
+          <button type="button" onClick={() => setDraft(current => ({ ...current, ownerMode: 'member', ownerName: '', ownerPhone: '', ownerIdNumber: '' }))} className={`flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-[11px] font-bold transition ${draft.ownerMode === 'member' ? 'bg-white text-emerald-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><UsersRound className="h-4 w-4" />Registered member</button>
+          <button type="button" onClick={() => setDraft(current => ({ ...current, ownerMode: 'other', ownerId: '', ownerName: '', ownerPhone: '', ownerIdNumber: '' }))} className={`flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-[11px] font-bold transition ${draft.ownerMode === 'other' ? 'bg-white text-sky-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><UserRound className="h-4 w-4" />Other owner</button>
         </div>
         {draft.ownerMode === 'member' ? (
           <label className="block">
@@ -91,11 +97,12 @@ function VehicleFormFields({ draft, setDraft, members, allowMemberPlatePrefill =
             </select>
           </label>
         ) : (
-          <label className="block">
-            <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-slate-500">Owner's full name</span>
-            <input required value={draft.ownerName} onChange={event => setDraft(current => ({ ...current, ownerName: sanitizePersonName(event.target.value) }))} placeholder="Type any vehicle owner's name" pattern="[A-Za-z .'-]+" title="Use letters only." className="w-full rounded-xl border border-sky-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-sky-600 focus:ring-2 focus:ring-sky-100" />
-            <p className="mt-1.5 text-[10px] text-slate-500">Use this when the vehicle owner is not registered as a SACCO member.</p>
-          </label>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <label className="block"><span className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-slate-500">Owner's full name *</span><input required value={draft.ownerName} onChange={event => setDraft(current => ({ ...current, ownerName: sanitizePersonName(event.target.value) }))} placeholder="Owner's full name" pattern="[A-Za-z .'-]+" title="Use letters only." className="w-full rounded-xl border border-sky-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-sky-600" /></label>
+            <label className="block"><span className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-slate-500">Owner phone *</span><input type="tel" required value={draft.ownerPhone} onChange={event => setDraft(current => ({ ...current, ownerPhone: sanitizePhoneNumber(event.target.value) }))} placeholder="0700000000" pattern="[+]?[0-9]{9,15}" className="w-full rounded-xl border border-sky-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-sky-600" /></label>
+            <label className="block"><span className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-slate-500">Owner ID number *</span><input required inputMode="numeric" value={draft.ownerIdNumber} onChange={event => setDraft(current => ({ ...current, ownerIdNumber: event.target.value.replace(/\D/g, '').slice(0, 12) }))} placeholder="National ID" pattern="[0-9]{5,12}" className="w-full rounded-xl border border-sky-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-sky-600" /></label>
+            <p className="text-[10px] text-slate-500 sm:col-span-3">These details identify an owner who is not registered as a SACCO member.</p>
+          </div>
         )}
       </fieldset>
 
@@ -110,15 +117,15 @@ function VehicleFormFields({ draft, setDraft, members, allowMemberPlatePrefill =
         </label>
       </div>
 
-      <label className="block sm:max-w-xs">
-        <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-slate-500">Vehicle capacity *</span>
-        <select value={draft.capacity} onChange={event => setDraft(current => ({ ...current, capacity: Number(event.target.value) as Vehicle['capacity'] }))} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs outline-none focus:border-emerald-600">
-          <option value="7">7-Seater Sienta</option>
-          <option value="14">14-Seater Nissan</option>
-          <option value="33">33-Seater Minibus</option>
-          <option value="50">50-Seater Coach</option>
-        </select>
-      </label>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <label className="block">
+          <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-slate-500">Vehicle capacity *</span>
+          <select value={draft.capacity} onChange={event => setDraft(current => ({ ...current, capacity: Number(event.target.value) as Vehicle['capacity'] }))} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs outline-none focus:border-emerald-600">
+            {VEHICLE_CAPACITIES.map(capacity => <option key={capacity} value={capacity}>{capacity}-Seater</option>)}
+          </select>
+        </label>
+        <label className="block"><span className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-slate-500">Registration date *</span><input type="date" required max={new Date().toISOString().slice(0, 10)} value={draft.dateRegistered} onChange={event => setDraft(current => ({ ...current, dateRegistered: event.target.value }))} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs outline-none focus:border-emerald-600" /><span className="mt-1.5 block text-[10px] text-slate-500">Use the original date for vehicles that joined earlier.</span></label>
+      </div>
     </div>
   );
 }
@@ -127,9 +134,13 @@ function validateDraft(draft: VehicleDraft, members: Member[]): string {
   if (!draft.plateNumber.trim() || !draft.driverName.trim() || !draft.driverPhone.trim()) return 'Fill in every required vehicle and driver field.';
   if (draft.ownerMode === 'member' && !members.some(member => member.id === draft.ownerId)) return 'Select a valid registered member as the owner.';
   if (draft.ownerMode === 'other' && !isValidPersonName(draft.ownerName)) return 'Enter a valid vehicle owner name using letters only.';
+  if (draft.ownerMode === 'other' && !isValidPhoneNumber(draft.ownerPhone)) return 'Enter a valid phone number for the unregistered owner.';
+  if (draft.ownerMode === 'other' && !/^\d{5,12}$/.test(draft.ownerIdNumber)) return 'Enter a valid ID number for the unregistered owner.';
   if (!isValidPersonName(draft.driverName)) return 'Driver name must use letters only.';
   if (!isValidPhoneNumber(draft.driverPhone)) return 'Enter a valid driver phone number using digits only.';
-  if (!isApprovedVehicleRoute(draft.route)) return 'Select one of the six approved SACCO routes.';
+  if (!isApprovedVehicleRoute(draft.route)) return 'Select an approved SACCO route.';
+  if (!isSupportedVehicleCapacity(draft.capacity)) return 'Select a supported vehicle capacity.';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(draft.dateRegistered) || draft.dateRegistered > new Date().toISOString().slice(0, 10)) return 'Select a valid registration date that is not in the future.';
   if (!/^[Kk][A-Dd][A-Zz]\s?\d{3}[A-Zz]$/.test(draft.plateNumber.trim())) return 'Use a valid Kenyan plate number such as KCJ 402X.';
   return '';
 }
@@ -159,10 +170,13 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, onUpdate
       plateNumber: draft.plateNumber.toUpperCase().trim(),
       ownerId: member?.id || '',
       ownerName: member?.name || draft.ownerName.trim(),
+      ownerPhone: member?.phoneNumber || draft.ownerPhone.trim(),
+      ownerIdNumber: member?.idNumber || draft.ownerIdNumber.trim(),
       driverName: draft.driverName.trim(),
       driverPhone: draft.driverPhone.trim(),
       route: draft.route,
-      capacity: draft.capacity
+      capacity: draft.capacity,
+      dateRegistered: draft.dateRegistered
     };
   };
 
@@ -188,10 +202,13 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, onUpdate
       ownerMode: vehicle.ownerId ? 'member' : 'other',
       ownerId: vehicle.ownerId,
       ownerName: vehicle.ownerName,
+      ownerPhone: vehicle.ownerPhone || '',
+      ownerIdNumber: vehicle.ownerIdNumber || '',
       driverName: vehicle.driverName,
       driverPhone: vehicle.driverPhone,
       route: isApprovedVehicleRoute(vehicle.route) ? vehicle.route : APPROVED_VEHICLE_ROUTES[0],
-      capacity: vehicle.capacity
+      capacity: vehicle.capacity,
+      dateRegistered: vehicle.dateRegistered || new Date().toISOString().slice(0, 10)
     });
     setError('');
   };
@@ -267,19 +284,20 @@ export default function VehiclesView({ vehicles, members, onAddVehicle, onUpdate
       <div className="flex-1 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
         <div className="overflow-x-auto">
           <table className="w-full text-left">
-            <thead className="border-b border-slate-200 bg-slate-50 text-[10px] font-bold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-4">Plate</th><th className="px-5 py-4">Route</th><th className="px-5 py-4">Owner</th><th className="px-5 py-4">Driver</th><th className="px-5 py-4">Capacity</th><th className="px-5 py-4">Status</th><th className="px-5 py-4 text-right">Actions</th></tr></thead>
+            <thead className="border-b border-slate-200 bg-slate-50 text-[10px] font-bold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-4">Plate</th><th className="px-5 py-4">Route</th><th className="px-5 py-4">Owner</th><th className="px-5 py-4">Driver</th><th className="px-5 py-4">Capacity</th><th className="px-5 py-4">Registered</th><th className="px-5 py-4">Status</th><th className="px-5 py-4 text-right">Actions</th></tr></thead>
             <tbody className="divide-y divide-slate-100 text-xs">
               {filteredVehicles.length ? filteredVehicles.map(vehicle => (
                 <tr key={vehicle.id} className="transition hover:bg-slate-50/70">
                   <td className="px-5 py-4"><span className="rounded-lg border border-emerald-800 bg-emerald-950 px-3 py-1.5 font-mono text-xs font-bold tracking-wider text-emerald-400">{vehicle.plateNumber}</span></td>
                   <td className="max-w-48 px-5 py-4 font-semibold text-slate-700">{vehicle.route}</td>
-                  <td className="px-5 py-4"><div className="flex flex-col"><span className="font-bold text-slate-800">{vehicle.ownerName}</span>{vehicle.ownerMembershipNumber ? <span className="font-mono text-[10px] font-bold text-emerald-700">Member · {vehicle.ownerMembershipNumber}</span> : <span className="text-[10px] font-semibold text-sky-700">Non-member owner</span>}</div></td>
+                  <td className="px-5 py-4"><div className="flex flex-col"><span className="font-bold text-slate-800">{vehicle.ownerName}</span>{vehicle.ownerMembershipNumber ? <span className="font-mono text-[10px] font-bold text-emerald-700">Member · {vehicle.ownerMembershipNumber}</span> : <><span className="text-[10px] font-semibold text-sky-700">Non-member owner</span><span className="text-[10px] text-slate-500">{vehicle.ownerPhone} · ID {vehicle.ownerIdNumber}</span></>}</div></td>
                   <td className="px-5 py-4"><div className="flex flex-col"><span className="font-semibold text-slate-800">{vehicle.driverName}</span><span className="text-[10px] text-slate-500">{vehicle.driverPhone}</span></div></td>
                   <td className="px-5 py-4 font-mono font-medium text-slate-600">{vehicle.capacity} seats</td>
+                  <td className="px-5 py-4 font-mono text-slate-600">{vehicle.dateRegistered || 'Not recorded'}</td>
                   <td className="px-5 py-4">{statusBadge(vehicle.status)}</td>
                   <td className="px-5 py-4"><div className="flex justify-end gap-2">{canRegister && <><button type="button" onClick={() => openEdit(vehicle)} className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] font-bold uppercase text-slate-600 hover:border-slate-300 hover:bg-slate-50"><Pencil className="h-3.5 w-3.5" />Edit</button><button type="button" disabled={busyVehicleId === vehicle.id} onClick={() => void handleLifecycle(vehicle)} className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[10px] font-bold uppercase transition disabled:opacity-50 ${vehicle.status === 'Exited' ? 'border-emerald-200 bg-emerald-600 text-white hover:bg-emerald-700' : 'border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100'}`}>{vehicle.status === 'Exited' ? <LogIn className="h-3.5 w-3.5" /> : <LogOut className="h-3.5 w-3.5" />}{busyVehicleId === vehicle.id ? 'Updating...' : vehicle.status === 'Exited' ? 'Onboard' : 'Offboard'}</button></>}</div></td>
                 </tr>
-              )) : <tr><td colSpan={7} className="px-6 py-14 text-center text-slate-400"><Bus className="mx-auto mb-2 h-6 w-6" />No vehicles matched this search.</td></tr>}
+              )) : <tr><td colSpan={8} className="px-6 py-14 text-center text-slate-400"><Bus className="mx-auto mb-2 h-6 w-6" />No vehicles matched this search.</td></tr>}
             </tbody>
           </table>
         </div>

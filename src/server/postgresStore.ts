@@ -112,11 +112,14 @@ function mapVehicle(row: QueryResultRow): Vehicle {
     ownerId: row.member_id ? String(row.member_id) : '',
     ownerName: row.owner_name || '',
     ownerMembershipNumber: row.owner_member_number || undefined,
+    ownerPhone: row.owner_phone || undefined,
+    ownerIdNumber: row.owner_id_number || undefined,
     driverName: row.driver_name || '',
     driverPhone: row.driver_phone || '',
     route: row.route_name || '',
     status: row.status,
     capacity: Number(row.capacity || 14) as Vehicle['capacity'],
+    dateRegistered: row.date_registered ? new Date(row.date_registered).toISOString().slice(0, 10) : '',
     offboardedAt: row.offboarded_at ? new Date(row.offboarded_at).toISOString() : undefined,
     offboardingReason: row.offboarding_reason || undefined
   };
@@ -342,10 +345,10 @@ export async function createPostgresVehicle(
       [vehicle.route]
     );
     const result = await client.query(
-      `INSERT INTO vehicles (plate_number, member_id, owner_name, route_id, capacity, driver_name, driver_phone, status)
-       VALUES ($1, NULLIF($2, '')::uuid, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO vehicles (plate_number, member_id, owner_name, owner_phone, owner_id_number, route_id, capacity, driver_name, driver_phone, status, date_registered)
+       VALUES ($1, NULLIF($2, '')::uuid, $3, NULLIF($4, ''), NULLIF($5, ''), $6, $7, $8, $9, $10, $11::date)
        RETURNING *`,
-      [vehicle.plateNumber, vehicle.ownerId, vehicle.ownerName, routeResult.rows[0].id, vehicle.capacity, vehicle.driverName, vehicle.driverPhone, vehicle.status]
+      [vehicle.plateNumber, vehicle.ownerId, vehicle.ownerName, vehicle.ownerPhone || '', vehicle.ownerIdNumber || '', routeResult.rows[0].id, vehicle.capacity, vehicle.driverName, vehicle.driverPhone, vehicle.status, vehicle.dateRegistered]
     );
     const driverResult = await client.query(
       `SELECT id FROM drivers
@@ -381,7 +384,7 @@ export async function createPostgresVehicle(
 export async function updatePostgresVehicle(
   pool: Pool,
   vehicleId: string,
-  vehicle: Pick<Vehicle, 'plateNumber' | 'ownerId' | 'ownerName' | 'driverName' | 'driverPhone' | 'route' | 'capacity'>,
+  vehicle: Pick<Vehicle, 'plateNumber' | 'ownerId' | 'ownerName' | 'ownerPhone' | 'ownerIdNumber' | 'driverName' | 'driverPhone' | 'route' | 'capacity' | 'dateRegistered'>,
   assignedByUserId?: string
 ): Promise<Vehicle> {
   const client = await pool.connect();
@@ -409,13 +412,16 @@ export async function updatePostgresVehicle(
        SET plate_number = $2,
            member_id = NULLIF($3, '')::uuid,
            owner_name = $4,
-           route_id = $5,
-           capacity = $6,
-           driver_name = $7,
-           driver_phone = $8,
+           owner_phone = NULLIF($5, ''),
+           owner_id_number = NULLIF($6, ''),
+           route_id = $7,
+           capacity = $8,
+           driver_name = $9,
+           driver_phone = $10,
+           date_registered = $11::date,
            updated_at = now()
        WHERE id = $1`,
-      [vehicleId, vehicle.plateNumber, vehicle.ownerId, vehicle.ownerName, routeResult.rows[0].id, vehicle.capacity, vehicle.driverName, vehicle.driverPhone]
+      [vehicleId, vehicle.plateNumber, vehicle.ownerId, vehicle.ownerName, vehicle.ownerPhone || '', vehicle.ownerIdNumber || '', routeResult.rows[0].id, vehicle.capacity, vehicle.driverName, vehicle.driverPhone, vehicle.dateRegistered]
     );
 
     const driverChanged = existing.driver_name !== vehicle.driverName || (existing.driver_phone || '') !== vehicle.driverPhone;

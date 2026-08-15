@@ -98,11 +98,14 @@ export interface Vehicle {
   ownerId: string;     // Member ID when the owner is a registered member; empty otherwise
   ownerName: string;
   ownerMembershipNumber?: string;
+  ownerPhone?: string;
+  ownerIdNumber?: string;
   driverName: string;
   driverPhone: string;
   route: string;       // e.g. "Nairobi - Thika (Route 237)"
   status: 'Active' | 'Maintenance' | 'Suspended' | 'Exited';
-  capacity: 7 | 14 | 33 | 50;
+  capacity: 7 | 14 | 26 | 29 | 46 | 52 | 63;
+  dateRegistered: string;
   offboardedAt?: string;
   offboardingReason?: string;
 }

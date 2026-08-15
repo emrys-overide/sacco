@@ -342,7 +342,7 @@ export default function App() {
     }
   };
 
-  const handleUpdateVehicle = async (vehicleId: string, changes: Pick<Vehicle, 'plateNumber' | 'ownerId' | 'ownerName' | 'driverName' | 'driverPhone' | 'route' | 'capacity'>) => {
+  const handleUpdateVehicle = async (vehicleId: string, changes: Pick<Vehicle, 'plateNumber' | 'ownerId' | 'ownerName' | 'ownerPhone' | 'ownerIdNumber' | 'driverName' | 'driverPhone' | 'route' | 'capacity' | 'dateRegistered'>) => {
     const updated = await fetchSaccoJson<Vehicle>(`/api/vehicles/${vehicleId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },

@@ -471,7 +471,8 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       driverPhone: '0755555577',
       route: 'Stage 17 to Machakos',
       status: 'Active',
-      capacity: 14
+      capacity: 14,
+      dateRegistered: '2025-01-15'
     }
   });
   const offboardedVehicle = await request(`/api/vehicles/${lifecycleVehicle.id}/offboard`, 200, {
@@ -614,7 +615,8 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       driverPhone: '0700000000',
       route: 'Stage 17 to Machakos',
       status: 'Active',
-      capacity: 14
+      capacity: 14,
+      dateRegistered: '2025-02-01'
     }
   });
   const vehicle = await request('/api/vehicles', 201, {
@@ -629,7 +631,8 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       driverPhone: '0700000000',
       route: 'Soweto to Utawala',
       status: 'Active',
-      capacity: 14
+      capacity: 14,
+      dateRegistered: '2025-02-01'
     }
   });
   assert.equal(vehicle.ownerName, firstMember.name);
@@ -645,7 +648,8 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       driverPhone: '0700000001',
       route: 'Soweto to Utawala',
       status: 'Active',
-      capacity: 14
+      capacity: 14,
+      dateRegistered: '2025-02-01'
     }
   });
 
@@ -658,7 +662,8 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
       driverName: 'External Driver',
       driverPhone: '0712345000',
       route: 'Unapproved Route',
-      capacity: 14
+      capacity: 14,
+      dateRegistered: '2025-03-01'
     }
   });
   const externalOwnerVehicle = await request('/api/vehicles', 201, {
@@ -667,10 +672,13 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
     body: {
       plateNumber: 'KDC 321C',
       ownerName: 'External Vehicle Owner',
+      ownerPhone: '0722000001',
+      ownerIdNumber: '12345678',
       driverName: 'External Driver',
       driverPhone: '0712345000',
       route: 'Rounda / Taj Mall to Utawala',
-      capacity: 14
+      capacity: 14,
+      dateRegistered: '2024-06-20'
     }
   });
   assert.equal(externalOwnerVehicle.ownerId, '');
@@ -682,10 +690,13 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
     body: {
       plateNumber: 'KDD 654D',
       ownerName: 'Updated Outside Owner',
+      ownerPhone: '0722000002',
+      ownerIdNumber: '87654321',
       driverName: 'Replacement Driver',
       driverPhone: '0712345001',
       route: 'Kariobangi to Kangundo',
-      capacity: 33
+      capacity: 29,
+      dateRegistered: '2024-05-10'
     }
   });
   assert.equal(editedExternalVehicle.plateNumber, 'KDD 654D');
@@ -693,7 +704,10 @@ test('runs the clean-install SACCO workflow end to end', { timeout: 45_000 }, as
   assert.equal(editedExternalVehicle.driverName, 'Replacement Driver');
   assert.equal(editedExternalVehicle.driverPhone, '0712345001');
   assert.equal(editedExternalVehicle.route, 'Kariobangi to Kangundo');
-  assert.equal(editedExternalVehicle.capacity, 33);
+  assert.equal(editedExternalVehicle.capacity, 29);
+  assert.equal(editedExternalVehicle.ownerPhone, '0722000002');
+  assert.equal(editedExternalVehicle.ownerIdNumber, '87654321');
+  assert.equal(editedExternalVehicle.dateRegistered, '2024-05-10');
 
   // The Secretary owns day-to-day record entry and correction, while the
   // higher-risk Chairman controls remain unavailable to that role.

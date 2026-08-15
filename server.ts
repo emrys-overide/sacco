@@ -58,7 +58,7 @@ import {
 } from './src/server/accessControl';
 import { createBase32Secret, createTotpUri, verifyTotpCode } from './src/server/totp';
 import { COOP_BANK_NAME } from './src/lib/collectionAccounts';
-import { isApprovedVehicleRoute } from './src/lib/vehicleRegistration';
+import { isApprovedVehicleRoute, isSupportedVehicleCapacity } from './src/lib/vehicleRegistration';
 import { startBackgroundProcessor } from './src/server/backgroundProcessor';
 import { configureProxyTrust, securityHeaders } from './src/server/securityMiddleware';
 import { registerSystemRoutes } from './src/server/systemRoutes';
@@ -3851,7 +3851,11 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       const driverPhone = sanitizePhoneNumber(vehicleData.driverPhone);
       const ownerId = String(vehicleData.ownerId || '').trim();
       const typedOwnerName = sanitizePersonName(vehicleData.ownerName).trim();
+      const typedOwnerPhone = sanitizePhoneNumber(vehicleData.ownerPhone);
+      const typedOwnerIdNumber = String(vehicleData.ownerIdNumber || '').replace(/\D/g, '').slice(0, 12);
       const route = String(vehicleData.route || '').trim();
+      const capacity = Number(vehicleData.capacity);
+      const dateRegistered = String(vehicleData.dateRegistered || '').trim();
       if (!isValidKenyanVehiclePlate(plateNumber)) {
         return res.status(400).json({ error: 'Plate Number must use a valid Kenyan plate format.' });
       }
@@ -3863,6 +3867,12 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       }
       if (!isApprovedVehicleRoute(route)) {
         return res.status(400).json({ error: 'Select one of the approved SACCO vehicle routes.', code: 'VEHICLE_ROUTE_INVALID' });
+      }
+      if (!isSupportedVehicleCapacity(capacity)) {
+        return res.status(400).json({ error: 'Select a supported vehicle capacity.', code: 'VEHICLE_CAPACITY_INVALID' });
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateRegistered) || dateRegistered > new Date().toISOString().slice(0, 10)) {
+        return res.status(400).json({ error: 'Select a valid registration date that is not in the future.', code: 'VEHICLE_DATE_INVALID' });
       }
       const [registeredMembers, registeredVehicles] = await Promise.all([getAllMembers(), getAllVehicles()]);
       const owner = ownerId ? registeredMembers.find(member => member.id === ownerId) : undefined;
@@ -3876,6 +3886,11 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       if (!isValidPersonName(ownerName)) {
         return res.status(400).json({ error: 'Enter a valid vehicle owner name or select a registered member.', code: 'VEHICLE_OWNER_INVALID' });
       }
+      const ownerPhone = owner?.phoneNumber || typedOwnerPhone;
+      const ownerIdNumber = owner?.idNumber || typedOwnerIdNumber;
+      if (!owner && (!isValidPhoneNumber(ownerPhone) || !/^\d{5,12}$/.test(ownerIdNumber))) {
+        return res.status(400).json({ error: 'Enter a valid phone number and ID number for the unregistered owner.', code: 'VEHICLE_OWNER_DETAILS_INVALID' });
+      }
       const normalizedPlate = plateNumber.replace(/\s+/g, '');
       if (registeredVehicles.some(vehicle => vehicle.plateNumber.replace(/\s+/g, '').toUpperCase() === normalizedPlate)) {
         return res.status(409).json({ error: `Vehicle ${plateNumber} is already registered.`, code: 'VEHICLE_ALREADY_REGISTERED' });
@@ -3887,11 +3902,14 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
         plateNumber,
         ownerId: owner?.id || '',
         ownerName,
+        ownerPhone,
+        ownerIdNumber,
         driverName,
         driverPhone,
         route,
         status: 'Active' as const,
-        capacity: ([7, 14, 33, 50].includes(Number(vehicleData.capacity)) ? Number(vehicleData.capacity) : 14) as 7 | 14 | 33 | 50
+        capacity,
+        dateRegistered
       };
 
       if (postgresPool) {
@@ -3982,8 +4000,11 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       const driverPhone = sanitizePhoneNumber(req.body?.driverPhone);
       const ownerId = String(req.body?.ownerId || '').trim();
       const typedOwnerName = sanitizePersonName(req.body?.ownerName).trim();
+      const typedOwnerPhone = sanitizePhoneNumber(req.body?.ownerPhone);
+      const typedOwnerIdNumber = String(req.body?.ownerIdNumber || '').replace(/\D/g, '').slice(0, 12);
       const route = String(req.body?.route || '').trim();
       const capacity = Number(req.body?.capacity);
+      const dateRegistered = String(req.body?.dateRegistered || '').trim();
       if (!isValidKenyanVehiclePlate(plateNumber)) {
         throw new HttpError(400, 'Plate Number must use a valid Kenyan plate format.', 'VEHICLE_PLATE_INVALID');
       }
@@ -3993,8 +4014,11 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       if (!isApprovedVehicleRoute(route)) {
         throw new HttpError(400, 'Select one of the approved SACCO vehicle routes.', 'VEHICLE_ROUTE_INVALID');
       }
-      if (![7, 14, 33, 50].includes(capacity)) {
+      if (!isSupportedVehicleCapacity(capacity)) {
         throw new HttpError(400, 'Select a supported vehicle capacity.', 'VEHICLE_CAPACITY_INVALID');
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateRegistered) || dateRegistered > new Date().toISOString().slice(0, 10)) {
+        throw new HttpError(400, 'Select a valid registration date that is not in the future.', 'VEHICLE_DATE_INVALID');
       }
       const [registeredMembers, registeredVehicles] = await Promise.all([getAllMembers(), getAllVehicles()]);
       const owner = ownerId ? registeredMembers.find(member => member.id === ownerId) : undefined;
@@ -4008,11 +4032,16 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       if (!isValidPersonName(ownerName)) {
         throw new HttpError(400, 'Enter a valid vehicle owner name or select a registered member.', 'VEHICLE_OWNER_INVALID');
       }
+      const ownerPhone = owner?.phoneNumber || typedOwnerPhone;
+      const ownerIdNumber = owner?.idNumber || typedOwnerIdNumber;
+      if (!owner && (!isValidPhoneNumber(ownerPhone) || !/^\d{5,12}$/.test(ownerIdNumber))) {
+        throw new HttpError(400, 'Enter a valid phone number and ID number for the unregistered owner.', 'VEHICLE_OWNER_DETAILS_INVALID');
+      }
       const normalizedPlate = plateNumber.replace(/\s+/g, '').toUpperCase();
       if (registeredVehicles.some(vehicle => vehicle.id !== vehicleId && vehicle.plateNumber.replace(/\s+/g, '').toUpperCase() === normalizedPlate)) {
         throw new HttpError(409, `Vehicle ${plateNumber} is already registered.`, 'VEHICLE_ALREADY_REGISTERED');
       }
-      const changes = { plateNumber, ownerId: owner?.id || '', ownerName, driverName, driverPhone, route, capacity: capacity as Vehicle['capacity'] };
+      const changes = { plateNumber, ownerId: owner?.id || '', ownerName, ownerPhone, ownerIdNumber, driverName, driverPhone, route, capacity: capacity as Vehicle['capacity'], dateRegistered };
       let updated: Vehicle;
       if (postgresPool) {
         updated = await updatePostgresVehicle(postgresPool, vehicleId, changes, actor.id);
