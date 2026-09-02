@@ -7,6 +7,7 @@ import { createDatabasePool } from './database-config.mjs';
 import {
   PersistenceError,
   correctPostgresTransaction,
+  deletePostgresTransaction,
   assignPostgresDriver,
   createPostgresMember,
   createPostgresTransaction,
@@ -1565,6 +1566,26 @@ async function reverseLedgerTransaction(transactionId: string, recorderName: str
     reversedAt: new Date().toISOString(),
     reversedBy: recorderName
   });
+}
+
+async function deleteLedgerTransaction(transactionId: string): Promise<Transaction> {
+  if (postgresPool) {
+    const original = (await listPostgresTransactions(postgresPool)).find(transaction => transaction.id === transactionId);
+    if (!original) throw new HttpError(404, 'Transaction to delete was not found.', 'TRANSACTION_NOT_FOUND');
+    await assertLedgerMonthIsOpen(original.timestamp);
+    return deletePostgresTransaction(postgresPool, transactionId);
+  }
+  const original = await Promise.resolve((() => localStore.transactions.find(tx => tx.id === transactionId) || null)());
+  if (!original) {
+    throw new HttpError(404, 'Transaction to delete was not found.', 'TRANSACTION_NOT_FOUND');
+  }
+  await assertLedgerMonthIsOpen(original.timestamp);
+
+  const reverseOriginal = { ...original, type: original.type === 'Credit' ? 'Debit' : 'Credit' } as Transaction;
+  applyLocalMemberBalance(reverseOriginal);
+
+  localStore.transactions = localStore.transactions.filter(tx => tx.id !== transactionId && tx.reversalOf !== transactionId);
+  return original;
 }
 
 function sendApiError(res: express.Response, error: any) {
@@ -4266,6 +4287,17 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       const reversal = await reverseLedgerTransaction(req.params.id, user?.name || 'Sacco Ledger OS');
       await recordAuditLog(req, 'LEDGER_ENTRY_REVERSED', 'ledger_entries', reversal.id, undefined, reversal);
       res.status(201).json(reversal);
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  // API 8B2: Hard delete a transaction completely from ledger and database
+  app.delete('/api/transactions/:id', requirePermission('ledger.write'), async (req, res) => {
+    try {
+      const deleted = await deleteLedgerTransaction(req.params.id);
+      await recordAuditLog(req, 'LEDGER_ENTRY_DELETED', 'ledger_entries', deleted.id, undefined, deleted);
+      res.json({ message: 'Transaction deleted successfully.', transaction: deleted });
     } catch (error: any) {
       sendApiError(res, error);
     }

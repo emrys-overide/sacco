@@ -20,19 +20,22 @@ import {
   Layers,
   ChevronRight,
   ChevronDown,
-  Building
+  Building,
+  Trash2
 } from 'lucide-react';
 
 interface ExpensesViewProps {
   transactions: Transaction[];
   onAddTransaction: (newTx: Omit<Transaction, 'id' | 'timestamp' | 'recorderName'>) => void;
+  onDeleteTransaction?: (transactionId: string) => Promise<void>;
   currentUserRole: UserRole;
   currentUserName: string;
 }
 
 export default function ExpensesView({ 
   transactions, 
-  onAddTransaction, 
+  onAddTransaction,
+  onDeleteTransaction,
   currentUserRole,
   currentUserName 
 }: ExpensesViewProps) {
@@ -500,13 +503,35 @@ export default function ExpensesView({
                             </div>
                           </div>
 
-                          <button
-                            onClick={() => handlePrintMock(tx)}
-                            className="w-full py-2 bg-slate-900 text-white rounded font-bold text-[10px] uppercase tracking-wider hover:bg-slate-800 transition-all flex items-center justify-center space-x-1"
-                          >
-                            <Printer className="w-3.5 h-3.5" />
-                            <span>Print Voucher Receipt</span>
-                          </button>
+                          <div className="flex space-x-2">
+                            <button
+                              onClick={() => handlePrintMock(tx)}
+                              className="flex-1 py-2 bg-slate-900 text-white rounded font-bold text-[10px] uppercase tracking-wider hover:bg-slate-800 transition-all flex items-center justify-center space-x-1"
+                            >
+                              <Printer className="w-3.5 h-3.5" />
+                              <span>Print Voucher Receipt</span>
+                            </button>
+                            {onDeleteTransaction && ['Chairman', 'Secretary', 'Treasurer', 'Accountant'].includes(currentUserRole) && (
+                              <button
+                                onClick={async () => {
+                                  const confirmed = window.confirm(`Permanently delete expense voucher ${tx.refCode}? This will remove it completely from the database.`);
+                                  if (!confirmed) return;
+                                  try {
+                                    await onDeleteTransaction(tx.id);
+                                    setSuccessMessage(`Expense voucher ${tx.refCode} deleted from database.`);
+                                    setTimeout(() => setSuccessMessage(''), 5000);
+                                  } catch (err: any) {
+                                    setErrorMessage(err.message || 'Failed to delete expense voucher.');
+                                  }
+                                }}
+                                className="px-3 py-2 bg-rose-50 border border-rose-200 text-rose-700 hover:bg-rose-100 rounded font-bold text-[10px] uppercase tracking-wider transition-all flex items-center justify-center space-x-1"
+                                title="Permanently delete expense voucher"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                <span>Delete</span>
+                              </button>
+                            )}
+                          </div>
                         </div>
                       </div>
                     </div>

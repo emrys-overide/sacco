@@ -34,7 +34,8 @@ import {
   Coins,
   Search,
   RotateCcw,
-  Pencil
+  Pencil,
+  Trash2
 } from 'lucide-react';
 
 const JOURNAL_WRITE_ROLES: readonly UserRole[] = ['Chairman', 'Secretary', 'Treasurer', 'Accountant'];
@@ -46,6 +47,7 @@ interface ReportsViewProps {
   onAddTransaction?: (newTx: Omit<Transaction, 'id' | 'timestamp' | 'recorderName'>) => void | Promise<Transaction>;
   onReverseTransaction?: (transactionId: string) => Promise<void>;
   onUpdateTransaction?: (transactionId: string, changes: Partial<Transaction>) => Promise<Transaction>;
+  onDeleteTransaction?: (transactionId: string) => Promise<void>;
   currentUser?: User;
 }
 
@@ -56,6 +58,7 @@ export default function ReportsView({
   onAddTransaction, 
   onReverseTransaction,
   onUpdateTransaction,
+  onDeleteTransaction,
   currentUser 
 }: ReportsViewProps) {
   // Regulatory/audited reports require a closed period and external approval.
@@ -2316,6 +2319,26 @@ export default function ReportsView({
                               ) : !canEdit ? (
                                 <span className="text-slate-300">-</span>
                               ) : null}
+                              {onDeleteTransaction && canRole(currentUser ?? null, JOURNAL_WRITE_ROLES) && (
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    const confirmed = window.confirm(`Permanently delete transaction ${t.refCode}? This will remove the record completely from the database.`);
+                                    if (!confirmed) return;
+                                    try {
+                                      await onDeleteTransaction(t.id);
+                                      setJournalSuccess(`Transaction ${t.refCode} deleted completely from the database.`);
+                                      setJournalError('');
+                                    } catch (error: any) {
+                                      setJournalError(error.message || 'Transaction deletion failed.');
+                                    }
+                                  }}
+                                  className="inline-flex items-center justify-center p-1.5 rounded border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100"
+                                  title="Permanently delete transaction from database"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
                               </div>
                             </td>
                           </tr>

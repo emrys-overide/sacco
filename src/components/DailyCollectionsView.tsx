@@ -27,6 +27,7 @@ interface DailyCollectionsViewProps {
   transactions: Transaction[];
   onAddTransaction: (newTx: Omit<Transaction, 'id' | 'timestamp' | 'recorderName'>) => Promise<Transaction>;
   onUpdateTransaction: (transactionId: string, changes: Partial<Transaction>) => Promise<Transaction>;
+  onDeleteTransaction?: (transactionId: string) => Promise<void>;
   currentUserRole: string;
   currentUserName: string;
 }
@@ -67,6 +68,7 @@ export default function DailyCollectionsView({
   transactions,
   onAddTransaction,
   onUpdateTransaction,
+  onDeleteTransaction,
   currentUserRole,
   currentUserName
 }: DailyCollectionsViewProps) {
@@ -272,12 +274,22 @@ export default function DailyCollectionsView({
     }]);
   };
 
-  const handleDeleteRow = (no: number) => {
+  const handleDeleteRow = async (no: number) => {
     if (isReadOnly) return;
+    const targetRow = rows.find(r => r.no === no);
     const confirmed = window.confirm(
-      `Delete daily collection row ${no}? This cannot be undone. Do you want to proceed?`
+      `Delete daily collection row ${no}? This will completely delete the transaction record from the sheet and the database. Do you want to proceed?`
     );
     if (!confirmed) return;
+
+    if (targetRow?.transactionId && onDeleteTransaction) {
+      try {
+        await onDeleteTransaction(targetRow.transactionId);
+      } catch (err: any) {
+        setErrorMessage(err.message || 'Failed to delete transaction from database.');
+        return;
+      }
+    }
 
     setRows(prev => prev.filter(r => r.no !== no).map((r, index) => ({ ...r, no: index + 1 })));
   };
@@ -289,23 +301,48 @@ export default function DailyCollectionsView({
     setExpenses(prev => [...prev, { no: nextNo, description: '', amount: 0 }]);
   };
 
-  const handleDeleteExpenseRow = (index: number) => {
+  const handleDeleteExpenseRow = async (index: number) => {
     if (isReadOnly) return;
+    const targetExp = expenses[index];
     const confirmed = window.confirm(
-      `Delete expense line ${index + 1}? This cannot be undone. Do you want to proceed?`
+      `Delete expense line ${index + 1}? This will completely delete the transaction from the database. Do you want to proceed?`
     );
     if (!confirmed) return;
+
+    if (targetExp?.transactionId && onDeleteTransaction) {
+      try {
+        await onDeleteTransaction(targetExp.transactionId);
+      } catch (err: any) {
+        setErrorMessage(err.message || 'Failed to delete expense transaction from database.');
+        return;
+      }
+    }
 
     setExpenses(prev => prev.filter((_, idx) => idx !== index));
   };
 
   // Reset to a blank daily sheet
-  const handleResetDefaults = () => {
+  const handleResetDefaults = async () => {
     if (isReadOnly) return;
     const confirmed = window.confirm(
-      'Clear this daily sheet? All unposted collection and expense entries on this sheet will be removed. Do you want to proceed?'
+      'Clear this daily sheet? All collection and expense entries on this sheet (including posted transactions in the database) will be completely deleted. Do you want to proceed?'
     );
     if (!confirmed) return;
+
+    if (onDeleteTransaction) {
+      const allTxIds = [
+        ...rows.map(r => r.transactionId),
+        ...expenses.map(e => e.transactionId)
+      ].filter(Boolean) as string[];
+
+      for (const txId of allTxIds) {
+        try {
+          await onDeleteTransaction(txId);
+        } catch (err) {
+          console.error("Error deleting transaction during sheet clear:", err);
+        }
+      }
+    }
 
     setRows([]);
     setExpenses([]);

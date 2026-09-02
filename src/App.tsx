@@ -428,6 +428,24 @@ export default function App() {
     setMembers(data);
   };
 
+  const handleDeleteTransaction = async (transactionId: string) => {
+    if (!currentUser || !canRole(currentUser, TRANSACTION_WRITE_ROLES)) {
+      setSecurityAlert({
+        title: "Unauthorized Action Blocked",
+        message: `Your active profile [${currentUser?.role}] does not possess transaction deletion rights.`
+      });
+      throw new Error('Your profile cannot delete ledger transactions.');
+    }
+
+    await fetchSaccoJson<{ message: string; transaction: Transaction }>(`/api/transactions/${transactionId}`, {
+      method: 'DELETE'
+    }, authToken);
+
+    setTransactions(prev => prev.filter(t => t.id !== transactionId && t.reversalOf !== transactionId));
+    const data = await fetchSaccoJson<Member[]>('/api/members', {}, authToken);
+    setMembers(data);
+  };
+
   // Auth Screen Guard
   if (isAuthInitializing) {
     return <div className="min-h-screen bg-slate-50 flex items-center justify-center text-sm text-slate-600">Restoring secure session...</div>;
@@ -448,18 +466,20 @@ export default function App() {
       return (
         <div className="flex-1 flex flex-col items-center justify-center bg-slate-50 p-8 space-y-4">
           <div className="relative">
-            <div className="w-12 h-12 border-4 border-slate-200 border-t-emerald-600 rounded-full animate-spin"></div>
+            <div className="w-12 h-12 rounded-full border-4 border-slate-200 border-t-emerald-600 animate-spin"></div>
+            <div className="absolute inset-0 flex items-center justify-center">
+              <span className="text-xs font-mono font-bold text-slate-400">OS</span>
+            </div>
           </div>
-          <div className="text-center">
-            <h3 className="text-xs font-bold text-slate-800 uppercase tracking-widest font-mono">Syncing Sacco OS Ledger</h3>
-            <p className="text-[10px] text-slate-400 font-mono mt-1">Loading records from persistent storage...</p>
-          </div>
+          <p className="text-xs font-mono text-slate-500 uppercase tracking-widest animate-pulse">
+            Connecting Ledger Node...
+          </p>
         </div>
       );
     }
 
     if (currentUser.role === 'Member') {
-      return memberPortal ? <MemberPortal data={memberPortal} token={authToken} onApplicationCreated={handleRefreshData} onAccountSuspended={handleLogout} /> : (
+      return memberPortal ? <MemberPortal data={memberPortal} currentUser={currentUser} /> : (
         <div className="flex-1 flex items-center justify-center bg-slate-50 text-sm text-slate-600">Loading your member account...</div>
       );
     }
@@ -528,6 +548,7 @@ export default function App() {
             transactions={transactions}
             onAddTransaction={handleAddTransaction}
             onUpdateTransaction={handleUpdateTransaction}
+            onDeleteTransaction={handleDeleteTransaction}
             currentUserRole={currentUser.role}
             currentUserName={currentUser.name}
           />
@@ -537,6 +558,7 @@ export default function App() {
           <ExpensesView
             transactions={transactions}
             onAddTransaction={handleAddTransaction}
+            onDeleteTransaction={handleDeleteTransaction}
             currentUserRole={currentUser.role}
             currentUserName={currentUser.name}
           />
@@ -561,6 +583,7 @@ export default function App() {
             onAddTransaction={handleAddTransaction}
             onUpdateTransaction={handleUpdateTransaction}
             onReverseTransaction={handleReverseTransaction}
+            onDeleteTransaction={handleDeleteTransaction}
             currentUser={currentUser}
           />
         );

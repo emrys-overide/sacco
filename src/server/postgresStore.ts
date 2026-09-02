@@ -836,6 +836,38 @@ export async function correctPostgresTransaction(
   }
 }
 
+export async function deletePostgresTransaction(pool: Pool, transactionId: string): Promise<Transaction> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const originalResult = await client.query(`${TRANSACTION_SELECT} WHERE le.id = $1 FOR UPDATE OF le`, [transactionId]);
+    if (!originalResult.rowCount) {
+      throw new PersistenceError(404, 'Transaction to delete was not found.', 'TRANSACTION_NOT_FOUND');
+    }
+    const original = mapTransaction(originalResult.rows[0]);
+
+    await client.query(
+      `UPDATE coop_bank_ipn_events
+       SET ledger_entry_id = NULL,
+           reconciliation_status = 'UNRECONCILED',
+           status = 'Received'
+       WHERE ledger_entry_id = $1`,
+      [transactionId]
+    );
+
+    await client.query('DELETE FROM ledger_entries WHERE reversal_of = $1', [transactionId]);
+    await client.query('DELETE FROM ledger_entries WHERE id = $1', [transactionId]);
+    await client.query('COMMIT');
+    return original;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (error instanceof PersistenceError) throw error;
+    return translatePgError(error);
+  } finally {
+    client.release();
+  }
+}
+
 const PAYMENT_SELECT = `
   SELECT p.*, m.full_name AS member_name, v.plate_number
   FROM mpesa_payments p
