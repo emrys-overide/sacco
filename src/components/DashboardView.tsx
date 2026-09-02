@@ -210,6 +210,7 @@ export default function DashboardView({
   const [isMinimized, setIsMinimized] = useState(false);
 
   // Form State
+  const [transactionDate, setTransactionDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [memberId, setMemberId] = useState('');
   const [personName, setPersonName] = useState('');
   const [vehiclePlate, setVehiclePlate] = useState('');
@@ -341,6 +342,9 @@ export default function DashboardView({
     const automaticRefCode = `SWT-MAN-${Date.now()}`;
     const resolvedMemberId = isExpenseEntry ? undefined : (matchedMember?.id || matchedVehicle?.ownerId);
     const resolvedMemberName = isExpenseEntry ? undefined : (matchedMember?.name || matchedVehicle?.ownerName || personName.trim() || undefined);
+    const effectiveTimestamp = transactionDate
+      ? new Date(`${transactionDate}T${new Date().toTimeString().slice(0, 8)}`).toISOString()
+      : new Date().toISOString();
     
     onAddTransaction({
       memberId: resolvedMemberId,
@@ -354,6 +358,7 @@ export default function DashboardView({
         ? `${vehicleClass} daily collection: gross KES ${dailyGrossAmount}, deductions KES ${Number(expenseDeduction) || 0}`
         : `${category} recorded for ${resolvedMemberName || 'Sacco Office'}`),
       tillNumber: tillNumber,
+      timestamp: effectiveTimestamp,
       ...(category === 'Daily Contribution' ? {
         vehicleClass,
         operationAmount: Number(operationAmount) || 0,
@@ -365,9 +370,10 @@ export default function DashboardView({
         expenseDeduction: Number(expenseDeduction) || 0,
         grossAmount: dailyGrossAmount
       } : {})
-    });
+    } as any);
 
     // Reset Form
+    setTransactionDate(new Date().toISOString().slice(0, 10));
     setMemberId('');
     setPersonName('');
     setVehiclePlate('');
@@ -799,7 +805,7 @@ export default function DashboardView({
             <table className="w-full text-left">
               <thead className="bg-slate-50/50 text-[10px] text-slate-400 font-bold uppercase tracking-wider border-b border-slate-100">
                 <tr>
-                  <th className="px-6 py-4">Timestamp / Ref</th>
+                  <th className="px-6 py-4">Date / Ref</th>
                   <th className="px-6 py-4">Member / Matatu</th>
                   <th className="px-6 py-4">Description</th>
                   <th className="px-6 py-4 text-right">Amount</th>
@@ -810,7 +816,10 @@ export default function DashboardView({
                   <tr key={tx.id} className="hover:bg-slate-50/40 transition-colors duration-150">
                     <td className="px-6 py-4 text-slate-500">
                       <div className="flex flex-col">
-                        <span className="font-bold text-slate-700 font-mono">
+                        <span className="font-bold text-slate-800 font-mono">
+                          {new Date(tx.timestamp).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}
+                        </span>
+                        <span className="text-[10px] text-slate-500 font-mono">
                           {new Date(tx.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                         </span>
                         <span className="text-[10px] text-slate-400 uppercase tracking-widest font-mono mt-0.5">{tx.refCode}</span>
@@ -868,7 +877,7 @@ export default function DashboardView({
             </h3>
 
             <form onSubmit={handleCreateTx} className="space-y-4">
-              <div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
                     Book Category *
@@ -890,6 +899,18 @@ export default function DashboardView({
                   </select>
                 </div>
 
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
+                    Transaction Date *
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={transactionDate}
+                    onChange={(e) => setTransactionDate(e.target.value)}
+                    className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-mono focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 bg-white"
+                  />
+                </div>
               </div>
 
               {category === 'Daily Contribution' && (

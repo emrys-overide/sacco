@@ -372,7 +372,7 @@ export default function App() {
     const payload = {
       ...newTxData,
       recorderName: currentUser?.name || 'System Official',
-      timestamp: new Date().toISOString()
+      timestamp: (newTxData as any).timestamp || new Date().toISOString()
     };
 
     try {

@@ -46,6 +46,7 @@ export default function ExpensesView({
   const [printVoucherId, setPrintVoucherId] = useState<string | null>(null);
 
   // Form State
+  const [voucherDate, setVoucherDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [title, setTitle] = useState('');
   const [category, setCategory] = useState<'Office Expenses' | 'Petty Cash' | 'Utilities' | 'Equipment'>('Office Expenses');
   const [amount, setAmount] = useState('');
@@ -92,6 +93,7 @@ export default function ExpensesView({
     }
 
     setRefCode(generatedRef);
+    setVoucherDate(new Date().toISOString().slice(0, 10));
     setTitle('');
     setAmount('');
     setRecipient('');
@@ -136,6 +138,9 @@ export default function ExpensesView({
 
     // Assemble description with details
     const fullDescription = `${title.trim()}${recipient ? ` (Paid to: ${recipient.trim()})` : ''}${notes ? ` - ${notes.trim()}` : ''}`;
+    const effectiveTimestamp = voucherDate
+      ? new Date(`${voucherDate}T${new Date().toTimeString().slice(0, 8)}`).toISOString()
+      : new Date().toISOString();
 
     onAddTransaction({
       description: fullDescription,
@@ -143,8 +148,9 @@ export default function ExpensesView({
       type: 'Debit',
       category: category,
       amount: numericAmount,
-      tillNumber: tillNumber
-    });
+      tillNumber: tillNumber,
+      timestamp: effectiveTimestamp
+    } as any);
 
     setSuccessMessage(`Success: Expense voucher ${refCode.toUpperCase()} for KES ${numericAmount.toLocaleString()} logged and approved!`);
     setShowAddModal(false);
@@ -530,20 +536,35 @@ export default function ExpensesView({
             </div>
 
             <form onSubmit={handleCreateExpense} className="space-y-4">
-              <div>
-                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1 font-mono">
-                  Expense Category *
-                </label>
-                <select
-                  value={category}
-                  onChange={(e) => setCategory(e.target.value as any)}
-                  className="w-full p-2.5 border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-rose-600 bg-white"
-                >
-                  <option value="Office Expenses">Office Expenses</option>
-                  <option value="Petty Cash">Petty Cash</option>
-                  <option value="Utilities">Utilities</option>
-                  <option value="Equipment">Equipment</option>
-                </select>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1 font-mono">
+                    Expense Category *
+                  </label>
+                  <select
+                    value={category}
+                    onChange={(e) => setCategory(e.target.value as any)}
+                    className="w-full p-2.5 border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-rose-600 bg-white"
+                  >
+                    <option value="Office Expenses">Office Expenses</option>
+                    <option value="Petty Cash">Petty Cash</option>
+                    <option value="Utilities">Utilities</option>
+                    <option value="Equipment">Equipment</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1 font-mono">
+                    Voucher Date *
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={voucherDate}
+                    onChange={(e) => setVoucherDate(e.target.value)}
+                    className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-mono focus:outline-none focus:border-rose-600 bg-white"
+                  />
+                </div>
               </div>
 
               <div>

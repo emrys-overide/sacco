@@ -67,6 +67,7 @@ export default function ReportsView({
 
   // Accountant Workspace States
   const [journalType, setJournalType] = useState<'Credit' | 'Debit'>('Credit');
+  const [journalDate, setJournalDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [journalCategory, setJournalCategory] = useState<'Daily Contribution' | 'Savings Contribution' | 'Registration Fee' | 'Management Fee' | 'Office Expenses' | 'Petty Cash' | 'Penalty' | 'Utilities' | 'Equipment'>('Daily Contribution');
   const [journalAmount, setJournalAmount] = useState<string>('');
   const [journalDescription, setJournalDescription] = useState<string>('');
@@ -1702,6 +1703,10 @@ export default function ReportsView({
                     }
                   }
 
+                  const effectiveTimestamp = journalDate
+                    ? new Date(`${journalDate}T${new Date().toTimeString().slice(0, 8)}`).toISOString()
+                    : new Date().toISOString();
+
                   try {
                     await onAddTransaction({
                       type: journalType,
@@ -1712,8 +1717,9 @@ export default function ReportsView({
                       tillNumber: journalTill,
                       memberId: journalRequiresRegistration ? resolvedMemberId : undefined,
                       memberName: journalRequiresRegistration ? members.find(m => m.id === resolvedMemberId)?.name : undefined,
-                      vehiclePlate: journalRequiresRegistration ? journalVehiclePlate : undefined
-                    });
+                      vehiclePlate: journalRequiresRegistration ? journalVehiclePlate : undefined,
+                      timestamp: effectiveTimestamp
+                    } as any);
 
                     setJournalSuccess(`Journal voucher successfully posted and written to Ledger! Ref: ${journalRefCode.toUpperCase()}`);
                     setJournalError('');
@@ -1722,6 +1728,7 @@ export default function ReportsView({
                     setJournalRefCode('');
                     setJournalMemberId('');
                     setJournalVehiclePlate('');
+                    setJournalDate(new Date().toISOString().slice(0, 10));
                     
                     setTimeout(() => {
                       setJournalSuccess('');
@@ -1810,7 +1817,7 @@ export default function ReportsView({
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <div>
                       <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Journal Account / Category</label>
                       <select
@@ -1844,6 +1851,17 @@ export default function ReportsView({
                         <option value="Utilities">Utilities &amp; Licences</option>
                         <option value="Equipment">Capital Asset / Equipment</option>
                       </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Voucher Date *</label>
+                      <input
+                        type="date"
+                        required
+                        value={journalDate}
+                        onChange={(e) => setJournalDate(e.target.value)}
+                        className="w-full p-2 border border-slate-200 rounded font-mono text-xs focus:ring-1 focus:ring-emerald-600 focus:outline-none bg-white"
+                      />
                     </div>
 
                     <div>
