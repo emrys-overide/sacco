@@ -108,6 +108,7 @@ test('rejects savings entries routed to the operations account', () => {
 test('matches payments by explicit assignment, plate, phone, then leaves them unmatched', () => {
   assert.equal(matchPaymentMember([member], '', '', member.id).matchMethod, 'Manual Assignment');
   assert.equal(matchPaymentMember([member], 'kcj402x', '').matchMethod, 'Vehicle Plate');
+  assert.equal(matchPaymentMember([member], 'KCJ 402X', '').matchMethod, 'Vehicle Plate');
   assert.equal(matchPaymentMember([member], '', '0712345678').matchMethod, 'Phone Number');
   assert.equal(matchPaymentMember([member], 'UNKNOWN', '0700000000').matchMethod, 'None');
 });

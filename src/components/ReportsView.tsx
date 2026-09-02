@@ -1675,10 +1675,18 @@ export default function ReportsView({
                     setJournalError("A bank reference or cash voucher code is required.");
                     return;
                   }
+                  let resolvedMemberId = journalMemberId;
                   if (journalRequiresRegistration) {
-                    const member = members.find(item => item.id === journalMemberId && item.status === 'Active');
+                    let member = members.find(item => item.id === resolvedMemberId && item.status === 'Active');
+                    if (!member && journalVehiclePlate) {
+                      const veh = vehicles.find(item => item.plateNumber === journalVehiclePlate && item.status === 'Active');
+                      if (veh && veh.ownerId) {
+                        member = members.find(item => item.id === veh.ownerId && item.status === 'Active');
+                        if (member) resolvedMemberId = member.id;
+                      }
+                    }
                     if (!member) {
-                      setJournalError('Select an active registered member.');
+                      setJournalError('Select an active registered member or vehicle.');
                       return;
                     }
                     if (journalVehiclePlate) {
@@ -1702,8 +1710,8 @@ export default function ReportsView({
                       description: journalDescription.trim(),
                       refCode: journalRefCode.toUpperCase().trim(),
                       tillNumber: journalTill,
-                      memberId: journalRequiresRegistration ? journalMemberId : undefined,
-                      memberName: journalRequiresRegistration ? members.find(m => m.id === journalMemberId)?.name : undefined,
+                      memberId: journalRequiresRegistration ? resolvedMemberId : undefined,
+                      memberName: journalRequiresRegistration ? members.find(m => m.id === resolvedMemberId)?.name : undefined,
                       vehiclePlate: journalRequiresRegistration ? journalVehiclePlate : undefined
                     });
 
@@ -1910,7 +1918,16 @@ export default function ReportsView({
                       <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Onboarded Vehicle / V.REG (Optional)</label>
                       <select
                         value={journalVehiclePlate}
-                        onChange={(e) => setJournalVehiclePlate(e.target.value)}
+                        onChange={(e) => {
+                          const nextPlate = e.target.value;
+                          setJournalVehiclePlate(nextPlate);
+                          if (nextPlate) {
+                            const matchedVeh = vehicles.find(v => v.plateNumber === nextPlate && v.status === 'Active');
+                            if (matchedVeh && matchedVeh.ownerId) {
+                              setJournalMemberId(matchedVeh.ownerId);
+                            }
+                          }
+                        }}
                         className="w-full p-2 border border-slate-200 rounded font-mono text-xs focus:ring-1 focus:ring-emerald-600 focus:outline-none bg-white"
                       >
                         <option value="">No vehicle attached</option>

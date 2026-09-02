@@ -265,6 +265,33 @@ export default function DashboardView({
     }
   };
 
+  const handleVehiclePlateChange = (rawVal: string) => {
+    const nextPlate = sanitizeVehiclePlate(rawVal);
+    setVehiclePlate(nextPlate);
+    const normalized = nextPlate.replace(/\s+/g, '').toUpperCase();
+    if (normalized) {
+      const matched = vehicles.find(v => v.plateNumber.replace(/\s+/g, '').toUpperCase() === normalized);
+      if (matched) {
+        const ownerMember = members.find(m => m.id === matched.ownerId && m.status === 'Active') ||
+          (matched.ownerName ? members.find(m => m.name.trim().toLowerCase() === matched.ownerName.trim().toLowerCase() && m.status === 'Active') : undefined);
+        if (ownerMember) {
+          setPersonName(ownerMember.name);
+          setMemberId(ownerMember.id);
+        } else if (matched.ownerName) {
+          setPersonName(matched.ownerName);
+          setMemberId(matched.ownerId || '');
+        }
+      }
+    }
+  };
+
+  const handlePersonNameChange = (rawVal: string) => {
+    const nextName = sanitizePersonName(rawVal);
+    setPersonName(nextName);
+    const member = members.find(item => item.name.trim().toLowerCase() === nextName.trim().toLowerCase() && item.status === 'Active');
+    setMemberId(member?.id || '');
+  };
+
   const handleCreateTx = (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
@@ -276,43 +303,56 @@ export default function DashboardView({
     }
 
     const normalizedVehiclePlate = vehiclePlate.trim().toUpperCase();
-    const matchedMember = members.find(member =>
-      member.status === 'Active' && member.name.trim().toLowerCase() === personName.trim().toLowerCase()
-    );
     const matchedVehicle = normalizedVehiclePlate
       ? vehicles.find(v => v.plateNumber.replace(/\s+/g, '').toUpperCase() === normalizedVehiclePlate.replace(/\s+/g, ''))
       : undefined;
+
+    let matchedMember = members.find(member =>
+      member.status === 'Active' && member.name.trim().toLowerCase() === personName.trim().toLowerCase()
+    );
+
+    if (!matchedMember && matchedVehicle) {
+      matchedMember = members.find(member => member.id === matchedVehicle.ownerId && member.status === 'Active') ||
+        (matchedVehicle.ownerName ? members.find(member => member.name.trim().toLowerCase() === matchedVehicle.ownerName.trim().toLowerCase() && member.status === 'Active') : undefined);
+    }
+
     if (requiresRegisteredMember(category)) {
-      if (!matchedMember) {
-        setError(`Name "${personName.trim() || 'blank'}" is not registered. Register the member first.`);
-        return;
-      }
       if (normalizedVehiclePlate && !matchedVehicle) {
         setError(`Car/V.REG "${normalizedVehiclePlate}" is not registered. Register the vehicle first.`);
-        return;
-      }
-      if (matchedVehicle && matchedVehicle.ownerId !== matchedMember.id) {
-        setError(`Car/V.REG "${matchedVehicle.plateNumber}" is not registered under ${matchedMember.name}.`);
         return;
       }
       if (matchedVehicle && matchedVehicle.status !== 'Active') {
         setError(`Car/V.REG "${matchedVehicle.plateNumber}" is not active.`);
         return;
       }
+      if (!matchedMember && !matchedVehicle) {
+        setError(`Please enter a registered vehicle plate number or member name.`);
+        return;
+      }
+      if (!matchedMember && matchedVehicle && !matchedVehicle.ownerName) {
+        setError(`No active member record is linked to vehicle "${matchedVehicle.plateNumber}".`);
+        return;
+      }
+      if (matchedVehicle && matchedMember && matchedVehicle.ownerId && matchedVehicle.ownerId !== matchedMember.id) {
+        setError(`Car/V.REG "${matchedVehicle.plateNumber}" is not registered under ${matchedMember.name}.`);
+        return;
+      }
     }
     const automaticRefCode = `SWT-MAN-${Date.now()}`;
+    const resolvedMemberId = isExpenseEntry ? undefined : (matchedMember?.id || matchedVehicle?.ownerId);
+    const resolvedMemberName = isExpenseEntry ? undefined : (matchedMember?.name || matchedVehicle?.ownerName || personName.trim() || undefined);
     
     onAddTransaction({
-      memberId: isExpenseEntry ? undefined : matchedMember?.id,
-      memberName: personName.trim() || matchedMember?.name || undefined,
-      vehiclePlate: isExpenseEntry ? undefined : normalizedVehiclePlate,
+      memberId: resolvedMemberId,
+      memberName: resolvedMemberName,
+      vehiclePlate: isExpenseEntry ? undefined : (matchedVehicle?.plateNumber || normalizedVehiclePlate || undefined),
       category,
       type,
       amount: transactionAmount,
       refCode: automaticRefCode,
       description: description.trim() || (category === 'Daily Contribution'
         ? `${vehicleClass} daily collection: gross KES ${dailyGrossAmount}, deductions KES ${Number(expenseDeduction) || 0}`
-        : `${category} recorded for ${matchedMember ? matchedMember.name : 'Sacco Office'}`),
+        : `${category} recorded for ${resolvedMemberName || 'Sacco Office'}`),
       tillNumber: tillNumber,
       ...(category === 'Daily Contribution' ? {
         vehicleClass,
@@ -970,44 +1010,39 @@ export default function DashboardView({
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <div>
                     <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
-                      Registered Member Name *
+                      V.REG / Car Plate {vehiclePlate.trim() ? '(Selected)' : '(Auto-fills Member)'}
                     </label>
                     <input
                       type="text"
-                      required
-                      list="registered-member-names"
-                      value={personName}
-                      onChange={(e) => {
-                        const nextName = sanitizePersonName(e.target.value);
-                        const member = members.find(item => item.name.trim().toLowerCase() === nextName.trim().toLowerCase());
-                        setPersonName(nextName);
-                        setMemberId(member?.id || '');
-                      }}
-                      placeholder="Type the member's registered name"
-                      className="w-full p-2.5 border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 bg-white"
+                      list="active-onboarded-vehicles"
+                      value={vehiclePlate}
+                      onChange={(e) => handleVehiclePlateChange(e.target.value)}
+                      placeholder="Type plate (e.g. KCA 123A)"
+                      className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-mono uppercase focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 bg-white"
                     />
-                    <datalist id="registered-member-names">
-                      {members.filter(member => member.status === 'Active').map(member => (
-                        <option key={member.id} value={member.name} />
+                    <datalist id="active-onboarded-vehicles">
+                      {activeVehicles.map(vehicle => (
+                        <option key={vehicle.id} value={vehicle.plateNumber}>{vehicle.ownerName}</option>
                       ))}
                     </datalist>
                   </div>
 
                   <div>
                     <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
-                      V.REG / Car (Optional)
+                      Registered Member Name {vehiclePlate.trim() ? '(Auto-reconciled)' : '*'}
                     </label>
                     <input
                       type="text"
-                      list="active-onboarded-vehicles"
-                      value={vehiclePlate}
-                      onChange={(e) => setVehiclePlate(sanitizeVehiclePlate(e.target.value))}
-                      placeholder="Leave blank or type a registered V.REG"
-                      className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-mono uppercase focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 bg-white"
+                      required={!vehiclePlate.trim()}
+                      list="registered-member-names"
+                      value={personName}
+                      onChange={(e) => handlePersonNameChange(e.target.value)}
+                      placeholder={vehiclePlate.trim() ? "Auto-detected from plate" : "Type registered member name"}
+                      className="w-full p-2.5 border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 bg-white"
                     />
-                    <datalist id="active-onboarded-vehicles">
-                      {activeVehicles.map(vehicle => (
-                        <option key={vehicle.id} value={vehicle.plateNumber}>{vehicle.ownerName}</option>
+                    <datalist id="registered-member-names">
+                      {members.filter(member => member.status === 'Active').map(member => (
+                        <option key={member.id} value={member.name} />
                       ))}
                     </datalist>
                   </div>

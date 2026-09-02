@@ -1434,6 +1434,7 @@ async function completePasswordAuthentication(user: PasswordAuthenticatedUser): 
 function applyLocalMemberBalance(tx: Transaction) {
   const delta = getDailyContributionBalanceDelta(tx);
   if (!delta.shares && !delta.savings && !delta.loan) return;
+  if (!tx.memberId) return;
 
   const member = localStore.members.find(m => m.id === tx.memberId);
   if (!member) {
@@ -1734,11 +1735,60 @@ async function validateLedgerRegistration(tx: Transaction): Promise<void> {
   if (!requiresRegisteredMember(tx.category) || tx.reversalOf) return;
 
   const typedName = tx.memberName?.trim() || '';
-  if (!tx.memberId && !typedName) {
-    throw new HttpError(400, 'Type a registered member name before posting this transaction.', 'REGISTERED_MEMBER_REQUIRED');
+  const plate = tx.vehiclePlate?.trim() || '';
+  if (!tx.memberId && !typedName && !plate) {
+    throw new HttpError(400, 'Enter a registered vehicle plate or member name before posting this transaction.', 'REGISTERED_MEMBER_REQUIRED');
   }
 
   if (postgresPool) {
+    if (plate) {
+      const normalizedPlate = plate.replace(/\s+/g, '').toUpperCase();
+      const vehicleResult = await postgresPool.query(
+        `SELECT id, member_id, plate_number, status, owner_name
+         FROM vehicles
+         WHERE upper(replace(plate_number, ' ', '')) = $1
+         LIMIT 1`,
+        [normalizedPlate]
+      );
+      if (!vehicleResult.rowCount) {
+        throw new HttpError(400, `Car/V.REG "${tx.vehiclePlate}" is not registered. Register the vehicle first.`, 'VEHICLE_NOT_REGISTERED');
+      }
+      const vehicle = vehicleResult.rows[0];
+      if (vehicle.status !== 'Active') {
+        throw new HttpError(409, `Car/V.REG "${vehicle.plate_number}" is not active.`, 'VEHICLE_NOT_ACTIVE');
+      }
+      tx.vehiclePlate = vehicle.plate_number;
+
+      const targetMemberId = tx.memberId || (vehicle.member_id ? String(vehicle.member_id) : undefined);
+      const memberResult = targetMemberId
+        ? await postgresPool.query(
+            'SELECT id, full_name, status FROM members WHERE id::text = $1 LIMIT 1',
+            [targetMemberId]
+          )
+        : await postgresPool.query(
+            'SELECT id, full_name, status FROM members WHERE lower(trim(full_name)) = lower($1) LIMIT 1',
+            [typedName || vehicle.owner_name]
+          );
+      if (!memberResult.rowCount) {
+        if (!vehicle.member_id && (vehicle.owner_name || typedName)) {
+          tx.memberId = '';
+          tx.memberName = vehicle.owner_name || typedName;
+          return;
+        }
+        throw new HttpError(400, `Member registered for plate "${vehicle.plate_number}" was not found.`, 'MEMBER_NAME_NOT_REGISTERED');
+      }
+      const member = memberResult.rows[0];
+      if (member.status !== 'Active') {
+        throw new HttpError(409, `Member "${member.full_name}" is ${String(member.status).toLowerCase()}. Activate the member before recording a collection.`, 'MEMBER_ACTIVATION_REQUIRED');
+      }
+      if (vehicle.member_id && String(vehicle.member_id) !== String(member.id)) {
+        throw new HttpError(400, `Car/V.REG "${vehicle.plate_number}" is not registered under ${member.full_name}.`, 'MEMBER_VEHICLE_MISMATCH');
+      }
+      tx.memberId = String(member.id);
+      tx.memberName = member.full_name;
+      return;
+    }
+
     const memberResult = tx.memberId
       ? await postgresPool.query(
           'SELECT id, full_name, status FROM members WHERE id::text = $1 LIMIT 1',
@@ -1758,31 +1808,44 @@ async function validateLedgerRegistration(tx: Transaction): Promise<void> {
     }
     tx.memberId = String(member.id);
     tx.memberName = member.full_name;
-
-    if (!tx.vehiclePlate?.trim()) return;
-    const normalizedPlate = tx.vehiclePlate.replace(/\s+/g, '').toUpperCase();
-    const vehicleResult = await postgresPool.query(
-      `SELECT id, member_id, plate_number, status
-       FROM vehicles
-       WHERE upper(replace(plate_number, ' ', '')) = $1
-       LIMIT 1`,
-      [normalizedPlate]
-    );
-    if (!vehicleResult.rowCount) {
-      throw new HttpError(400, `Car/V.REG "${tx.vehiclePlate}" is not registered. Register the vehicle first.`, 'VEHICLE_NOT_REGISTERED');
-    }
-    const vehicle = vehicleResult.rows[0];
-    if (String(vehicle.member_id) !== tx.memberId) {
-      throw new HttpError(400, `Car/V.REG "${vehicle.plate_number}" is not registered under ${tx.memberName}.`, 'MEMBER_VEHICLE_MISMATCH');
-    }
-    if (vehicle.status !== 'Active') {
-      throw new HttpError(409, `Car/V.REG "${vehicle.plate_number}" is not active.`, 'VEHICLE_NOT_ACTIVE');
-    }
-    tx.vehiclePlate = vehicle.plate_number;
     return;
   }
 
   const [members, vehicles] = await Promise.all([getAllMembers(), getAllVehicles()]);
+  if (plate) {
+    const normalizedPlate = plate.replace(/\s+/g, '').toUpperCase();
+    const vehicle = vehicles.find(item => item.plateNumber.replace(/\s+/g, '').toUpperCase() === normalizedPlate);
+    if (!vehicle) {
+      throw new HttpError(400, `Car/V.REG "${tx.vehiclePlate}" is not registered. Register the vehicle first.`, 'VEHICLE_NOT_REGISTERED');
+    }
+    if (vehicle.status !== 'Active') {
+      throw new HttpError(409, `Car/V.REG "${vehicle.plateNumber}" is not active.`, 'VEHICLE_NOT_ACTIVE');
+    }
+    tx.vehiclePlate = vehicle.plateNumber;
+
+    const targetMemberId = tx.memberId || vehicle.ownerId;
+    const member = targetMemberId
+      ? members.find(item => item.id === targetMemberId)
+      : members.find(item => item.name.trim().toLowerCase() === (typedName || vehicle.ownerName || '').toLowerCase());
+    if (!member) {
+      if (!vehicle.ownerId && (vehicle.ownerName || typedName)) {
+        tx.memberId = '';
+        tx.memberName = vehicle.ownerName || typedName;
+        return;
+      }
+      throw new HttpError(400, `Member registered for plate "${vehicle.plateNumber}" was not found.`, 'MEMBER_NAME_NOT_REGISTERED');
+    }
+    if (member.status !== 'Active') {
+      throw new HttpError(409, `Member "${member.name}" is ${member.status.toLowerCase()}. Activate the member before recording a collection.`, 'MEMBER_ACTIVATION_REQUIRED');
+    }
+    if (vehicle.ownerId && vehicle.ownerId !== member.id) {
+      throw new HttpError(400, `Car/V.REG "${vehicle.plateNumber}" is not registered under ${member.name}.`, 'MEMBER_VEHICLE_MISMATCH');
+    }
+    tx.memberId = member.id;
+    tx.memberName = member.name;
+    return;
+  }
+
   const member = tx.memberId
     ? members.find(item => item.id === tx.memberId)
     : members.find(item => item.name.trim().toLowerCase() === typedName.toLowerCase());
@@ -1794,20 +1857,6 @@ async function validateLedgerRegistration(tx: Transaction): Promise<void> {
   }
   tx.memberId = member.id;
   tx.memberName = member.name;
-
-  if (!tx.vehiclePlate?.trim()) return;
-  const normalizedPlate = tx.vehiclePlate.replace(/\s+/g, '').toUpperCase();
-  const vehicle = vehicles.find(item => item.plateNumber.replace(/\s+/g, '').toUpperCase() === normalizedPlate);
-  if (!vehicle) {
-    throw new HttpError(400, `Car/V.REG "${tx.vehiclePlate}" is not registered. Register the vehicle first.`, 'VEHICLE_NOT_REGISTERED');
-  }
-  if (vehicle.ownerId !== member.id) {
-    throw new HttpError(400, `Car/V.REG "${vehicle.plateNumber}" is not registered under ${member.name}.`, 'MEMBER_VEHICLE_MISMATCH');
-  }
-  if (vehicle.status !== 'Active') {
-    throw new HttpError(409, `Car/V.REG "${vehicle.plateNumber}" is not active.`, 'VEHICLE_NOT_ACTIVE');
-  }
-  tx.vehiclePlate = vehicle.plateNumber;
 }
 
 async function reconcilePaymentRecord(paymentId: string, memberId: string, recorderName: string): Promise<PaymentRecord> {
