@@ -515,12 +515,94 @@ header.app-topbar::after {
 }
 
 @media print {
-  body, .app-shell, .app-main-surface {
-    background: white !important;
-    backdrop-filter: none !important;
+  @page {
+    size: A4 landscape;
+    margin: 8mm;
   }
+
+  body, html, #root, .app-shell, .app-main-surface {
+    background: #ffffff !important;
+    color: #000000 !important;
+    backdrop-filter: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    min-height: 0 !important;
+    height: auto !important;
+    overflow: visible !important;
+  }
+
   .app-view > *::before {
     display: none !important;
+  }
+
+  /* Force hide all UI chrome and non-printable elements */
+  .no-print,
+  .print\:hidden,
+  nav,
+  header,
+  aside,
+  button,
+  input[type="button"],
+  input[type="submit"] {
+    display: none !important;
+    visibility: hidden !important;
+    height: 0 !important;
+    width: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  /* Dedicated print pages and page breaks */
+  .print-page-break {
+    page-break-after: always !important;
+    break-after: page !important;
+    margin-bottom: 0 !important;
+  }
+
+  /* Print typography and borders */
+  .print-doc {
+    display: block !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  .print-table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    border: 2px solid #000000 !important;
+    margin-bottom: 12px !important;
+  }
+
+  .print-table th {
+    background-color: #f1f5f9 !important;
+    color: #000000 !important;
+    font-size: 16px !important;
+    font-weight: 900 !important;
+    padding: 8px 6px !important;
+    border: 1.5px solid #000000 !important;
+    text-align: left !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  .print-table td {
+    font-size: 18px !important;
+    font-weight: 700 !important;
+    color: #000000 !important;
+    padding: 6px 6px !important;
+    border: 1.5px solid #000000 !important;
+    line-height: 1.2 !important;
+  }
+
+  .print-table tfoot td {
+    font-size: 18px !important;
+    font-weight: 900 !important;
+    background-color: #e2e8f0 !important;
+    color: #000000 !important;
+    border: 2px solid #000000 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
   }
 }
 
