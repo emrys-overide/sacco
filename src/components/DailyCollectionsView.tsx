@@ -857,49 +857,65 @@ export default function DailyCollectionsView({
       </div>
 
       {/* =========================================================================
-          DEDICATED 2-PAGE PRINTABLE DOCUMENT
-          (Page 1: Nissan 14-Seaters | Page 2: Sienta 7-Seaters)
-          High contrast, large fonts (20px), zero delete buttons, zero UI chrome.
+          EXECUTIVE BOARDROOM 2-PAGE PRINTABLE DOCUMENT (LANDSCAPE ORIENTATION)
+          Page 1: Nissan 14-Seaters Register & Stage Expenses
+          Page 2: Sienta 7-Seaters Register & Grand Combined Financial Reconciliation
           ========================================================================= */}
-      <div className="hidden print:block print-doc text-black bg-white w-full">
+      <div className="hidden print:block print-doc text-slate-900 bg-white w-full">
 
         {/* =====================================================================
             PAGE 1: NISSAN (14-SEATER VEHICLES) DAILY COLLECTION SHEET
             ===================================================================== */}
-        <div className="print-page-break p-2">
-          {/* SOWETAMU OFFICIAL HEADER */}
-          <div className="flex justify-between items-center border-b-4 border-black pb-2 mb-2">
-            <div>
-              <h1 className="text-3xl font-black font-display tracking-tight text-black">SOWETAMU SACCO</h1>
-              <p className="text-sm font-bold uppercase tracking-widest font-mono">TRAVELLERS SACCO SOCIETY LTD</p>
-              <p className="text-xs italic text-black">"We Serve with Courtesy, Discipline &amp; Dignity"</p>
+        <div className="print-page-break p-3">
+          {/* EXECUTIVE SOWETAMU EMBLEM & HEADER */}
+          <div className="flex justify-between items-center border-b-2 border-slate-900 pb-3 mb-3">
+            <div className="flex items-center space-x-3">
+              <div className="w-12 h-12 rounded-lg bg-slate-900 text-emerald-400 flex flex-col items-center justify-center font-black font-mono border-2 border-slate-950 shrink-0">
+                <span className="text-[11px] leading-tight">SWT</span>
+                <span className="text-[7px] text-amber-400 tracking-wider">SACCO</span>
+              </div>
+              <div>
+                <h1 className="text-2xl font-black font-display tracking-tight text-slate-950 uppercase leading-none">
+                  SOWETAMU TRAVELLERS SACCO SOCIETY LTD
+                </h1>
+                <p className="text-[10px] text-slate-700 font-bold uppercase tracking-wider font-mono mt-1">
+                  Regulated under Co-operative Societies Act Cap 490 &bull; Reg: CS/NO. 22239
+                </p>
+                <p className="text-[9px] text-slate-500 italic mt-0.5">"We Serve with Courtesy, Discipline &amp; Dignity"</p>
+              </div>
             </div>
-            <div className="text-right text-xs font-mono font-bold space-y-0.5">
-              <p>P.O. BOX 1324-00518, NAIROBI</p>
-              <p>Email: sowetamusaacco@gmail.com</p>
-              <p>Tel: 0715600000 / 0705749293</p>
+
+            <div className="text-right text-[10px] font-mono text-slate-700 space-y-0.5">
+              <p className="font-bold text-slate-900">Head Office: P.O. BOX 1324-00518, NAIROBI</p>
+              <p>Email: sowetamusaacco@gmail.com &bull; Tel: 0715 600 000 / 0705 749 293</p>
+              <p className="text-slate-500 font-bold">Currency: KENYA SHILLINGS (KES)</p>
             </div>
           </div>
 
-          {/* PAGE 1 TITLE & METADATA */}
-          <div className="flex justify-between items-center bg-black text-white p-2 mb-2 font-mono font-bold text-sm uppercase">
-            <span className="text-base font-black">PAGE 1 &bull; NISSAN (14-SEATERS) DAILY COLLECTION SHEET</span>
-            <span>DATE: {selectedDate} | ROUTE: {selectedRoute}</span>
+          {/* PAGE 1 METADATA BANNER */}
+          <div className="flex justify-between items-center bg-slate-900 text-white px-3 py-1.5 mb-2.5 rounded font-mono text-xs uppercase tracking-wide">
+            <span className="font-black text-emerald-400 flex items-center">
+              PAGE 1 OF 2 &bull; NISSAN (14-SEATERS) DAILY FIELD REGISTER
+            </span>
+            <div className="space-x-4 font-bold text-[11px]">
+              <span>STAGE ROUTE: <strong className="text-amber-400">{selectedRoute}</strong></span>
+              <span>DATE: <strong className="text-emerald-400">{selectedDate}</strong></span>
+            </div>
           </div>
 
           {/* NISSAN TABLE */}
           <table className="print-table">
             <thead>
               <tr>
-                <th style={{ width: "45px", textAlign: "center" }}>NO</th>
+                <th style={{ width: "40px", textAlign: "center" }}>NO</th>
                 <th style={{ width: "160px" }}>V.REG (PLATE)</th>
                 <th style={{ textAlign: "right" }}>OPERATION</th>
-                <th style={{ textAlign: "right" }}>ENTRANCE</th>
+                <th style={{ textAlign: "right" }}>ENTRANCE FEE</th>
                 <th style={{ textAlign: "right" }}>LOAN REPAY</th>
                 <th style={{ textAlign: "right" }}>SAVINGS</th>
                 <th style={{ textAlign: "right" }}>S/TICKET</th>
                 <th style={{ textAlign: "right" }}>LEGAL FEE</th>
-                <th style={{ textAlign: "right", width: "140px" }}>TOTAL (KSH)</th>
+                <th style={{ textAlign: "right", width: "150px" }}>TOTAL (KES)</th>
               </tr>
             </thead>
             <tbody>
@@ -907,73 +923,81 @@ export default function DailyCollectionsView({
                 const rTotal = getRowTotal(row);
                 return (
                   <tr key={row.no}>
-                    <td style={{ textAlign: "center" }}>{idx + 1}</td>
-                    <td style={{ fontFamily: "monospace", fontWeight: 900 }}>{row.vehiclePlate || "—"}</td>
+                    <td style={{ textAlign: "center", color: "#64748b" }}>{idx + 1}</td>
+                    <td style={{ fontFamily: "monospace", fontWeight: 900, letterSpacing: "0.5px" }}>
+                      {row.vehiclePlate || "—"}
+                    </td>
                     <td style={{ textAlign: "right" }}>{row.operation > 0 ? row.operation.toLocaleString() : "—"}</td>
                     <td style={{ textAlign: "right" }}>{row.entranceFee > 0 ? row.entranceFee.toLocaleString() : "—"}</td>
                     <td style={{ textAlign: "right" }}>{row.loanRepay > 0 ? row.loanRepay.toLocaleString() : "—"}</td>
                     <td style={{ textAlign: "right" }}>{row.savings > 0 ? row.savings.toLocaleString() : "—"}</td>
                     <td style={{ textAlign: "right" }}>{row.sTicket > 0 ? row.sTicket.toLocaleString() : "—"}</td>
                     <td style={{ textAlign: "right" }}>{row.legalFee > 0 ? row.legalFee.toLocaleString() : "—"}</td>
-                    <td style={{ textAlign: "right", fontWeight: 900 }}>KSH {rTotal.toLocaleString()}</td>
+                    <td style={{ textAlign: "right", fontWeight: 900 }}>KES {rTotal.toLocaleString()}</td>
                   </tr>
                 );
               })}
 
               {nissanRows.length === 0 && (
                 <tr>
-                  <td colSpan={9} style={{ textAlign: "center", padding: "16px", color: "#666" }}>
-                    No Nissan vehicle collections recorded for this date.
+                  <td colSpan={9} style={{ textAlign: "center", padding: "14px", color: "#64748b" }}>
+                    Nil Nissan vehicle collections recorded for this date and route.
                   </td>
                 </tr>
               )}
             </tbody>
             <tfoot>
               <tr>
-                <td colSpan={2} style={{ textAlign: "center" }}>NISSAN TOTALS</td>
+                <td colSpan={2} style={{ textAlign: "center" }}>NISSAN SUB-TOTALS</td>
                 <td style={{ textAlign: "right" }}>{nissanOperation > 0 ? nissanOperation.toLocaleString() : "0"}</td>
                 <td style={{ textAlign: "right" }}>{nissanEntrance > 0 ? nissanEntrance.toLocaleString() : "0"}</td>
                 <td style={{ textAlign: "right" }}>{nissanLoanRepay > 0 ? nissanLoanRepay.toLocaleString() : "0"}</td>
                 <td style={{ textAlign: "right" }}>{nissanSavings > 0 ? nissanSavings.toLocaleString() : "0"}</td>
                 <td style={{ textAlign: "right" }}>{nissanSTicket > 0 ? nissanSTicket.toLocaleString() : "0"}</td>
                 <td style={{ textAlign: "right" }}>{nissanLegalFee > 0 ? nissanLegalFee.toLocaleString() : "0"}</td>
-                <td style={{ textAlign: "right", fontSize: "20px" }}>KSH {nissanTotal.toLocaleString()}</td>
+                <td style={{ textAlign: "right", fontSize: "15px" }}>KES {nissanTotal.toLocaleString()}</td>
               </tr>
             </tfoot>
           </table>
 
           {/* PAGE 1 FOOTER: STAGE EXPENSES & SIGNATURES */}
-          <div className="grid grid-cols-2 gap-4 mt-2 pt-2 border-t-2 border-black font-mono text-sm">
-            <div className="border border-black p-2">
-              <p className="font-bold border-b border-black pb-1 mb-1 uppercase">Daily Stage Expenses (Deductions):</p>
+          <div className="grid grid-cols-2 gap-4 mt-2 font-mono text-xs">
+            <div className="border border-slate-900 rounded p-2.5 bg-slate-50">
+              <p className="font-black text-slate-900 border-b border-slate-300 pb-1 mb-1.5 uppercase text-[11px] flex justify-between">
+                <span>Daily Stage Deductions &amp; Expenses:</span>
+                <span className="text-slate-500 font-normal">Direct Route Costs</span>
+              </p>
               {expenses.length > 0 ? (
                 expenses.map((e, i) => (
-                  <div key={i} className="flex justify-between text-xs py-0.5">
-                    <span>{i + 1}. {e.description}</span>
-                    <span className="font-bold">KES {Number(e.amount).toLocaleString()}</span>
+                  <div key={i} className="flex justify-between text-[11px] py-0.5 border-b border-slate-200 last:border-0">
+                    <span className="text-slate-700">{i + 1}. {e.description}</span>
+                    <span className="font-bold text-slate-900">KES {Number(e.amount).toLocaleString()}</span>
                   </div>
                 ))
               ) : (
-                <p className="text-xs text-gray-500">Nil stage expenses recorded.</p>
+                <p className="text-[11px] text-slate-500 italic py-1">Nil stage expenses recorded.</p>
               )}
-              <div className="flex justify-between font-bold border-t border-black pt-1 mt-1">
-                <span>TOTAL EXPENSES:</span>
-                <span>KES {totalExpenses.toLocaleString()}</span>
+              <div className="flex justify-between font-black border-t-2 border-slate-900 pt-1.5 mt-1.5 text-[11px] text-slate-950">
+                <span>TOTAL DIRECT EXPENDITURES:</span>
+                <span className="text-rose-700">KES {totalExpenses.toLocaleString()}</span>
               </div>
             </div>
 
-            <div className="border border-black p-2 flex flex-col justify-between">
-              <p className="font-bold border-b border-black pb-1 uppercase">Official Stage Endorsement:</p>
-              <div className="space-y-4 text-xs pt-2">
-                <div className="flex justify-between">
-                  <span>Stage Marshall: _______________________</span>
-                  <span>Sign: ___________</span>
+            <div className="border border-slate-900 rounded p-2.5 bg-white flex flex-col justify-between">
+              <p className="font-black text-slate-900 border-b border-slate-300 pb-1 uppercase text-[11px]">
+                Field Operations &amp; Cashier Certification:
+              </p>
+              <div className="space-y-3.5 text-[11px] pt-2 text-slate-800">
+                <div className="flex justify-between items-center">
+                  <span>Stage Marshall Name: _______________________</span>
+                  <span>Signature: ________________</span>
                 </div>
-                <div className="flex justify-between">
-                  <span>Cashier / Clerk: {currentUserName || "_______________________"}</span>
-                  <span>Sign: ___________</span>
+                <div className="flex justify-between items-center">
+                  <span>Cashier / Field Clerk: <strong>{currentUserName || "_______________________"}</strong></span>
+                  <span>Signature: ________________</span>
                 </div>
               </div>
+              <p className="text-[9px] text-slate-500 italic text-right mt-1">Certified as true record of field collections.</p>
             </div>
           </div>
         </div>
@@ -981,40 +1005,56 @@ export default function DailyCollectionsView({
         {/* =====================================================================
             PAGE 2: SIENTA (7-SEATER VEHICLES) DAILY COLLECTION SHEET
             ===================================================================== */}
-        <div className="p-2">
-          {/* SOWETAMU OFFICIAL HEADER */}
-          <div className="flex justify-between items-center border-b-4 border-black pb-2 mb-2">
-            <div>
-              <h1 className="text-3xl font-black font-display tracking-tight text-black">SOWETAMU SACCO</h1>
-              <p className="text-sm font-bold uppercase tracking-widest font-mono">TRAVELLERS SACCO SOCIETY LTD</p>
-              <p className="text-xs italic text-black">"We Serve with Courtesy, Discipline &amp; Dignity"</p>
+        <div className="p-3">
+          {/* EXECUTIVE SOWETAMU EMBLEM & HEADER */}
+          <div className="flex justify-between items-center border-b-2 border-slate-900 pb-3 mb-3">
+            <div className="flex items-center space-x-3">
+              <div className="w-12 h-12 rounded-lg bg-slate-900 text-emerald-400 flex flex-col items-center justify-center font-black font-mono border-2 border-slate-950 shrink-0">
+                <span className="text-[11px] leading-tight">SWT</span>
+                <span className="text-[7px] text-amber-400 tracking-wider">SACCO</span>
+              </div>
+              <div>
+                <h1 className="text-2xl font-black font-display tracking-tight text-slate-950 uppercase leading-none">
+                  SOWETAMU TRAVELLERS SACCO SOCIETY LTD
+                </h1>
+                <p className="text-[10px] text-slate-700 font-bold uppercase tracking-wider font-mono mt-1">
+                  Regulated under Co-operative Societies Act Cap 490 &bull; Reg: CS/NO. 22239
+                </p>
+                <p className="text-[9px] text-slate-500 italic mt-0.5">"We Serve with Courtesy, Discipline &amp; Dignity"</p>
+              </div>
             </div>
-            <div className="text-right text-xs font-mono font-bold space-y-0.5">
-              <p>P.O. BOX 1324-00518, NAIROBI</p>
-              <p>Email: sowetamusaacco@gmail.com</p>
-              <p>Tel: 0715600000 / 0705749293</p>
+
+            <div className="text-right text-[10px] font-mono text-slate-700 space-y-0.5">
+              <p className="font-bold text-slate-900">Head Office: P.O. BOX 1324-00518, NAIROBI</p>
+              <p>Email: sowetamusaacco@gmail.com &bull; Tel: 0715 600 000 / 0705 749 293</p>
+              <p className="text-slate-500 font-bold">Currency: KENYA SHILLINGS (KES)</p>
             </div>
           </div>
 
-          {/* PAGE 2 TITLE & METADATA */}
-          <div className="flex justify-between items-center bg-black text-white p-2 mb-2 font-mono font-bold text-sm uppercase">
-            <span className="text-base font-black">PAGE 2 &bull; SIENTA (7-SEATERS) DAILY COLLECTION SHEET</span>
-            <span>DATE: {selectedDate} | ROUTE: {selectedRoute}</span>
+          {/* PAGE 2 METADATA BANNER */}
+          <div className="flex justify-between items-center bg-slate-900 text-white px-3 py-1.5 mb-2.5 rounded font-mono text-xs uppercase tracking-wide">
+            <span className="font-black text-amber-400 flex items-center">
+              PAGE 2 OF 2 &bull; SIENTA (7-SEATERS) DAILY FIELD REGISTER
+            </span>
+            <div className="space-x-4 font-bold text-[11px]">
+              <span>STAGE ROUTE: <strong className="text-amber-400">{selectedRoute}</strong></span>
+              <span>DATE: <strong className="text-emerald-400">{selectedDate}</strong></span>
+            </div>
           </div>
 
           {/* SIENTA TABLE */}
           <table className="print-table">
             <thead>
               <tr>
-                <th style={{ width: "45px", textAlign: "center" }}>NO</th>
+                <th style={{ width: "40px", textAlign: "center" }}>NO</th>
                 <th style={{ width: "160px" }}>V.REG (PLATE)</th>
                 <th style={{ textAlign: "right" }}>OPERATION</th>
-                <th style={{ textAlign: "right" }}>ENTRANCE</th>
+                <th style={{ textAlign: "right" }}>ENTRANCE FEE</th>
                 <th style={{ textAlign: "right" }}>LOAN REPAY</th>
                 <th style={{ textAlign: "right" }}>SAVINGS</th>
                 <th style={{ textAlign: "right" }}>S/TICKET</th>
                 <th style={{ textAlign: "right" }}>LEGAL FEE</th>
-                <th style={{ textAlign: "right", width: "140px" }}>TOTAL (KSH)</th>
+                <th style={{ textAlign: "right", width: "150px" }}>TOTAL (KES)</th>
               </tr>
             </thead>
             <tbody>
@@ -1022,83 +1062,90 @@ export default function DailyCollectionsView({
                 const rTotal = getRowTotal(row);
                 return (
                   <tr key={row.no}>
-                    <td style={{ textAlign: "center" }}>{idx + 1}</td>
-                    <td style={{ fontFamily: "monospace", fontWeight: 900 }}>{row.vehiclePlate || "—"}</td>
+                    <td style={{ textAlign: "center", color: "#64748b" }}>{idx + 1}</td>
+                    <td style={{ fontFamily: "monospace", fontWeight: 900, letterSpacing: "0.5px" }}>
+                      {row.vehiclePlate || "—"}
+                    </td>
                     <td style={{ textAlign: "right" }}>{row.operation > 0 ? row.operation.toLocaleString() : "—"}</td>
                     <td style={{ textAlign: "right" }}>{row.entranceFee > 0 ? row.entranceFee.toLocaleString() : "—"}</td>
                     <td style={{ textAlign: "right" }}>{row.loanRepay > 0 ? row.loanRepay.toLocaleString() : "—"}</td>
                     <td style={{ textAlign: "right" }}>{row.savings > 0 ? row.savings.toLocaleString() : "—"}</td>
                     <td style={{ textAlign: "right" }}>{row.sTicket > 0 ? row.sTicket.toLocaleString() : "—"}</td>
                     <td style={{ textAlign: "right" }}>{row.legalFee > 0 ? row.legalFee.toLocaleString() : "—"}</td>
-                    <td style={{ textAlign: "right", fontWeight: 900 }}>KSH {rTotal.toLocaleString()}</td>
+                    <td style={{ textAlign: "right", fontWeight: 900 }}>KES {rTotal.toLocaleString()}</td>
                   </tr>
                 );
               })}
 
               {sientaRows.length === 0 && (
                 <tr>
-                  <td colSpan={9} style={{ textAlign: "center", padding: "16px", color: "#666" }}>
-                    No Sienta vehicle collections recorded for this date.
+                  <td colSpan={9} style={{ textAlign: "center", padding: "14px", color: "#64748b" }}>
+                    Nil Sienta vehicle collections recorded for this date and route.
                   </td>
                 </tr>
               )}
             </tbody>
             <tfoot>
               <tr>
-                <td colSpan={2} style={{ textAlign: "center" }}>SIENTA TOTALS</td>
+                <td colSpan={2} style={{ textAlign: "center" }}>SIENTA SUB-TOTALS</td>
                 <td style={{ textAlign: "right" }}>{sientaOperation > 0 ? sientaOperation.toLocaleString() : "0"}</td>
                 <td style={{ textAlign: "right" }}>{sientaEntrance > 0 ? sientaEntrance.toLocaleString() : "0"}</td>
                 <td style={{ textAlign: "right" }}>{sientaLoanRepay > 0 ? sientaLoanRepay.toLocaleString() : "0"}</td>
                 <td style={{ textAlign: "right" }}>{sientaSavings > 0 ? sientaSavings.toLocaleString() : "0"}</td>
                 <td style={{ textAlign: "right" }}>{sientaSTicket > 0 ? sientaSTicket.toLocaleString() : "0"}</td>
                 <td style={{ textAlign: "right" }}>{sientaLegalFee > 0 ? sientaLegalFee.toLocaleString() : "0"}</td>
-                <td style={{ textAlign: "right", fontSize: "20px" }}>KSH {sientaTotal.toLocaleString()}</td>
+                <td style={{ textAlign: "right", fontSize: "15px" }}>KES {sientaTotal.toLocaleString()}</td>
               </tr>
             </tfoot>
           </table>
 
-          {/* PAGE 2 FOOTER: GRAND RECONCILIATION SUMMARY & AUDITOR SIGNATURE */}
-          <div className="grid grid-cols-2 gap-4 mt-2 pt-2 border-t-2 border-black font-mono text-sm">
-            <div className="border border-black p-2">
-              <p className="font-bold border-b border-black pb-1 mb-1 uppercase">Daily Combined Revenue Reconciliation:</p>
-              <div className="space-y-1 text-xs">
-                <div className="flex justify-between">
-                  <span>Total Nissan Revenue (Page 1):</span>
-                  <span className="font-bold">KES {nissanTotal.toLocaleString()}</span>
+          {/* PAGE 2 FOOTER: GRAND RECONCILIATION SUMMARY & EXECUTIVE APPROVALS */}
+          <div className="grid grid-cols-2 gap-4 mt-2 font-mono text-xs">
+            <div className="border border-slate-900 rounded p-2.5 bg-slate-50">
+              <p className="font-black text-slate-900 border-b border-slate-300 pb-1 mb-1.5 uppercase text-[11px] flex justify-between">
+                <span>Combined Route Financial Summary:</span>
+                <span className="text-emerald-700 font-bold">Executive Reconciliation</span>
+              </p>
+              <div className="space-y-1 text-[11px]">
+                <div className="flex justify-between text-slate-700">
+                  <span>1. Nissans Total Revenue (Page 1):</span>
+                  <span className="font-bold text-slate-900">KES {nissanTotal.toLocaleString()}</span>
                 </div>
-                <div className="flex justify-between">
-                  <span>Total Sienta Revenue (Page 2):</span>
-                  <span className="font-bold">KES {sientaTotal.toLocaleString()}</span>
+                <div className="flex justify-between text-slate-700">
+                  <span>2. Sientas Total Revenue (Page 2):</span>
+                  <span className="font-bold text-slate-900">KES {sientaTotal.toLocaleString()}</span>
                 </div>
-                <div className="flex justify-between border-t border-black pt-1">
-                  <span>Gross Sacco Deposits:</span>
-                  <span className="font-bold">KES {totalRevenue.toLocaleString()}</span>
+                <div className="flex justify-between border-t border-slate-300 pt-1 font-bold text-slate-950">
+                  <span>GROSS FIELD DEPOSITS:</span>
+                  <span>KES {totalRevenue.toLocaleString()}</span>
                 </div>
-                <div className="flex justify-between text-red-700">
+                <div className="flex justify-between text-rose-700">
                   <span>Less Total Stage Deductions:</span>
                   <span className="font-bold">- KES {totalExpenses.toLocaleString()}</span>
                 </div>
-                <div className="flex justify-between font-black border-t-2 border-black pt-1 text-sm bg-gray-100 p-1">
-                  <span>NET SACCO INFLOW:</span>
-                  <span>KES {netIncome.toLocaleString()}.00</span>
+                <div className="flex justify-between font-black border-t-2 border-slate-900 pt-1.5 mt-1 text-xs bg-emerald-50 text-emerald-950 p-1.5 rounded">
+                  <span>NET SACCO INFLOW TO VAULT:</span>
+                  <span className="text-emerald-700 font-black">KES {netIncome.toLocaleString()}.00</span>
                 </div>
               </div>
             </div>
 
-            <div className="border border-black p-2 flex flex-col justify-between">
-              <p className="font-bold border-b border-black pb-1 uppercase">Executive &amp; Audit Approval:</p>
-              <div className="space-y-3 text-xs pt-2">
-                <div className="flex justify-between">
-                  <span>Treasurer: _______________________</span>
-                  <span>Sign: ___________</span>
+            <div className="border border-slate-900 rounded p-2.5 bg-white flex flex-col justify-between">
+              <p className="font-black text-slate-900 border-b border-slate-300 pb-1 uppercase text-[11px]">
+                Executive Management &amp; Audit Approval:
+              </p>
+              <div className="space-y-2.5 text-[11px] pt-1.5 text-slate-800">
+                <div className="flex justify-between items-center">
+                  <span>Treasurer: ____________________</span>
+                  <span>Signature: _______________</span>
                 </div>
-                <div className="flex justify-between">
-                  <span>Chairman: _______________________</span>
-                  <span>Sign: ___________</span>
+                <div className="flex justify-between items-center">
+                  <span>Chairman: ____________________</span>
+                  <span>Signature: _______________</span>
                 </div>
-                <div className="flex justify-between">
-                  <span>Auditor Reg: CS/NO. 22239</span>
-                  <span>Stamp: ___________</span>
+                <div className="flex justify-between items-center border-t border-slate-200 pt-1">
+                  <span className="text-slate-600">Auditor Seal: <strong>CS/NO. 22239</strong></span>
+                  <span>Stamp Date: ____________</span>
                 </div>
               </div>
             </div>
