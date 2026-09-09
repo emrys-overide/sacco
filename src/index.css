@@ -516,8 +516,8 @@ header.app-topbar::after {
 
 @media print {
   @page {
-    size: landscape;
-    margin: 10mm 12mm;
+    size: portrait;
+    margin: 7mm 7mm;
   }
 
   *, *::before, *::after {
@@ -569,7 +569,7 @@ header.app-topbar::after {
     padding-bottom: 0 !important;
   }
 
-  /* Print typography and presentation styling */
+  /* Print typography and presentation styling for Portrait A4 */
   .print-doc {
     display: block !important;
     background: #ffffff !important;
@@ -580,31 +580,36 @@ header.app-topbar::after {
 
   .print-table {
     width: 100% !important;
+    table-layout: fixed !important;
     border-collapse: collapse !important;
-    border: 2px solid #0f172a !important;
-    margin-bottom: 10px !important;
+    border: 1.5px solid #0f172a !important;
+    margin-bottom: 8px !important;
   }
 
   .print-table th {
     background-color: #0f172a !important;
     color: #ffffff !important;
-    font-size: 13px !important;
+    font-size: 10.5px !important;
     font-weight: 800 !important;
-    letter-spacing: 0.5px !important;
-    padding: 7px 6px !important;
+    letter-spacing: 0.3px !important;
+    padding: 5px 3px !important;
     border: 1px solid #334155 !important;
     text-transform: uppercase !important;
+    word-break: break-word !important;
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
   }
 
   .print-table td {
-    font-size: 13px !important;
+    font-size: 11px !important;
     font-weight: 600 !important;
     color: #0f172a !important;
-    padding: 5px 6px !important;
+    padding: 4px 3px !important;
     border: 1px solid #cbd5e1 !important;
-    line-height: 1.2 !important;
+    line-height: 1.15 !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
   }
 
   .print-table tbody tr:nth-child(even) {
@@ -614,12 +619,12 @@ header.app-topbar::after {
   }
 
   .print-table tfoot td {
-    font-size: 14px !important;
+    font-size: 11.5px !important;
     font-weight: 900 !important;
     background-color: #0f172a !important;
     color: #ffffff !important;
     border: 1.5px solid #0f172a !important;
-    padding: 7px 6px !important;
+    padding: 5px 3px !important;
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
   }
