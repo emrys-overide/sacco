@@ -551,6 +551,7 @@ export default function App() {
             onDeleteTransaction={handleDeleteTransaction}
             currentUserRole={currentUser.role}
             currentUserName={currentUser.name}
+            onRefreshData={handleRefreshData}
           />
         );
       case 'Expenses':

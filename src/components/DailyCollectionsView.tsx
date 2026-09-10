@@ -14,6 +14,7 @@ import {
   Undo2,
   Calendar,
   Search,
+  History,
   RefreshCw,
   Clock,
   Car
@@ -26,6 +27,7 @@ interface DailyCollectionsViewProps {
   onAddTransaction: (newTx: Omit<Transaction, "id" | "timestamp" | "recorderName">) => Promise<Transaction>;
   onUpdateTransaction: (transactionId: string, changes: Partial<Transaction>) => Promise<Transaction>;
   onDeleteTransaction?: (transactionId: string) => Promise<void>;
+  onRefreshData?: () => void;
   currentUserRole: string;
   currentUserName: string;
 }
@@ -70,6 +72,53 @@ interface ConfirmationModalConfig {
   onConfirm: () => Promise<void>;
 }
 
+// Date normalization helper ensuring any input format or day number becomes YYYY-MM-DD
+export function normalizeTargetDate(raw: string): string {
+  if (!raw) return new Date().toISOString().slice(0, 10);
+  const trimmed = raw.trim();
+
+  // Already YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    return trimmed;
+  }
+
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentMonth = String(now.getMonth() + 1).padStart(2, '0');
+
+  // Single or double digit day number e.g. "9", "09", "6"
+  if (/^\d{1,2}$/.test(trimmed)) {
+    const day = trimmed.padStart(2, '0');
+    return `${currentYear}-${currentMonth}-${day}`;
+  }
+
+  // Split by slash, dash, or dot
+  const parts = trimmed.split(/[-/.]/);
+  if (parts.length === 3) {
+    if (parts[0].length === 4) {
+      return `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
+    } else if (parts[2].length === 4) {
+      const p1 = parseInt(parts[0], 10);
+      const p2 = parseInt(parts[1], 10);
+      const y = parts[2];
+      if (p1 > 12) {
+        return `${y}-${String(p2).padStart(2, '0')}-${String(p1).padStart(2, '0')}`;
+      } else if (p2 > 12) {
+        return `${y}-${String(p1).padStart(2, '0')}-${String(p2).padStart(2, '0')}`;
+      } else {
+        return `${y}-${String(p2).padStart(2, '0')}-${String(p1).padStart(2, '0')}`;
+      }
+    }
+  }
+
+  const parsed = new Date(trimmed);
+  if (!isNaN(parsed.getTime())) {
+    return parsed.toISOString().slice(0, 10);
+  }
+
+  return trimmed;
+}
+
 export default function DailyCollectionsView({
   vehicles,
   members,
@@ -77,6 +126,7 @@ export default function DailyCollectionsView({
   onAddTransaction,
   onUpdateTransaction,
   onDeleteTransaction,
+  onRefreshData,
   currentUserRole,
   currentUserName
 }: DailyCollectionsViewProps) {
@@ -108,60 +158,108 @@ export default function DailyCollectionsView({
     Number(r.operation || 0) + Number(r.entranceFee || 0) + Number(r.loanRepay || 0) +
     Number(r.savings || 0) + Number(r.sTicket || 0) + Number(r.legalFee || 0);
 
-  // Timezone-resilient date matching helper
+  // Highly resilient date matching helper (matches YYYY-MM-DD, day numbers, local time, and UTC)
   const isTxForDate = useCallback((tx: Transaction, targetDate: string) => {
-    if (tx.entryDate && tx.entryDate === targetDate) return true;
-    if (tx.timestamp && tx.timestamp.slice(0, 10) === targetDate) return true;
-    try {
-      const local = new Date(tx.timestamp).toLocaleDateString('en-CA');
-      if (local === targetDate) return true;
-    } catch {}
-    return false;
-  }, []);
+    if (!targetDate) return false;
+    const cleanTarget = normalizeTargetDate(targetDate);
 
-  // Distinct list of dates with recorded data
+    // 1. Direct entryDate match (e.g. "2026-09-09")
+    if (tx.entryDate) {
+      const ed = tx.entryDate.trim();
+      if (ed === cleanTarget) return true;
+      if (ed.startsWith(cleanTarget) || cleanTarget.startsWith(ed)) return true;
+    }
+
+    // 2. Direct ISO timestamp slice (e.g. "2026-09-09")
+    if (tx.timestamp) {
+      const isoDate = tx.timestamp.slice(0, 10);
+      if (isoDate === cleanTarget) return true;
+
+      // 3. Local date string match across timezones
+      try {
+        const d = new Date(tx.timestamp);
+        if (!isNaN(d.getTime())) {
+          if (d.toLocaleDateString('en-CA') === cleanTarget) return true;
+          if (d.toISOString().slice(0, 10) === cleanTarget) return true;
+        }
+      } catch {}
+    }
+
+    // 4. Ref code match (e.g. SWT-DLY-KCA123A-20260909-1)
+    if (tx.refCode) {
+      const compact = cleanTarget.replace(/[-/]/g, '');
+      if (compact.length >= 8 && tx.refCode.includes(compact)) return true;
+    }
+
+    return false;
+  }, [normalizeTargetDate]);
+
+  // Distinct list of dates with recorded data across all transactions
   const availableDatesWithRecords = useMemo(() => {
     const datesMap = new Map<string, number>();
     transactions.forEach(tx => {
-      if (tx.category === "Daily Contribution" && tx.type === "Credit" && !tx.reversalOf) {
-        const d = tx.entryDate || tx.timestamp.slice(0, 10);
-        datesMap.set(d, (datesMap.get(d) || 0) + 1);
+      if (!tx.reversalOf && (tx as any).status !== 'Reversed' && String(tx.type).toLowerCase() === 'credit') {
+        const d = tx.entryDate || (tx.timestamp ? tx.timestamp.slice(0, 10) : '');
+        if (d && d.length >= 10) {
+          const norm = d.slice(0, 10);
+          datesMap.set(norm, (datesMap.get(norm) || 0) + 1);
+        }
       }
     });
     return Array.from(datesMap.entries())
       .sort((a, b) => b[0].localeCompare(a[0]))
-      .slice(0, 8); // Top 8 most recent
+      .slice(0, 10);
   }, [transactions]);
 
   // Sync state from backend transactions for the selected date
   const loadSheetForDate = useCallback((targetDate: string) => {
+    const normDate = normalizeTargetDate(targetDate);
+    setSelectedDate(normDate);
+    setInputDate(normDate);
+
     const dailyTxs = transactions.filter(tx =>
-      tx.category === "Daily Contribution" &&
-      isTxForDate(tx, targetDate) &&
-      tx.type === "Credit" &&
-      !tx.reversalOf
+      !tx.reversalOf &&
+      (tx as any).status !== 'Reversed' &&
+      String(tx.type).toLowerCase() === "credit" &&
+      (tx.category === "Daily Contribution" || Boolean(tx.vehiclePlate) || tx.tillNumber === "VehicleTill") &&
+      isTxForDate(tx, normDate)
     );
 
     const expenseTxs = transactions.filter(tx =>
-      (tx.category === "Petty Cash" || tx.category === "Office Expenses") &&
-      isTxForDate(tx, targetDate) &&
-      tx.type === "Debit" &&
-      tx.tillNumber === "VehicleTill" &&
-      !tx.reversalOf
+      !tx.reversalOf &&
+      (tx as any).status !== 'Reversed' &&
+      String(tx.type).toLowerCase() === "debit" &&
+      (tx.category === "Petty Cash" || tx.category === "Office Expenses" || tx.tillNumber === "VehicleTill") &&
+      isTxForDate(tx, normDate)
     );
 
-    const syncedRows: CollectionRow[] = dailyTxs.map((tx, index) => ({
-      transactionId: tx.id,
-      no: index + 1,
-      vehiclePlate: tx.vehiclePlate || "",
-      vehicleClass: tx.vehicleClass || (vehicles.find(v => v.plateNumber === tx.vehiclePlate)?.capacity === 7 ? "Sienta" : "Nissan"),
-      operation: Number(tx.operationAmount || 0),
-      entranceFee: Number(tx.entranceFee || 0),
-      loanRepay: Number(tx.loanRepay || 0),
-      savings: Number(tx.savingsContribution || 0),
-      sTicket: Number(tx.sTicket || 0),
-      legalFee: Number(tx.legalFee || 0)
-    }));
+    const syncedRows: CollectionRow[] = dailyTxs.map((tx, index) => {
+      const op = Number(tx.operationAmount || 0);
+      const ent = Number(tx.entranceFee || 0);
+      const lr = Number(tx.loanRepay || 0);
+      const sav = Number(tx.savingsContribution || 0);
+      const stk = Number(tx.sTicket || 0);
+      const leg = Number(tx.legalFee || 0);
+      const breakdownSum = op + ent + lr + sav + stk + leg;
+      // If specific breakdown fields are all zero but tx.amount > 0, fallback to operation
+      const finalOp = breakdownSum === 0 && tx.amount > 0 ? Number(tx.amount) : op;
+
+      return {
+        transactionId: tx.id,
+        no: index + 1,
+        vehiclePlate: tx.vehiclePlate || "",
+        vehicleClass: tx.vehicleClass || (vehicles.find(v => v.plateNumber === tx.vehiclePlate)?.capacity === 7 ? "Sienta" : "Nissan"),
+        operation: finalOp,
+        entranceFee: ent,
+        loanRepay: lr,
+        savings: sav,
+        sTicket: stk,
+        legalFee: leg,
+        isPaid: true,
+        notes: tx.description || "",
+        refCode: tx.refCode || ""
+      };
+    });
 
     const syncedExpenses: ExpenseRow[] = expenseTxs.map((tx, index) => ({
       transactionId: tx.id,
@@ -170,38 +268,41 @@ export default function DailyCollectionsView({
       amount: Number(tx.amount || 0)
     }));
 
-    setRows(syncedRows);
+    if (syncedRows.length > 0) {
+      setRows(syncedRows);
+    } else {
+      setRows(
+        activeVehicles.map((vehicle, index) => ({
+          no: index + 1,
+          vehiclePlate: vehicle.plateNumber,
+          vehicleClass: vehicle.capacity === 7 ? "Sienta" : "Nissan",
+          operation: 0,
+          entranceFee: 0,
+          loanRepay: 0,
+          savings: 0,
+          sTicket: 0,
+          legalFee: 0,
+          isPaid: false,
+          notes: ""
+        }))
+      );
+    }
+
     setExpenses(syncedExpenses);
     setIsDirty(false);
-  }, [isTxForDate, transactions, vehicles]);
+  }, [isTxForDate, normalizeTargetDate, transactions, vehicles, activeVehicles]);
 
-  // Initial and transaction-update sheet sync
+  // Sync whenever selectedDate or transactions changes
   useEffect(() => {
-    if (!isDirty) {
-      loadSheetForDate(selectedDate);
-    }
-  }, [selectedDate, transactions, loadSheetForDate, isDirty]);
+    loadSheetForDate(selectedDate);
+  }, [selectedDate, transactions, loadSheetForDate]);
 
   // Explicit Query Date handler
-  const handleQueryDate = (newDate: string) => {
-    if (newDate === selectedDate) {
-      loadSheetForDate(newDate);
-      setSuccessMessage(`Reloaded records for date ${newDate}.`);
-      setTimeout(() => setSuccessMessage(""), 3000);
-      return;
-    }
-
-    if (isDirty) {
-      const confirmSwitch = window.confirm(
-        `You have unsaved changes on the sheet for ${selectedDate}. Switching to ${newDate} will discard unsaved draft changes. Proceed?`
-      );
-      if (!confirmSwitch) return;
-    }
-
-    setSelectedDate(newDate);
-    setInputDate(newDate);
-    loadSheetForDate(newDate);
-    setSuccessMessage(`Queried records for date ${newDate}.`);
+  const handleQueryDate = (rawDate: string) => {
+    if (!rawDate) return;
+    const normalized = normalizeTargetDate(rawDate);
+    loadSheetForDate(normalized);
+    setSuccessMessage(`Loaded records for date ${normalized}.`);
     setTimeout(() => setSuccessMessage(""), 3000);
   };
 
@@ -260,7 +361,7 @@ export default function DailyCollectionsView({
     const targetRow = rows.find(r => r.no === no);
     if (!targetRow) return;
 
-    // If it's just an unposted local draft row, delete directly
+    // If it's an unposted local draft row, delete directly
     if (!targetRow.transactionId) {
       setRows(prev => prev.filter(r => r.no !== no).map((r, index) => ({ ...r, no: index + 1 })));
       setIsDirty(true);
@@ -476,7 +577,6 @@ export default function DailyCollectionsView({
         setIsSaving(true);
         try {
           const timestampShort = selectedDate;
-          // Standardize midday UTC timestamp to prevent any timezone rollover across dates
           const safeMiddayTimestamp = `${selectedDate}T12:00:00.000Z`;
 
           const createdTxIds: string[] = [];
@@ -740,6 +840,16 @@ export default function DailyCollectionsView({
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
+            {onRefreshData && (
+              <button
+                onClick={onRefreshData}
+                className="px-3.5 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs uppercase tracking-wider rounded-xl border border-slate-700 flex items-center space-x-1.5 transition-all cursor-pointer"
+                title="Reload latest records from server"
+              >
+                <RefreshCw className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Sync Server</span>
+              </button>
+            )}
             <button
               onClick={triggerPrint}
               className="px-4 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs uppercase tracking-wider rounded-xl border border-emerald-600 flex items-center space-x-2 transition-all shadow-md active:scale-95 cursor-pointer"
@@ -816,7 +926,7 @@ export default function DailyCollectionsView({
           </div>
         )}
 
-        {/* METADATA FILTERS & DATE QUERY CONTROLLER */}
+        {/* METADATA FILTERS & INSTANT DATE QUERY CONTROLLER */}
         <div className="bg-white border-2 border-slate-900 rounded-2xl p-4 shadow-sm flex flex-col gap-4 no-print shrink-0">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
             
@@ -831,13 +941,19 @@ export default function DailyCollectionsView({
                   <input
                     type="date"
                     value={inputDate}
-                    onChange={(e) => setInputDate(e.target.value)}
-                    className="px-3 py-2 border-2 border-slate-900 rounded-xl text-xs font-mono font-bold bg-slate-50 focus:outline-none focus:bg-white w-40"
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setInputDate(val);
+                      if (val) {
+                        handleQueryDate(val);
+                      }
+                    }}
+                    className="px-3 py-2 border-2 border-slate-900 rounded-xl text-xs font-mono font-bold bg-slate-50 focus:outline-none focus:bg-white w-38"
                   />
                   <button
                     onClick={() => handleQueryDate(inputDate)}
                     className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold uppercase tracking-wider flex items-center space-x-1.5 transition-all shadow-sm cursor-pointer"
-                    title="Query all transactions recorded for this date"
+                    title="Reload all transactions recorded for this date"
                   >
                     <Search className="w-3.5 h-3.5 text-emerald-400" />
                     <span>Query Date</span>
@@ -845,8 +961,63 @@ export default function DailyCollectionsView({
                 </div>
               </div>
 
-              {/* QUICK DATE BUTTONS */}
-              <div className="flex items-center space-x-1.5 pb-0.5">
+              {/* QUICK KEY-IN DAY NUMBER (e.g. 9 or 6) */}
+              <div>
+                <label className="block text-[10px] font-black uppercase text-slate-500 tracking-wider mb-1 font-mono">
+                  OR KEY IN DAY (E.G. 9, 6)
+                </label>
+                <div className="flex items-center space-x-1.5">
+                  <input
+                    type="text"
+                    placeholder="e.g. 9"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        const val = (e.target as HTMLInputElement).value;
+                        if (val) handleQueryDate(val);
+                      }
+                    }}
+                    id="quickDayInput"
+                    className="px-3 py-2 border-2 border-slate-900 rounded-xl text-xs font-mono font-bold bg-slate-50 focus:outline-none focus:bg-white w-20 text-center"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const el = document.getElementById('quickDayInput') as HTMLInputElement;
+                      if (el && el.value) handleQueryDate(el.value);
+                    }}
+                    className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold uppercase tracking-wider shadow-sm cursor-pointer"
+                    title="Load records for this day number"
+                  >
+                    Go
+                  </button>
+                </div>
+              </div>
+
+              {/* SELECT FROM SAVED DATES WITH RECORDS */}
+              {availableDatesWithRecords.length > 0 && (
+                <div>
+                  <label className="block text-[10px] font-black uppercase text-slate-500 tracking-wider mb-1 font-mono">
+                    DATES WITH DATA
+                  </label>
+                  <select
+                    value={availableDatesWithRecords.some(([d]) => d === selectedDate) ? selectedDate : ""}
+                    onChange={(e) => {
+                      if (e.target.value) handleQueryDate(e.target.value);
+                    }}
+                    className="px-3 py-2 border-2 border-slate-900 rounded-xl text-xs font-mono font-bold bg-slate-50 focus:outline-none focus:bg-white"
+                  >
+                    <option value="">-- Choose date with data --</option>
+                    {availableDatesWithRecords.map(([d, count]) => (
+                      <option key={d} value={d}>
+                        {d} ({count} records)
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* QUICK DATE PILLS */}
+              <div className="flex flex-wrap items-center gap-1.5 pb-0.5">
                 <button
                   type="button"
                   onClick={() => {
@@ -875,6 +1046,24 @@ export default function DailyCollectionsView({
                 >
                   Yesterday
                 </button>
+                {availableDatesWithRecords.slice(0, 5).map(([d, count]) => {
+                  const isCur = selectedDate === d;
+                  return (
+                    <button
+                      key={d}
+                      type="button"
+                      onClick={() => handleQueryDate(d)}
+                      className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold tracking-wider font-mono border transition-colors cursor-pointer ${
+                        isCur
+                          ? "bg-emerald-600 text-white border-emerald-600 shadow-sm"
+                          : "bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100"
+                      }`}
+                      title={`Load records for ${d}`}
+                    >
+                      {d.slice(5)} ({count})
+                    </button>
+                  );
+                })}
               </div>
 
               <div>
@@ -886,7 +1075,7 @@ export default function DailyCollectionsView({
                   value={selectedRoute}
                   onChange={(e) => setSelectedRoute(e.target.value)}
                   placeholder="e.g. Stage 17 to Machakos"
-                  className="px-3 py-2 border border-slate-300 rounded-xl text-xs font-bold bg-slate-50 focus:outline-none focus:border-slate-900 w-56"
+                  className="px-3 py-2 border border-slate-300 rounded-xl text-xs font-bold bg-slate-50 focus:outline-none focus:border-slate-900 w-52"
                 />
               </div>
             </div>
