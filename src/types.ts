@@ -140,6 +140,7 @@ export interface Transaction {
   reversalOf?: string;
   reversedAt?: string;
   reversedBy?: string;
+  entryDate?: string;
 }
 
 export type PaymentStatus = 'Pending' | 'Reconciled' | 'Unmatched' | 'Rejected' | 'Duplicate';

@@ -93,7 +93,8 @@ export function normalizeTransactionInput(input: LedgerInput): Transaction {
     grossAmount: input.grossAmount === undefined ? amount : normalizeNonNegativeAmount(input.grossAmount, 'Gross amount'),
     reversalOf: input.reversalOf,
     reversedAt: input.reversedAt,
-    reversedBy: input.reversedBy
+    reversedBy: input.reversedBy,
+    entryDate: input.entryDate
   };
 }
 

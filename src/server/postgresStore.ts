@@ -151,7 +151,12 @@ function mapTransaction(row: QueryResultRow): Transaction {
     grossAmount: metadata.grossAmount,
     reversalOf: row.reversal_of ? String(row.reversal_of) : undefined,
     reversedAt: metadata.reversedAt,
-    reversedBy: metadata.reversedBy
+    reversedBy: metadata.reversedBy,
+    entryDate: row.entry_date
+      ? (row.entry_date instanceof Date
+          ? row.entry_date.toISOString().slice(0, 10)
+          : String(row.entry_date).slice(0, 10))
+      : undefined
   };
 }
 
@@ -596,7 +601,7 @@ async function insertTransaction(client: Pool | PoolClient, transaction: Transac
        )
        RETURNING *`,
       [
-        transaction.timestamp.slice(0, 10), transaction.timestamp, transaction.type,
+        transaction.entryDate || transaction.timestamp.slice(0, 10), transaction.timestamp, transaction.type,
         CATEGORY_TO_ACCOUNT[transaction.category], transaction.tillNumber, transaction.amount,
         transaction.memberId || null, transaction.vehiclePlate || '', transaction.refCode,
         transaction.description, 'Manual',

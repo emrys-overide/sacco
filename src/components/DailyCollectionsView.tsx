@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback } from "react";
 import type { Vehicle, Member, Transaction, VehicleClass } from "../types";
 import { sanitizeDecimalInput } from "../lib/inputValidation";
+import ActionConfirmationModal from "./ActionConfirmationModal";
 import { 
   Printer, 
   Plus, 
@@ -9,7 +10,13 @@ import {
   Check, 
   RotateCcw, 
   AlertTriangle, 
-  Send 
+  Send,
+  Undo2,
+  Calendar,
+  Search,
+  RefreshCw,
+  Clock,
+  Car
 } from "lucide-react";
 
 interface DailyCollectionsViewProps {
@@ -43,6 +50,26 @@ interface ExpenseRow {
   transactionId?: string;
 }
 
+interface UndoAction {
+  type: "SAVE" | "DELETE";
+  description: string;
+  createdTxIds?: string[];
+  updatedTxsBackup?: Array<{ id: string; changes: Partial<Transaction> }>;
+  deletedTx?: Transaction;
+  deletedRow?: CollectionRow;
+  deletedExpense?: ExpenseRow;
+}
+
+interface ConfirmationModalConfig {
+  title: string;
+  variant: "warning" | "danger" | "info";
+  summaryText: string;
+  consequenceText: string;
+  details: Array<{ label: string; value: string | number | React.ReactNode }>;
+  confirmButtonText: string;
+  onConfirm: () => Promise<void>;
+}
+
 export default function DailyCollectionsView({
   vehicles,
   members,
@@ -56,15 +83,23 @@ export default function DailyCollectionsView({
   
   // Basic Sheet State
   const [selectedDate, setSelectedDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [inputDate, setInputDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [selectedRoute, setSelectedRoute] = useState<string>("Stage 17 to Machakos");
   
   // State for rows in the table
   const [rows, setRows] = useState<CollectionRow[]>([]);
   const [expenses, setExpenses] = useState<ExpenseRow[]>([]);
+  const [isDirty, setIsDirty] = useState<boolean>(false);
   
+  // User Feedback and Undo
   const [successMessage, setSuccessMessage] = useState<string>("");
   const [errorMessage, setErrorMessage] = useState<string>("");
-  const [isAutoSaving, setIsAutoSaving] = useState<boolean>(false);
+  const [undoAction, setUndoAction] = useState<UndoAction | null>(null);
+  const [isUndoing, setIsUndoing] = useState<boolean>(false);
+  const [isSaving, setIsSaving] = useState<boolean>(false);
+  
+  // Confirmation Modal
+  const [confirmationConfig, setConfirmationConfig] = useState<ConfirmationModalConfig | null>(null);
   
   const isReadOnly = currentUserRole === "Auditor";
   const activeVehicles = vehicles.filter(vehicle => vehicle.status === "Active");
@@ -73,123 +108,114 @@ export default function DailyCollectionsView({
     Number(r.operation || 0) + Number(r.entranceFee || 0) + Number(r.loanRepay || 0) +
     Number(r.savings || 0) + Number(r.sTicket || 0) + Number(r.legalFee || 0);
 
+  // Timezone-resilient date matching helper
+  const isTxForDate = useCallback((tx: Transaction, targetDate: string) => {
+    if (tx.entryDate && tx.entryDate === targetDate) return true;
+    if (tx.timestamp && tx.timestamp.slice(0, 10) === targetDate) return true;
+    try {
+      const local = new Date(tx.timestamp).toLocaleDateString('en-CA');
+      if (local === targetDate) return true;
+    } catch {}
+    return false;
+  }, []);
+
+  // Distinct list of dates with recorded data
+  const availableDatesWithRecords = useMemo(() => {
+    const datesMap = new Map<string, number>();
+    transactions.forEach(tx => {
+      if (tx.category === "Daily Contribution" && tx.type === "Credit" && !tx.reversalOf) {
+        const d = tx.entryDate || tx.timestamp.slice(0, 10);
+        datesMap.set(d, (datesMap.get(d) || 0) + 1);
+      }
+    });
+    return Array.from(datesMap.entries())
+      .sort((a, b) => b[0].localeCompare(a[0]))
+      .slice(0, 8); // Top 8 most recent
+  }, [transactions]);
+
   // Sync state from backend transactions for the selected date
-  useEffect(() => {
+  const loadSheetForDate = useCallback((targetDate: string) => {
     const dailyTxs = transactions.filter(tx =>
       tx.category === "Daily Contribution" &&
-      tx.timestamp.slice(0, 10) === selectedDate &&
+      isTxForDate(tx, targetDate) &&
       tx.type === "Credit" &&
       !tx.reversalOf
     );
 
     const expenseTxs = transactions.filter(tx =>
       (tx.category === "Petty Cash" || tx.category === "Office Expenses") &&
-      tx.timestamp.slice(0, 10) === selectedDate &&
+      isTxForDate(tx, targetDate) &&
       tx.type === "Debit" &&
       tx.tillNumber === "VehicleTill" &&
       !tx.reversalOf
     );
 
-    setRows(prevRows => {
-      const syncedRows: CollectionRow[] = dailyTxs.map((tx, index) => ({
-        transactionId: tx.id,
-        no: index + 1,
-        vehiclePlate: tx.vehiclePlate || "",
-        vehicleClass: tx.vehicleClass || "Nissan",
-        operation: Number(tx.operationAmount || 0),
-        entranceFee: Number(tx.entranceFee || 0),
-        loanRepay: Number(tx.loanRepay || 0),
-        savings: Number(tx.savingsContribution || 0),
-        sTicket: Number(tx.sTicket || 0),
-        legalFee: Number(tx.legalFee || 0)
-      }));
+    const syncedRows: CollectionRow[] = dailyTxs.map((tx, index) => ({
+      transactionId: tx.id,
+      no: index + 1,
+      vehiclePlate: tx.vehiclePlate || "",
+      vehicleClass: tx.vehicleClass || (vehicles.find(v => v.plateNumber === tx.vehiclePlate)?.capacity === 7 ? "Sienta" : "Nissan"),
+      operation: Number(tx.operationAmount || 0),
+      entranceFee: Number(tx.entranceFee || 0),
+      loanRepay: Number(tx.loanRepay || 0),
+      savings: Number(tx.savingsContribution || 0),
+      sTicket: Number(tx.sTicket || 0),
+      legalFee: Number(tx.legalFee || 0)
+    }));
 
-      // Preserve unposted new draft rows that the user is currently typing
-      const unpostedDrafts = prevRows.filter(r => !r.transactionId && (r.vehiclePlate || getRowTotal(r) > 0));
-      const nextRows = [...syncedRows];
-      unpostedDrafts.forEach((draft, idx) => {
-        nextRows.push({ ...draft, no: syncedRows.length + idx + 1 });
-      });
+    const syncedExpenses: ExpenseRow[] = expenseTxs.map((tx, index) => ({
+      transactionId: tx.id,
+      no: index + 1,
+      description: tx.description.replace(/\s*\([^)]*\)\s*$/, "").trim() || tx.description,
+      amount: Number(tx.amount || 0)
+    }));
 
-      return nextRows;
-    });
+    setRows(syncedRows);
+    setExpenses(syncedExpenses);
+    setIsDirty(false);
+  }, [isTxForDate, transactions, vehicles]);
 
-    setExpenses(prevExpenses => {
-      const syncedExpenses: ExpenseRow[] = expenseTxs.map((tx, index) => ({
-        transactionId: tx.id,
-        no: index + 1,
-        description: tx.description.replace(/\s*\([^)]*\)\s*$/, "").trim() || tx.description,
-        amount: Number(tx.amount || 0)
-      }));
-
-      // Preserve unposted draft expenses
-      const unpostedDraftExpenses = prevExpenses.filter(e => !e.transactionId && (e.description || e.amount > 0));
-      const nextExpenses = [...syncedExpenses];
-      unpostedDraftExpenses.forEach((draft, idx) => {
-        nextExpenses.push({ ...draft, no: syncedExpenses.length + idx + 1 });
-      });
-
-      return nextExpenses;
-    });
-  }, [selectedDate, transactions]);
-
-  // Auto-save a modified existing transaction to the backend ledger
-  const autoSaveRow = useCallback(async (rowToSave: CollectionRow) => {
-    if (!rowToSave.transactionId || isReadOnly) return;
-    try {
-      setIsAutoSaving(true);
-      const grossAmount = getRowTotal(rowToSave);
-      const original = transactions.find(tx => tx.id === rowToSave.transactionId);
-      const deduction = Number(original?.expenseDeduction || 0);
-
-      await onUpdateTransaction(rowToSave.transactionId, {
-        vehiclePlate: rowToSave.vehiclePlate.trim().toUpperCase(),
-        vehicleClass: rowToSave.vehicleClass,
-        operationAmount: rowToSave.operation,
-        entranceFee: rowToSave.entranceFee,
-        loanRepay: rowToSave.loanRepay,
-        savingsContribution: rowToSave.savings,
-        sTicket: rowToSave.sTicket,
-        legalFee: rowToSave.legalFee,
-        grossAmount,
-        amount: Math.max(0, grossAmount - deduction),
-        description: `${rowToSave.vehicleClass} daily collection (${selectedRoute || "field sheet"} - row ${rowToSave.no})`
-      });
-
-      setSuccessMessage(`Auto-saved updates for ${rowToSave.vehiclePlate || `Row ${rowToSave.no}`}`);
-      setTimeout(() => setSuccessMessage(""), 3000);
-    } catch (err: any) {
-      console.error("Auto-save error:", err);
-      setErrorMessage(err.message || "Failed to auto-save changes.");
-      setTimeout(() => setErrorMessage(""), 5000);
-    } finally {
-      setIsAutoSaving(false);
+  // Initial and transaction-update sheet sync
+  useEffect(() => {
+    if (!isDirty) {
+      loadSheetForDate(selectedDate);
     }
-  }, [isReadOnly, onUpdateTransaction, selectedRoute, transactions]);
+  }, [selectedDate, transactions, loadSheetForDate, isDirty]);
 
-  // Row update handlers
+  // Explicit Query Date handler
+  const handleQueryDate = (newDate: string) => {
+    if (newDate === selectedDate) {
+      loadSheetForDate(newDate);
+      setSuccessMessage(`Reloaded records for date ${newDate}.`);
+      setTimeout(() => setSuccessMessage(""), 3000);
+      return;
+    }
+
+    if (isDirty) {
+      const confirmSwitch = window.confirm(
+        `You have unsaved changes on the sheet for ${selectedDate}. Switching to ${newDate} will discard unsaved draft changes. Proceed?`
+      );
+      if (!confirmSwitch) return;
+    }
+
+    setSelectedDate(newDate);
+    setInputDate(newDate);
+    loadSheetForDate(newDate);
+    setSuccessMessage(`Queried records for date ${newDate}.`);
+    setTimeout(() => setSuccessMessage(""), 3000);
+  };
+
+  // Row update handlers - LOCAL STATE ONLY (No silent auto-save on blur)
   const handleUpdateRowField = (no: number, field: keyof CollectionRow, value: string | number) => {
     if (isReadOnly) return;
     setRows(prev => prev.map(r => r.no === no ? { ...r, [field]: value } : r));
-  };
-
-  const handleRowBlur = (no: number) => {
-    const targetRow = rows.find(r => r.no === no);
-    if (targetRow && targetRow.transactionId) {
-      void autoSaveRow(targetRow);
-    }
+    setIsDirty(true);
   };
 
   const handleVehicleClassChange = (no: number, vehicleClass: VehicleClass) => {
     if (isReadOnly) return;
-    setRows(prev => {
-      const updated = prev.map(r => r.no === no ? { ...r, vehicleClass } : r);
-      const targetRow = updated.find(r => r.no === no);
-      if (targetRow && targetRow.transactionId) {
-        void autoSaveRow(targetRow);
-      }
-      return updated;
-    });
+    setRows(prev => prev.map(r => r.no === no ? { ...r, vehicleClass } : r));
+    setIsDirty(true);
   };
 
   const handleVehiclePlateChange = (no: number, plate: string) => {
@@ -197,19 +223,17 @@ export default function DailyCollectionsView({
     const cleanPlate = plate.toUpperCase().trim();
     const matchedVehicle = vehicles.find(v => v.plateNumber.replace(/\s+/g, "").toUpperCase() === cleanPlate.replace(/\s+/g, ""));
 
-    setRows(prev => {
-      const updated = prev.map(r => {
-        if (r.no === no) {
-          return {
-            ...r,
-            vehiclePlate: cleanPlate,
-            vehicleClass: matchedVehicle?.capacity === 7 ? "Sienta" : (r.vehicleClass || "Nissan")
-          };
-        }
-        return r;
-      });
-      return updated;
-    });
+    setRows(prev => prev.map(r => {
+      if (r.no === no) {
+        return {
+          ...r,
+          vehiclePlate: cleanPlate,
+          vehicleClass: matchedVehicle?.capacity === 7 ? "Sienta" : (r.vehicleClass || "Nissan")
+        };
+      }
+      return r;
+    }));
+    setIsDirty(true);
   };
 
   const handleAddRow = () => {
@@ -227,184 +251,426 @@ export default function DailyCollectionsView({
       sTicket: 0,
       legalFee: 0
     }]);
+    setIsDirty(true);
   };
 
-  const handleDeleteRow = async (no: number) => {
+  // Delete Row with Warning Confirmation
+  const handleDeleteRowClick = (no: number) => {
     if (isReadOnly) return;
     const targetRow = rows.find(r => r.no === no);
-    const confirmed = window.confirm(
-      `Delete daily collection row ${no} (${targetRow?.vehiclePlate || "Entry"})? This will permanently delete the transaction from the database.`
-    );
-    if (!confirmed) return;
+    if (!targetRow) return;
 
-    if (targetRow?.transactionId && onDeleteTransaction) {
-      try {
-        await onDeleteTransaction(targetRow.transactionId);
-        setSuccessMessage(`Transaction for ${targetRow.vehiclePlate || `Row ${no}`} deleted from database.`);
-        setTimeout(() => setSuccessMessage(""), 4000);
-      } catch (err: any) {
-        setErrorMessage(err.message || "Failed to delete transaction from database.");
-        return;
-      }
+    // If it's just an unposted local draft row, delete directly
+    if (!targetRow.transactionId) {
+      setRows(prev => prev.filter(r => r.no !== no).map((r, index) => ({ ...r, no: index + 1 })));
+      setIsDirty(true);
+      return;
     }
 
-    setRows(prev => prev.filter(r => r.no !== no).map((r, index) => ({ ...r, no: index + 1 })));
+    const rowTotal = getRowTotal(targetRow);
+    const existingTx = transactions.find(t => t.id === targetRow.transactionId);
+
+    setConfirmationConfig({
+      title: "Confirm Deletion of Collection Record",
+      variant: "danger",
+      summaryText: `You are about to delete the recorded daily collection for vehicle ${targetRow.vehiclePlate || `Row ${no}`}.`,
+      consequenceText: "This record will be permanently reversed and removed from the SACCO General Ledger. You will be able to undo this deletion immediately if needed.",
+      details: [
+        { label: "Date", value: selectedDate },
+        { label: "Vehicle Plate", value: targetRow.vehiclePlate || "N/A" },
+        { label: "Fleet Class", value: targetRow.vehicleClass },
+        { label: "Gross Amount", value: `KES ${rowTotal.toLocaleString()}` },
+        { label: "Transaction ID", value: targetRow.transactionId.slice(0, 8) + "..." }
+      ],
+      confirmButtonText: "Confirm Delete Record",
+      onConfirm: async () => {
+        if (!onDeleteTransaction || !targetRow.transactionId) return;
+        await onDeleteTransaction(targetRow.transactionId);
+
+        // Store for undo
+        setUndoAction({
+          type: "DELETE",
+          description: `Deleted ${targetRow.vehiclePlate || `Row ${no}`} (KES ${rowTotal.toLocaleString()})`,
+          deletedTx: existingTx,
+          deletedRow: targetRow
+        });
+
+        setRows(prev => prev.filter(r => r.no !== no).map((r, index) => ({ ...r, no: index + 1 })));
+        setConfirmationConfig(null);
+        setSuccessMessage(`Transaction for ${targetRow.vehiclePlate || `Row ${no}`} removed from database ledger.`);
+        setTimeout(() => setSuccessMessage(""), 5000);
+      }
+    });
   };
 
+  // Expense row handlers
   const handleAddExpenseRow = () => {
     if (isReadOnly) return;
     const nextNo = expenses.length + 1;
     setExpenses(prev => [...prev, { no: nextNo, description: "", amount: 0 }]);
+    setIsDirty(true);
   };
 
   const handleUpdateExpenseField = (no: number, index: number, field: keyof ExpenseRow, value: string | number) => {
     if (isReadOnly) return;
     setExpenses(prev => prev.map((e, idx) => idx === index ? { ...e, [field]: value } : e));
+    setIsDirty(true);
   };
 
-  const handleExpenseBlur = async (index: number) => {
-    const targetExp = expenses[index];
-    if (targetExp && targetExp.transactionId && !isReadOnly) {
-      try {
-        await onUpdateTransaction(targetExp.transactionId, {
-          description: `${targetExp.description} (${selectedRoute || "field sheet"} expense)`,
-          amount: Number(targetExp.amount || 0)
-        });
-        setSuccessMessage(`Expense line ${index + 1} updated.`);
-        setTimeout(() => setSuccessMessage(""), 3000);
-      } catch (err: any) {
-        setErrorMessage(err.message || "Failed to update expense line.");
-      }
-    }
-  };
-
-  const handleDeleteExpenseRow = async (index: number) => {
+  const handleDeleteExpenseClick = (index: number) => {
     if (isReadOnly) return;
     const targetExp = expenses[index];
-    const confirmed = window.confirm(
-      `Delete expense line ${index + 1}? This will permanently delete the transaction from the database.`
-    );
-    if (!confirmed) return;
+    if (!targetExp) return;
 
-    if (targetExp?.transactionId && onDeleteTransaction) {
-      try {
+    if (!targetExp.transactionId) {
+      setExpenses(prev => prev.filter((_, idx) => idx !== index));
+      setIsDirty(true);
+      return;
+    }
+
+    const existingTx = transactions.find(t => t.id === targetExp.transactionId);
+
+    setConfirmationConfig({
+      title: "Confirm Deletion of Stage Expense",
+      variant: "danger",
+      summaryText: `You are about to delete expense line ${index + 1} (${targetExp.description}).`,
+      consequenceText: "This expense record will be permanently reversed and removed from the SACCO General Ledger.",
+      details: [
+        { label: "Date", value: selectedDate },
+        { label: "Description", value: targetExp.description },
+        { label: "Amount", value: `KES ${Number(targetExp.amount).toLocaleString()}` }
+      ],
+      confirmButtonText: "Confirm Delete Expense",
+      onConfirm: async () => {
+        if (!onDeleteTransaction || !targetExp.transactionId) return;
         await onDeleteTransaction(targetExp.transactionId);
-        setSuccessMessage(`Expense line ${index + 1} deleted from database.`);
-        setTimeout(() => setSuccessMessage(""), 4000);
-      } catch (err: any) {
-        setErrorMessage(err.message || "Failed to delete expense transaction.");
-        return;
-      }
-    }
 
-    setExpenses(prev => prev.filter((_, idx) => idx !== index));
+        setUndoAction({
+          type: "DELETE",
+          description: `Deleted expense "${targetExp.description}" (KES ${Number(targetExp.amount).toLocaleString()})`,
+          deletedTx: existingTx,
+          deletedExpense: targetExp
+        });
+
+        setExpenses(prev => prev.filter((_, idx) => idx !== index));
+        setConfirmationConfig(null);
+        setSuccessMessage(`Expense line deleted from database ledger.`);
+        setTimeout(() => setSuccessMessage(""), 5000);
+      }
+    });
   };
 
-  const handleResetDefaults = async () => {
+  // Clear Sheet with Warning Confirmation
+  const handleResetDefaults = () => {
     if (isReadOnly) return;
-    const confirmed = window.confirm(
-      "Clear this daily sheet? All collection and expense entries on this sheet (including posted database records) will be completely removed. Do you want to proceed?"
-    );
-    if (!confirmed) return;
 
-    if (onDeleteTransaction) {
-      const allTxIds = [
-        ...rows.map(r => r.transactionId),
-        ...expenses.map(e => e.transactionId)
-      ].filter(Boolean) as string[];
+    const allTxIds = [
+      ...rows.map(r => r.transactionId),
+      ...expenses.map(e => e.transactionId)
+    ].filter(Boolean) as string[];
 
-      for (const txId of allTxIds) {
-        try {
-          await onDeleteTransaction(txId);
-        } catch (err) {
-          console.error("Error deleting transaction during sheet clear:", err);
+    setConfirmationConfig({
+      title: "Reset & Clear Daily Collection Sheet",
+      variant: "danger",
+      summaryText: `Are you sure you want to clear this entire daily sheet for ${selectedDate}?`,
+      consequenceText: `All ${rows.length} vehicle rows and ${expenses.length} expenses on this sheet (${allTxIds.length} posted database records) will be completely removed from the SACCO General Ledger.`,
+      details: [
+        { label: "Date", value: selectedDate },
+        { label: "Vehicle Entries", value: rows.length },
+        { label: "Stage Expenses", value: expenses.length },
+        { label: "Database Ledger Entries", value: allTxIds.length },
+        { label: "Gross Total KES", value: `KES ${totalRevenue.toLocaleString()}` }
+      ],
+      confirmButtonText: "Confirm Clear Sheet",
+      onConfirm: async () => {
+        if (onDeleteTransaction) {
+          for (const txId of allTxIds) {
+            try {
+              await onDeleteTransaction(txId);
+            } catch (err) {
+              console.error("Error deleting transaction during sheet clear:", err);
+            }
+          }
         }
+        setRows([]);
+        setExpenses([]);
+        setIsDirty(false);
+        setConfirmationConfig(null);
+        setSuccessMessage("Daily sheet cleared successfully.");
+        setTimeout(() => setSuccessMessage(""), 4000);
       }
-    }
-
-    setRows([]);
-    setExpenses([]);
-    setSuccessMessage("Daily sheet cleared successfully.");
-    setTimeout(() => setSuccessMessage(""), 4000);
+    });
   };
 
-  // Manual explicit "Save Changes" button handler
-  const handleSaveChanges = async () => {
+  // Discard local unsaved modifications
+  const handleRevertEdits = () => {
+    loadSheetForDate(selectedDate);
+    setSuccessMessage("Unsaved edits reverted. Sheet restored to database state.");
+    setTimeout(() => setSuccessMessage(""), 3000);
+  };
+
+  // Explicit Save Changes with Confirmation Warning Modal
+  const handleSaveChangesClick = () => {
     if (currentUserRole === "Auditor") {
       setErrorMessage("Security Exception: Sacco Auditors have read-only access and cannot post log sheets to ledger.");
       setTimeout(() => setErrorMessage(""), 5000);
       return;
     }
 
-    const timestampShort = selectedDate;
     const unpostedRows = rows.filter(row => !row.transactionId && (row.vehiclePlate || getRowTotal(row) > 0));
     const unpostedExpenses = expenses.filter(exp => !exp.transactionId && exp.amount > 0 && exp.description.trim());
 
+    // Check updated rows
+    const updatedRows = rows.filter(row => {
+      if (!row.transactionId) return false;
+      const original = transactions.find(t => t.id === row.transactionId);
+      if (!original) return false;
+      const currentGross = getRowTotal(row);
+      return (
+        original.vehiclePlate !== row.vehiclePlate.trim().toUpperCase() ||
+        original.vehicleClass !== row.vehicleClass ||
+        Number(original.operationAmount || 0) !== row.operation ||
+        Number(original.entranceFee || 0) !== row.entranceFee ||
+        Number(original.loanRepay || 0) !== row.loanRepay ||
+        Number(original.savingsContribution || 0) !== row.savings ||
+        Number(original.sTicket || 0) !== row.sTicket ||
+        Number(original.legalFee || 0) !== row.legalFee ||
+        Number(original.grossAmount || 0) !== currentGross
+      );
+    });
+
+    const updatedExpenses = expenses.filter(exp => {
+      if (!exp.transactionId) return false;
+      const original = transactions.find(t => t.id === exp.transactionId);
+      if (!original) return false;
+      return (
+        Number(original.amount || 0) !== exp.amount ||
+        !original.description.startsWith(exp.description.trim())
+      );
+    });
+
+    const totalActions = unpostedRows.length + unpostedExpenses.length + updatedRows.length + updatedExpenses.length;
+    if (totalActions === 0) {
+      setSuccessMessage("This sheet is already up to date. No changes to save.");
+      setTimeout(() => setSuccessMessage(""), 3000);
+      setIsDirty(false);
+      return;
+    }
+
+    setConfirmationConfig({
+      title: "Confirm Posting Daily Collection to General Ledger",
+      variant: "warning",
+      summaryText: `You are about to commit ${totalActions} record changes for date ${selectedDate} on route "${selectedRoute}".`,
+      consequenceText: "This action will permanently post transactions into the SACCO General Ledger. Member loan repayments, savings balances, and vehicle accounts will be updated.",
+      details: [
+        { label: "Collection Date", value: selectedDate },
+        { label: "New Vehicles to Post", value: `${unpostedRows.length} vehicles` },
+        { label: "Existing Logs Updated", value: `${updatedRows.length} vehicles` },
+        { label: "New Stage Expenses", value: `${unpostedExpenses.length} entries` },
+        { label: "Gross Collections", value: `KES ${totalRevenue.toLocaleString()}` },
+        { label: "Total Deductions", value: `KES ${totalExpenses.toLocaleString()}` },
+        { label: "Net Inflow to Vault", value: `KES ${netIncome.toLocaleString()}` }
+      ],
+      confirmButtonText: "Confirm & Post to Ledger",
+      onConfirm: async () => {
+        setIsSaving(true);
+        try {
+          const timestampShort = selectedDate;
+          // Standardize midday UTC timestamp to prevent any timezone rollover across dates
+          const safeMiddayTimestamp = `${selectedDate}T12:00:00.000Z`;
+
+          const createdTxIds: string[] = [];
+          const updatedTxsBackup: Array<{ id: string; changes: Partial<Transaction> }> = [];
+
+          // 1. Post new unposted rows
+          const createdRowIds = new Map<number, string>();
+          for (const row of unpostedRows) {
+            const grossAmount = getRowTotal(row);
+            if (grossAmount <= 0 && !row.vehiclePlate.trim()) continue;
+
+            const transaction = await onAddTransaction({
+              vehiclePlate: row.vehiclePlate.trim().toUpperCase(),
+              vehicleClass: row.vehicleClass,
+              operationAmount: row.operation,
+              entranceFee: row.entranceFee,
+              loanRepay: row.loanRepay,
+              savingsContribution: row.savings,
+              sTicket: row.sTicket,
+              legalFee: row.legalFee,
+              grossAmount,
+              description: `${row.vehicleClass} daily collection (${selectedRoute || "field sheet"} - row ${row.no})`,
+              refCode: `SWT-DLY-${row.vehiclePlate.replace(/\s+/g, "")}-${timestampShort.replace(/-/g, "")}-${row.no}`,
+              type: "Credit",
+              category: "Daily Contribution",
+              amount: grossAmount,
+              tillNumber: "VehicleTill",
+              entryDate: selectedDate,
+              timestamp: safeMiddayTimestamp
+            } as any);
+
+            createdTxIds.push(transaction.id);
+            createdRowIds.set(row.no, transaction.id);
+          }
+
+          // 2. Post new unposted expenses
+          const createdExpenseIds = new Map<number, string>();
+          for (const expense of unpostedExpenses) {
+            const transaction = await onAddTransaction({
+              description: `${expense.description} (${selectedRoute || "field sheet"} expense)`,
+              refCode: `SWT-EXP-${timestampShort.replace(/-/g, "")}-${expense.no}`,
+              type: "Debit",
+              category: "Petty Cash",
+              amount: expense.amount,
+              tillNumber: "VehicleTill",
+              entryDate: selectedDate,
+              timestamp: safeMiddayTimestamp
+            } as any);
+
+            createdTxIds.push(transaction.id);
+            createdExpenseIds.set(expense.no, transaction.id);
+          }
+
+          // 3. Update existing posted rows
+          for (const row of updatedRows) {
+            if (!row.transactionId) continue;
+            const original = transactions.find(t => t.id === row.transactionId);
+            if (original) {
+              updatedTxsBackup.push({
+                id: row.transactionId,
+                changes: {
+                  vehiclePlate: original.vehiclePlate,
+                  vehicleClass: original.vehicleClass,
+                  operationAmount: original.operationAmount,
+                  entranceFee: original.entranceFee,
+                  loanRepay: original.loanRepay,
+                  savingsContribution: original.savingsContribution,
+                  sTicket: original.sTicket,
+                  legalFee: original.legalFee,
+                  grossAmount: original.grossAmount,
+                  amount: original.amount,
+                  description: original.description
+                }
+              });
+            }
+
+            const grossAmount = getRowTotal(row);
+            const deduction = Number(original?.expenseDeduction || 0);
+
+            await onUpdateTransaction(row.transactionId, {
+              vehiclePlate: row.vehiclePlate.trim().toUpperCase(),
+              vehicleClass: row.vehicleClass,
+              operationAmount: row.operation,
+              entranceFee: row.entranceFee,
+              loanRepay: row.loanRepay,
+              savingsContribution: row.savings,
+              sTicket: row.sTicket,
+              legalFee: row.legalFee,
+              grossAmount,
+              amount: Math.max(0, grossAmount - deduction),
+              description: `${row.vehicleClass} daily collection (${selectedRoute || "field sheet"} - row ${row.no})`
+            });
+          }
+
+          // 4. Update existing posted expenses
+          for (const exp of updatedExpenses) {
+            if (!exp.transactionId) continue;
+            const original = transactions.find(t => t.id === exp.transactionId);
+            if (original) {
+              updatedTxsBackup.push({
+                id: exp.transactionId,
+                changes: {
+                  description: original.description,
+                  amount: original.amount
+                }
+              });
+            }
+
+            await onUpdateTransaction(exp.transactionId, {
+              description: `${exp.description} (${selectedRoute || "field sheet"} expense)`,
+              amount: Number(exp.amount || 0)
+            });
+          }
+
+          // Update local state with newly assigned IDs
+          setRows(prev => prev.map(r => createdRowIds.has(r.no) ? { ...r, transactionId: createdRowIds.get(r.no) } : r));
+          setExpenses(prev => prev.map(e => createdExpenseIds.has(e.no) ? { ...e, transactionId: createdExpenseIds.get(e.no) } : e));
+          setIsDirty(false);
+
+          // Configure Undo
+          setUndoAction({
+            type: "SAVE",
+            description: `Saved ${createdTxIds.length} new entries & ${updatedTxsBackup.length} updates for ${selectedDate}`,
+            createdTxIds,
+            updatedTxsBackup
+          });
+
+          setConfirmationConfig(null);
+          setSuccessMessage(`All daily collection changes for ${selectedDate} were successfully posted to the ledger!`);
+          setTimeout(() => setSuccessMessage(""), 6000);
+        } catch (error: any) {
+          console.error("Save error:", error);
+          setErrorMessage(error?.message || "Could not save entries to the ledger.");
+          setTimeout(() => setErrorMessage(""), 6000);
+        } finally {
+          setIsSaving(false);
+        }
+      }
+    });
+  };
+
+  // Undo execution handler
+  const handleExecuteUndo = async () => {
+    if (!undoAction || isUndoing) return;
+    setIsUndoing(true);
     try {
-      let savedCount = 0;
-      const createdRowIds = new Map<number, string>();
+      if (undoAction.type === "SAVE") {
+        // Rollback created transactions
+        if (undoAction.createdTxIds && onDeleteTransaction) {
+          for (const txId of undoAction.createdTxIds) {
+            try {
+              await onDeleteTransaction(txId);
+            } catch (err) {
+              console.error("Error rolling back created transaction:", err);
+            }
+          }
+        }
+        // Rollback updated transactions
+        if (undoAction.updatedTxsBackup) {
+          for (const item of undoAction.updatedTxsBackup) {
+            try {
+              await onUpdateTransaction(item.id, item.changes);
+            } catch (err) {
+              console.error("Error restoring updated transaction:", err);
+            }
+          }
+        }
+        setSuccessMessage("Save action undone! Created transactions were deleted and previous values restored.");
+      } else if (undoAction.type === "DELETE") {
+        // Restore deleted transaction
+        if (undoAction.deletedTx) {
+          const restored = await onAddTransaction({
+            ...undoAction.deletedTx,
+            entryDate: undoAction.deletedTx.entryDate || selectedDate,
+            timestamp: undoAction.deletedTx.timestamp
+          } as any);
 
-      // Post unposted rows
-      for (const row of unpostedRows) {
-        const grossAmount = getRowTotal(row);
-        if (grossAmount <= 0 && !row.vehiclePlate.trim()) continue;
-
-        const effectiveTimestamp = new Date(`${selectedDate}T${new Date().toTimeString().slice(0, 8)}`).toISOString();
-        const transaction = await onAddTransaction({
-          vehiclePlate: row.vehiclePlate.trim().toUpperCase(),
-          vehicleClass: row.vehicleClass,
-          operationAmount: row.operation,
-          entranceFee: row.entranceFee,
-          loanRepay: row.loanRepay,
-          savingsContribution: row.savings,
-          sTicket: row.sTicket,
-          legalFee: row.legalFee,
-          grossAmount,
-          description: `${row.vehicleClass} daily collection (${selectedRoute || "field sheet"} - row ${row.no})`,
-          refCode: `SWT-DLY-${row.vehiclePlate.replace(/\s+/g, "")}-${timestampShort.replace(/-/g, "")}-${row.no}`,
-          type: "Credit",
-          category: "Daily Contribution",
-          amount: grossAmount,
-          tillNumber: "VehicleTill",
-          timestamp: effectiveTimestamp
-        } as any);
-
-        createdRowIds.set(row.no, transaction.id);
-        savedCount++;
+          if (undoAction.deletedRow) {
+            setRows(prev => [...prev, { ...undoAction.deletedRow!, transactionId: restored.id }]);
+          } else if (undoAction.deletedExpense) {
+            setExpenses(prev => [...prev, { ...undoAction.deletedExpense!, transactionId: restored.id }]);
+          }
+          setSuccessMessage(`Deleted record for ${undoAction.deletedRow?.vehiclePlate || "entry"} was restored to the ledger.`);
+        }
       }
-
-      // Post unposted expenses
-      const createdExpenseIds = new Map<number, string>();
-      for (const expense of unpostedExpenses) {
-        const effectiveTimestamp = new Date(`${selectedDate}T${new Date().toTimeString().slice(0, 8)}`).toISOString();
-        const transaction = await onAddTransaction({
-          description: `${expense.description} (${selectedRoute || "field sheet"} expense)`,
-          refCode: `SWT-EXP-${timestampShort.replace(/-/g, "")}-${expense.no}`,
-          type: "Debit",
-          category: "Petty Cash",
-          amount: expense.amount,
-          tillNumber: "VehicleTill",
-          timestamp: effectiveTimestamp
-        } as any);
-
-        createdExpenseIds.set(expense.no, transaction.id);
-        savedCount++;
-      }
-
-      // Update existing posted rows
-      for (const row of rows.filter(r => r.transactionId)) {
-        await autoSaveRow(row);
-      }
-
-      // Update local state with newly assigned IDs
-      setRows(prev => prev.map(r => createdRowIds.has(r.no) ? { ...r, transactionId: createdRowIds.get(r.no) } : r));
-      setExpenses(prev => prev.map(e => createdExpenseIds.has(e.no) ? { ...e, transactionId: createdExpenseIds.get(e.no) } : e));
-
-      setSuccessMessage(`All daily collection changes and ${savedCount} new entries successfully saved to the ledger!`);
+      setUndoAction(null);
+      loadSheetForDate(selectedDate);
       setTimeout(() => setSuccessMessage(""), 5000);
-    } catch (error: any) {
-      setErrorMessage(error?.message || "Could not save entries to the ledger.");
+    } catch (err: any) {
+      console.error("Undo error:", err);
+      setErrorMessage(err?.message || "Failed to execute undo.");
       setTimeout(() => setErrorMessage(""), 5000);
+    } finally {
+      setIsUndoing(false);
     }
   };
 
@@ -424,7 +690,7 @@ export default function DailyCollectionsView({
   const totalExpenses = expenses.reduce((sum, e) => sum + Number(e.amount || 0), 0);
   const netIncome = totalRevenue - totalExpenses;
 
-  // Segmenting Nissan vs Sienta
+  // Segmenting Nissan vs Sienna (Sienta)
   const nissanRows = rows.filter(r => r.vehicleClass === "Nissan");
   const sientaRows = rows.filter(r => r.vehicleClass === "Sienta" || r.vehicleClass === "Member Contribution");
 
@@ -449,7 +715,7 @@ export default function DailyCollectionsView({
     <div className="flex-1 p-4 sm:p-8 overflow-y-auto bg-slate-100 font-sans flex flex-col space-y-6 min-h-0">
       
       {/* =========================================================================
-          SCREEN-ONLY VIEW (Interactive Form, UI Filters, Save & Print Buttons)
+          SCREEN-ONLY VIEW (Interactive Form, Query Date Filters, Warnings & Undo)
           ========================================================================= */}
       <div className="flex flex-col space-y-6 print:hidden">
 
@@ -460,8 +726,8 @@ export default function DailyCollectionsView({
               <span className="text-[9px] font-bold uppercase tracking-widest bg-emerald-500 text-slate-950 px-2 py-0.5 rounded font-mono border border-emerald-600">
                 FIELD OFFICE LOG DIGITIZATION
               </span>
-              <span className="text-[9px] font-bold uppercase tracking-widest bg-amber-500 text-slate-950 px-2 py-0.5 rounded font-mono">
-                REAL-TIME AUTO-SAVE
+              <span className="text-[9px] font-bold uppercase tracking-widest bg-indigo-500 text-white px-2 py-0.5 rounded font-mono">
+                VERIFIED CONFIRMATION &amp; UNDO
               </span>
             </div>
             <h2 className="text-lg font-bold font-display text-slate-100 mt-1 flex items-center">
@@ -469,88 +735,239 @@ export default function DailyCollectionsView({
               Sowetamu Sacco — Daily Field Collection Sheet
             </h2>
             <p className="text-xs text-slate-400 max-w-2xl leading-normal">
-              Record daily collections for <strong className="text-white">Nissans &amp; Sientas</strong>. Edits automatically sync to the general ledger, and printing separates Nissans and Sientas onto their own high-visibility dedicated pages.
+              Query past dates, review previously recorded logs, and record daily collections for <strong className="text-white">Nissan &amp; Sienna</strong> fleets. All database writes require explicit confirmation with instant Undo protection.
             </p>
           </div>
 
+          <div className="flex flex-wrap items-center gap-3">
             <button
               onClick={triggerPrint}
               className="px-4 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs uppercase tracking-wider rounded-xl border border-emerald-600 flex items-center space-x-2 transition-all shadow-md active:scale-95 cursor-pointer"
-              title="Print official register in portrait mode"
+              title="Print official 3-page register in portrait mode"
             >
               <Printer className="w-4 h-4 text-slate-950" />
               <span>Print Official Register (Portrait)</span>
             </button>
-            
-            <span className="text-[10px] text-slate-400 font-mono hidden md:block">
-              {isAutoSaving ? "🔄 Syncing to Ledger..." : "🟢 Live Ledger Connected"}
-            </span>
           </div>
         </div>
 
+        {/* UNDO BANNER (IF ACTIVE) */}
+        {undoAction && (
+          <div className="bg-indigo-950 text-white border-2 border-indigo-400 p-4 rounded-xl flex items-center justify-between gap-4 text-xs shadow-md animate-fade-in no-print">
+            <div className="flex items-center space-x-2.5">
+              <Clock className="w-5 h-5 text-indigo-300 shrink-0" />
+              <div>
+                <span className="font-mono text-[10px] uppercase font-black text-indigo-300 tracking-wider block">
+                  ACTION COMPLETED &bull; UNDO AVAILABLE
+                </span>
+                <span className="font-bold text-slate-100">{undoAction.description}</span>
+              </div>
+            </div>
+            <div className="flex items-center space-x-2 shrink-0">
+              <button
+                onClick={handleExecuteUndo}
+                disabled={isUndoing}
+                className="px-3.5 py-1.5 bg-indigo-400 hover:bg-indigo-300 text-slate-950 font-black rounded-lg text-xs uppercase tracking-wider flex items-center space-x-1.5 transition-all cursor-pointer shadow-xs disabled:opacity-50"
+              >
+                <Undo2 className="w-4 h-4" />
+                <span>{isUndoing ? "Reversing..." : "Undo This Action"}</span>
+              </button>
+              <button
+                onClick={() => setUndoAction(null)}
+                className="text-indigo-300 hover:text-white text-xs px-2 py-1 rounded transition-colors cursor-pointer"
+                title="Dismiss undo"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* UNSAVED MODIFICATIONS ALERT */}
+        {isDirty && (
+          <div className="bg-amber-50 border-2 border-amber-500 text-amber-950 p-3.5 rounded-xl flex items-center justify-between text-xs shadow-xs shrink-0 animate-fade-in no-print">
+            <div className="flex items-center space-x-2">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+              <span className="font-bold">
+                You have unsaved changes on this daily sheet. Click "Save Changes" to commit them to the ledger.
+              </span>
+            </div>
+            <button
+              onClick={handleRevertEdits}
+              className="px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider text-amber-800 hover:text-amber-950 bg-amber-200/60 hover:bg-amber-200 rounded-lg transition-colors cursor-pointer"
+            >
+              Discard Edits
+            </button>
+          </div>
+        )}
+
         {/* SYSTEM MESSAGES */}
         {successMessage && (
-          <div className="bg-emerald-50 border-2 border-emerald-500 text-emerald-950 p-4 rounded-xl flex items-center space-x-2.5 text-xs shadow-sm shrink-0 animate-fade-in no-print">
-            <Check className="w-5 h-5 text-emerald-600 shrink-0" />
+          <div className="bg-emerald-50 border-2 border-emerald-500 text-emerald-950 p-3.5 rounded-xl flex items-center space-x-2.5 text-xs shadow-sm shrink-0 animate-fade-in no-print">
+            <Check className="w-4 h-4 text-emerald-600 shrink-0" />
             <span className="font-bold">{successMessage}</span>
           </div>
         )}
 
         {errorMessage && (
-          <div className="bg-rose-50 border-2 border-rose-500 text-rose-950 p-4 rounded-xl flex items-center space-x-2.5 text-xs shadow-sm shrink-0 animate-fade-in no-print">
-            <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0" />
+          <div className="bg-rose-50 border-2 border-rose-500 text-rose-950 p-3.5 rounded-xl flex items-center space-x-2.5 text-xs shadow-sm shrink-0 animate-fade-in no-print">
+            <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
             <span className="font-bold">{errorMessage}</span>
           </div>
         )}
 
-        {/* METADATA FILTERS CONTROLLER */}
-        <div className="bg-white border-2 border-slate-900 rounded-2xl p-4 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4 no-print shrink-0">
-          <div className="flex flex-col sm:flex-row gap-4">
-            <div>
-              <label className="block text-[10px] font-black uppercase text-slate-500 tracking-wider mb-1 font-mono">
-                COLLECTION DATE *
-              </label>
-              <input
-                type="date"
-                value={selectedDate}
-                onChange={(e) => setSelectedDate(e.target.value)}
-                className="px-3 py-2 border border-slate-300 rounded-xl text-xs font-mono font-bold bg-slate-50 focus:outline-none focus:border-slate-900"
-              />
+        {/* METADATA FILTERS & DATE QUERY CONTROLLER */}
+        <div className="bg-white border-2 border-slate-900 rounded-2xl p-4 shadow-sm flex flex-col gap-4 no-print shrink-0">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            
+            {/* DATE QUERY SECTION */}
+            <div className="flex flex-wrap items-end gap-3">
+              <div>
+                <label className="block text-[10px] font-black uppercase text-slate-500 tracking-wider mb-1 font-mono flex items-center">
+                  <Calendar className="w-3 h-3 mr-1 text-slate-700" />
+                  COLLECTION DATE *
+                </label>
+                <div className="flex items-center space-x-2">
+                  <input
+                    type="date"
+                    value={inputDate}
+                    onChange={(e) => setInputDate(e.target.value)}
+                    className="px-3 py-2 border-2 border-slate-900 rounded-xl text-xs font-mono font-bold bg-slate-50 focus:outline-none focus:bg-white w-40"
+                  />
+                  <button
+                    onClick={() => handleQueryDate(inputDate)}
+                    className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold uppercase tracking-wider flex items-center space-x-1.5 transition-all shadow-sm cursor-pointer"
+                    title="Query all transactions recorded for this date"
+                  >
+                    <Search className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Query Date</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* QUICK DATE BUTTONS */}
+              <div className="flex items-center space-x-1.5 pb-0.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const today = new Date().toISOString().slice(0, 10);
+                    handleQueryDate(today);
+                  }}
+                  className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider font-mono border transition-colors cursor-pointer ${
+                    selectedDate === new Date().toISOString().slice(0, 10)
+                      ? "bg-slate-900 text-white border-slate-900"
+                      : "bg-slate-100 text-slate-700 border-slate-300 hover:bg-slate-200"
+                  }`}
+                >
+                  Today
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+                    handleQueryDate(yesterday);
+                  }}
+                  className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider font-mono border transition-colors cursor-pointer ${
+                    selectedDate === new Date(Date.now() - 86400000).toISOString().slice(0, 10)
+                      ? "bg-slate-900 text-white border-slate-900"
+                      : "bg-slate-100 text-slate-700 border-slate-300 hover:bg-slate-200"
+                  }`}
+                >
+                  Yesterday
+                </button>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-black uppercase text-slate-500 tracking-wider mb-1 font-mono">
+                  STAGE ROUTE LOCATION
+                </label>
+                <input
+                  type="text"
+                  value={selectedRoute}
+                  onChange={(e) => setSelectedRoute(e.target.value)}
+                  placeholder="e.g. Stage 17 to Machakos"
+                  className="px-3 py-2 border border-slate-300 rounded-xl text-xs font-bold bg-slate-50 focus:outline-none focus:border-slate-900 w-56"
+                />
+              </div>
             </div>
 
-            <div>
-              <label className="block text-[10px] font-black uppercase text-slate-500 tracking-wider mb-1 font-mono">
-                STAGE ROUTE LOCATION
-              </label>
-              <input
-                type="text"
-                value={selectedRoute}
-                onChange={(e) => setSelectedRoute(e.target.value)}
-                placeholder="e.g. Stage 17 to Machakos"
-                className="px-3 py-2 border border-slate-300 rounded-xl text-xs font-bold bg-slate-50 focus:outline-none focus:border-slate-900 w-64"
-              />
+            {/* ACTION BUTTONS */}
+            <div className="flex items-center space-x-2 self-end md:self-auto">
+              <button
+                onClick={handleResetDefaults}
+                disabled={isReadOnly}
+                className="px-3.5 py-2 border border-slate-300 hover:border-rose-400 hover:text-rose-700 text-slate-600 rounded-xl text-xs font-bold uppercase tracking-wider flex items-center space-x-1 transition-all cursor-pointer disabled:opacity-50"
+                title="Clear sheet for this date"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Clear Sheet</span>
+              </button>
+
+              <button
+                onClick={handleSaveChangesClick}
+                disabled={isReadOnly || isSaving}
+                className={`px-4 py-2 text-white rounded-xl text-xs font-bold uppercase tracking-wider flex items-center space-x-1.5 transition-all shadow-md cursor-pointer ${
+                  isDirty 
+                    ? "bg-emerald-600 hover:bg-emerald-700 animate-pulse" 
+                    : "bg-slate-900 hover:bg-slate-800"
+                } disabled:opacity-50`}
+              >
+                <Send className="w-3.5 h-3.5 text-emerald-300" />
+                <span>{isSaving ? "Saving..." : "Save Changes"}</span>
+              </button>
             </div>
           </div>
 
-          <div className="flex items-center space-x-2 self-end md:self-auto">
-            <button
-              onClick={handleResetDefaults}
-              disabled={isReadOnly}
-              className="px-3.5 py-2 border border-slate-300 hover:border-slate-400 text-slate-600 rounded-xl text-xs font-bold uppercase tracking-wider flex items-center space-x-1 transition-all cursor-pointer"
-              title="Clear this daily sheet"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              <span>Clear Sheet</span>
-            </button>
+          {/* AVAILABLE DATES QUICK SELECTOR BADGES */}
+          {availableDatesWithRecords.length > 0 && (
+            <div className="pt-2 border-t border-slate-200 flex flex-wrap items-center gap-2">
+              <span className="text-[10px] font-mono font-bold text-slate-500 uppercase flex items-center">
+                <History className="w-3 h-3 mr-1 text-slate-400" />
+                Past Dates with Logs:
+              </span>
+              {availableDatesWithRecords.map(([d, count]) => (
+                <button
+                  key={d}
+                  onClick={() => handleQueryDate(d)}
+                  className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-bold transition-all cursor-pointer ${
+                    d === selectedDate
+                      ? "bg-emerald-600 text-white shadow-xs scale-105"
+                      : "bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300"
+                  }`}
+                >
+                  {d} <span className="opacity-75">({count})</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
 
-            <button
-              onClick={handleSaveChanges}
-              disabled={isReadOnly}
-              className="px-4 py-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white rounded-xl text-xs font-bold uppercase tracking-wider flex items-center space-x-1.5 transition-all shadow-sm cursor-pointer"
-            >
-              <Send className="w-3.5 h-3.5" />
-              <span>Save Changes</span>
-            </button>
+        {/* QUERY STATUS HEADER BANNER */}
+        <div className="bg-slate-800 text-slate-100 px-4 py-2.5 rounded-xl border border-slate-900 flex flex-wrap items-center justify-between text-xs font-mono shadow-xs">
+          <div className="flex items-center space-x-3">
+            <span className="text-emerald-400 font-bold uppercase">
+              Current Date: <strong className="text-white underline">{selectedDate}</strong>
+            </span>
+            <span className="text-slate-400">&bull;</span>
+            <span className="text-slate-300">
+              Loaded: <strong className="text-emerald-300">{nissanRows.length} Nissans</strong>, <strong className="text-sky-300">{sientaRows.length} Siennas</strong>
+            </span>
+            <span className="text-slate-400">&bull;</span>
+            <span className="text-slate-300">
+              Gross Total: <strong className="text-emerald-400">KES {totalRevenue.toLocaleString()}</strong>
+            </span>
+          </div>
+
+          <div className="flex items-center space-x-2">
+            {isDirty ? (
+              <span className="text-[10px] px-2 py-0.5 bg-amber-500 text-slate-950 font-bold rounded font-mono uppercase">
+                Sheet Modified (Unsaved)
+              </span>
+            ) : (
+              <span className="text-[10px] px-2 py-0.5 bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold rounded font-mono uppercase">
+                Synced to Ledger
+              </span>
+            )}
           </div>
         </div>
 
@@ -563,10 +980,10 @@ export default function DailyCollectionsView({
             </div>
             <div className="flex items-center gap-2">
               <span className="text-xs font-bold font-mono px-2.5 py-1 bg-emerald-100 text-emerald-800 rounded-lg">
-                Nissans (14s): {nissanRows.length}
+                Nissan (14s): {nissanRows.length}
               </span>
               <span className="text-xs font-bold font-mono px-2.5 py-1 bg-sky-100 text-sky-800 rounded-lg">
-                Sientas (7s): {sientaRows.length}
+                Sienna (7s): {sientaRows.length}
               </span>
             </div>
           </div>
@@ -603,7 +1020,6 @@ export default function DailyCollectionsView({
                           value={row.vehiclePlate}
                           disabled={isReadOnly}
                           onChange={(e) => handleVehiclePlateChange(row.no, e.target.value)}
-                          onBlur={() => handleRowBlur(row.no)}
                           placeholder="KCA 123A"
                           className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono font-bold uppercase bg-transparent text-slate-900 text-xs rounded focus:outline-none focus:bg-white"
                         />
@@ -617,7 +1033,7 @@ export default function DailyCollectionsView({
                           className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 text-xs font-bold rounded focus:outline-none bg-transparent"
                         >
                           <option value="Nissan">Nissan (14s)</option>
-                          <option value="Sienta">Sienta (7s)</option>
+                          <option value="Sienta">Sienna (7s)</option>
                           <option value="Member Contribution">Member Contrib</option>
                         </select>
                       </td>
@@ -628,7 +1044,6 @@ export default function DailyCollectionsView({
                           value={row.operation || ""}
                           disabled={isReadOnly}
                           onChange={(e) => handleUpdateRowField(row.no, "operation", Number(sanitizeDecimalInput(e.target.value)) || 0)}
-                          onBlur={() => handleRowBlur(row.no)}
                           inputMode="decimal"
                           className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-slate-900 text-xs rounded focus:outline-none focus:bg-white"
                         />
@@ -640,7 +1055,6 @@ export default function DailyCollectionsView({
                           value={row.entranceFee || ""}
                           disabled={isReadOnly}
                           onChange={(e) => handleUpdateRowField(row.no, "entranceFee", Number(sanitizeDecimalInput(e.target.value)) || 0)}
-                          onBlur={() => handleRowBlur(row.no)}
                           inputMode="decimal"
                           className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-slate-900 text-xs rounded focus:outline-none focus:bg-white"
                         />
@@ -652,7 +1066,6 @@ export default function DailyCollectionsView({
                           value={row.loanRepay || ""}
                           disabled={isReadOnly}
                           onChange={(e) => handleUpdateRowField(row.no, "loanRepay", Number(sanitizeDecimalInput(e.target.value)) || 0)}
-                          onBlur={() => handleRowBlur(row.no)}
                           inputMode="decimal"
                           className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-slate-900 text-xs rounded focus:outline-none focus:bg-white"
                         />
@@ -664,7 +1077,6 @@ export default function DailyCollectionsView({
                           value={row.savings || ""}
                           disabled={isReadOnly}
                           onChange={(e) => handleUpdateRowField(row.no, "savings", Number(sanitizeDecimalInput(e.target.value)) || 0)}
-                          onBlur={() => handleRowBlur(row.no)}
                           inputMode="decimal"
                           className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-blue-800 font-bold text-xs rounded focus:outline-none focus:bg-white"
                         />
@@ -676,7 +1088,6 @@ export default function DailyCollectionsView({
                           value={row.sTicket || ""}
                           disabled={isReadOnly}
                           onChange={(e) => handleUpdateRowField(row.no, "sTicket", Number(sanitizeDecimalInput(e.target.value)) || 0)}
-                          onBlur={() => handleRowBlur(row.no)}
                           inputMode="decimal"
                           className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-amber-800 font-bold text-xs rounded focus:outline-none focus:bg-white"
                         />
@@ -688,7 +1099,6 @@ export default function DailyCollectionsView({
                           value={row.legalFee || ""}
                           disabled={isReadOnly}
                           onChange={(e) => handleUpdateRowField(row.no, "legalFee", Number(sanitizeDecimalInput(e.target.value)) || 0)}
-                          onBlur={() => handleRowBlur(row.no)}
                           inputMode="decimal"
                           className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono text-right bg-transparent text-rose-800 font-bold text-xs rounded focus:outline-none focus:bg-white"
                         />
@@ -700,7 +1110,7 @@ export default function DailyCollectionsView({
 
                       <td className="px-3 py-2 text-center no-print">
                         <button
-                          onClick={() => handleDeleteRow(row.no)}
+                          onClick={() => handleDeleteRowClick(row.no)}
                           disabled={isReadOnly}
                           className="text-slate-300 hover:text-rose-600 p-1 rounded transition-colors cursor-pointer"
                           title="Delete this log record"
@@ -715,7 +1125,7 @@ export default function DailyCollectionsView({
                 {rows.length === 0 && (
                   <tr>
                     <td colSpan={11} className="py-8 text-center text-slate-400 font-medium font-mono text-xs">
-                      No vehicle logs recorded. Click "Add Vehicle Entry" below to add a row.
+                      No vehicle logs recorded for {selectedDate}. Click "Add Vehicle Entry" below to record a vehicle for this date.
                     </td>
                   </tr>
                 )}
@@ -724,7 +1134,7 @@ export default function DailyCollectionsView({
               <tfoot className="bg-slate-900 text-white font-mono text-[11px] uppercase tracking-wider font-bold border-t-2 border-slate-900">
                 <tr>
                   <td colSpan={3} className="px-3 py-3 border-r border-slate-700 text-center text-slate-200">
-                    TOTAL SUMS
+                    TOTAL SUMS ({rows.length} VEHICLES)
                   </td>
                   <td className="px-3 py-3 border-r border-slate-700 text-right text-emerald-400">
                     {totalOperation > 0 ? `KSH ${totalOperation.toLocaleString()}` : "—"}
@@ -784,7 +1194,6 @@ export default function DailyCollectionsView({
                       value={exp.description}
                       disabled={isReadOnly}
                       onChange={(e) => handleUpdateExpenseField(exp.no, idx, "description", e.target.value)}
-                      onBlur={() => handleExpenseBlur(idx)}
                       placeholder="Expense item (e.g. Stage Marshall)"
                       className="flex-1 px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-white focus:outline-none focus:border-slate-900"
                     />
@@ -795,14 +1204,13 @@ export default function DailyCollectionsView({
                         value={exp.amount || ""}
                         disabled={isReadOnly}
                         onChange={(e) => handleUpdateExpenseField(exp.no, idx, "amount", Number(sanitizeDecimalInput(e.target.value)) || 0)}
-                        onBlur={() => handleExpenseBlur(idx)}
                         inputMode="decimal"
                         className="w-full px-2 py-1.5 border border-slate-200 rounded-lg text-right font-bold text-rose-700 text-xs bg-white focus:outline-none focus:border-slate-900"
                       />
                     </div>
                     {!isReadOnly && (
                       <button
-                        onClick={() => handleDeleteExpenseRow(idx)}
+                        onClick={() => handleDeleteExpenseClick(idx)}
                         className="text-slate-300 hover:text-rose-600 p-1 rounded transition-colors no-print cursor-pointer"
                         title="Delete expense line"
                       >
@@ -854,10 +1262,13 @@ export default function DailyCollectionsView({
           </div>
         </div>
 
+      </div>
+
       {/* =========================================================================
-          EXECUTIVE BOARDROOM 2-PAGE PRINTABLE DOCUMENT (PORTRAIT ORIENTATION)
-          Page 1: Nissan 14-Seaters Register & Stage Expenses
-          Page 2: Sienta 7-Seaters Register & Grand Combined Financial Reconciliation
+          EXECUTIVE 3-PAGE PORTRAIT PRINTABLE REGISTER (A4 PORTRAIT ORIENTATION)
+          Page 1: Nissan 14-Seaters Register & Nissan Totals
+          Page 2: Sienna 7-Seaters Register & Sienna Totals
+          Page 3: Fleet Aggregation (Nissan + Sienna), Stage Deductions & Net Inflow
           ========================================================================= */}
       <div className="hidden print:block print-doc text-slate-900 bg-white w-full">
 
@@ -865,7 +1276,7 @@ export default function DailyCollectionsView({
             PAGE 1: NISSAN (14-SEATER VEHICLES) DAILY COLLECTION SHEET
             ===================================================================== */}
         <div className="print-page-break p-2">
-          {/* EXECUTIVE SOWETAMU EMBLEM & HEADER */}
+          {/* SOWETAMU OFFICIAL HEADER */}
           <div className="flex justify-between items-center border-b-2 border-slate-900 pb-2 mb-2">
             <div className="flex items-center space-x-2.5">
               <div className="w-10 h-10 rounded bg-slate-900 text-emerald-400 flex flex-col items-center justify-center font-black font-mono border border-slate-950 shrink-0">
@@ -893,7 +1304,7 @@ export default function DailyCollectionsView({
           {/* PAGE 1 METADATA BANNER */}
           <div className="flex justify-between items-center bg-slate-900 text-white px-2.5 py-1 mb-2 rounded font-mono text-[11px] uppercase tracking-wide">
             <span className="font-black text-emerald-400">
-              PAGE 1 OF 2 &bull; NISSAN (14-SEATERS) REGISTER
+              PAGE 1 OF 3 &bull; NISSAN (14-SEATERS) REGISTER
             </span>
             <div className="space-x-3 font-bold text-[10px]">
               <span>STAGE ROUTE: <strong className="text-amber-400">{selectedRoute}</strong></span>
@@ -946,7 +1357,7 @@ export default function DailyCollectionsView({
             </tbody>
             <tfoot>
               <tr>
-                <td colSpan={2} style={{ textAlign: "center" }}>NISSAN TOTALS</td>
+                <td colSpan={2} style={{ textAlign: "center" }}>NISSAN TOTALS ({nissanRows.length} VEHICLES)</td>
                 <td style={{ textAlign: "right" }}>{nissanOperation > 0 ? nissanOperation.toLocaleString() : "0"}</td>
                 <td style={{ textAlign: "right" }}>{nissanEntrance > 0 ? nissanEntrance.toLocaleString() : "0"}</td>
                 <td style={{ textAlign: "right" }}>{nissanLoanRepay > 0 ? nissanLoanRepay.toLocaleString() : "0"}</td>
@@ -958,53 +1369,57 @@ export default function DailyCollectionsView({
             </tfoot>
           </table>
 
-          {/* PAGE 1 FOOTER: STAGE EXPENSES & SIGNATURES */}
-          <div className="grid grid-cols-2 gap-3 mt-2 font-mono text-[10px]">
-            <div className="border border-slate-900 rounded p-2 bg-slate-50">
-              <p className="font-black text-slate-900 border-b border-slate-300 pb-1 mb-1 uppercase text-[10px] flex justify-between">
-                <span>Daily Stage Deductions &amp; Expenses:</span>
-                <span className="text-slate-500 font-normal">Route Deductions</span>
+          {/* PAGE 1 FOOTER: NISSAN FLEET SUMMARY & CASHIER SIGN OFF */}
+          <div className="grid grid-cols-2 gap-3 mt-3 font-mono text-[10px]">
+            <div className="border border-slate-900 rounded p-2.5 bg-slate-50">
+              <p className="font-black text-slate-900 border-b border-slate-300 pb-1 mb-1.5 uppercase text-[10px] flex justify-between">
+                <span>Nissan Fleet Collections Summary:</span>
+                <span className="text-emerald-700 font-bold">Page 1 Total</span>
               </p>
-              {expenses.length > 0 ? (
-                expenses.map((e, i) => (
-                  <div key={i} className="flex justify-between text-[9.5px] py-0.5 border-b border-slate-200 last:border-0">
-                    <span className="text-slate-700 truncate mr-2">{i + 1}. {e.description}</span>
-                    <span className="font-bold text-slate-900 shrink-0">KES {Number(e.amount).toLocaleString()}</span>
-                  </div>
-                ))
-              ) : (
-                <p className="text-[9.5px] text-slate-500 italic py-0.5">Nil stage expenses recorded.</p>
-              )}
-              <div className="flex justify-between font-black border-t border-slate-900 pt-1 mt-1 text-[10px] text-slate-950">
-                <span>TOTAL STAGE EXPENSES:</span>
-                <span className="text-rose-700">KES {totalExpenses.toLocaleString()}</span>
+              <div className="space-y-1 text-[9.5px]">
+                <div className="flex justify-between text-slate-700">
+                  <span>Total Nissan 14-Seater Vehicles:</span>
+                  <span className="font-bold text-slate-900">{nissanRows.length}</span>
+                </div>
+                <div className="flex justify-between text-slate-700">
+                  <span>Total Fleet Operations &amp; S/Ticket:</span>
+                  <span className="font-bold text-slate-900">KES {(nissanOperation + nissanSTicket).toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between text-slate-700">
+                  <span>Total Members Savings &amp; Loan Repay:</span>
+                  <span className="font-bold text-slate-900">KES {(nissanSavings + nissanLoanRepay).toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between border-t border-slate-900 pt-1 font-black text-slate-950 text-[10.5px]">
+                  <span>TOTAL NISSAN REVENUE:</span>
+                  <span className="text-emerald-800">KES {nissanTotal.toLocaleString()}</span>
+                </div>
               </div>
             </div>
 
-            <div className="border border-slate-900 rounded p-2 bg-white flex flex-col justify-between">
+            <div className="border border-slate-900 rounded p-2.5 bg-white flex flex-col justify-between">
               <p className="font-black text-slate-900 border-b border-slate-300 pb-1 uppercase text-[10px]">
-                Field Operations &amp; Cashier Certification:
+                Field Cashier / Clerk Certification:
               </p>
-              <div className="space-y-2.5 text-[10px] pt-1 text-slate-800">
-                <div className="flex justify-between items-center">
-                  <span>Stage Marshall: _______________________</span>
-                  <span>Sign: ___________</span>
-                </div>
+              <div className="space-y-2 text-[10px] pt-1 text-slate-800">
                 <div className="flex justify-between items-center">
                   <span>Cashier / Clerk: <strong>{currentUserName || "_______________________"}</strong></span>
                   <span>Sign: ___________</span>
                 </div>
+                <div className="flex justify-between items-center">
+                  <span>Date Certified: <strong>{selectedDate}</strong></span>
+                  <span>Time: ___________</span>
+                </div>
               </div>
-              <p className="text-[8px] text-slate-500 italic text-right mt-1">Certified as true record of field collections.</p>
+              <p className="text-[8px] text-slate-500 italic text-right mt-1">Certified Page 1 of 3: Nissan register.</p>
             </div>
           </div>
         </div>
 
         {/* =====================================================================
-            PAGE 2: SIENTA (7-SEATER VEHICLES) DAILY COLLECTION SHEET
+            PAGE 2: SIENNA (7-SEATER VEHICLES) DAILY COLLECTION SHEET
             ===================================================================== */}
-        <div className="p-2">
-          {/* EXECUTIVE SOWETAMU EMBLEM & HEADER */}
+        <div className="print-page-break p-2">
+          {/* SOWETAMU OFFICIAL HEADER */}
           <div className="flex justify-between items-center border-b-2 border-slate-900 pb-2 mb-2">
             <div className="flex items-center space-x-2.5">
               <div className="w-10 h-10 rounded bg-slate-900 text-emerald-400 flex flex-col items-center justify-center font-black font-mono border border-slate-950 shrink-0">
@@ -1032,7 +1447,7 @@ export default function DailyCollectionsView({
           {/* PAGE 2 METADATA BANNER */}
           <div className="flex justify-between items-center bg-slate-900 text-white px-2.5 py-1 mb-2 rounded font-mono text-[11px] uppercase tracking-wide">
             <span className="font-black text-amber-400">
-              PAGE 2 OF 2 &bull; SIENTA (7-SEATERS) REGISTER
+              PAGE 2 OF 3 &bull; SIENNA (7-SEATERS) REGISTER
             </span>
             <div className="space-x-3 font-bold text-[10px]">
               <span>STAGE ROUTE: <strong className="text-amber-400">{selectedRoute}</strong></span>
@@ -1040,7 +1455,7 @@ export default function DailyCollectionsView({
             </div>
           </div>
 
-          {/* SIENTA TABLE */}
+          {/* SIENNA TABLE */}
           <table className="print-table">
             <thead>
               <tr>
@@ -1078,14 +1493,14 @@ export default function DailyCollectionsView({
               {sientaRows.length === 0 && (
                 <tr>
                   <td colSpan={9} style={{ textAlign: "center", padding: "12px", color: "#64748b" }}>
-                    Nil Sienta vehicle collections recorded for this date and route.
+                    Nil Sienna vehicle collections recorded for this date and route.
                   </td>
                 </tr>
               )}
             </tbody>
             <tfoot>
               <tr>
-                <td colSpan={2} style={{ textAlign: "center" }}>SIENTA TOTALS</td>
+                <td colSpan={2} style={{ textAlign: "center" }}>SIENNA TOTALS ({sientaRows.length} VEHICLES)</td>
                 <td style={{ textAlign: "right" }}>{sientaOperation > 0 ? sientaOperation.toLocaleString() : "0"}</td>
                 <td style={{ textAlign: "right" }}>{sientaEntrance > 0 ? sientaEntrance.toLocaleString() : "0"}</td>
                 <td style={{ textAlign: "right" }}>{sientaLoanRepay > 0 ? sientaLoanRepay.toLocaleString() : "0"}</td>
@@ -1097,60 +1512,246 @@ export default function DailyCollectionsView({
             </tfoot>
           </table>
 
-          {/* PAGE 2 FOOTER: GRAND RECONCILIATION SUMMARY & EXECUTIVE APPROVALS */}
-          <div className="grid grid-cols-2 gap-3 mt-2 font-mono text-[10px]">
-            <div className="border border-slate-900 rounded p-2 bg-slate-50">
-              <p className="font-black text-slate-900 border-b border-slate-300 pb-1 mb-1 uppercase text-[10px] flex justify-between">
-                <span>Combined Route Financial Summary:</span>
-                <span className="text-emerald-700 font-bold">Executive Summary</span>
+          {/* PAGE 2 FOOTER: SIENNA FLEET SUMMARY & MARSHALL SIGN OFF */}
+          <div className="grid grid-cols-2 gap-3 mt-3 font-mono text-[10px]">
+            <div className="border border-slate-900 rounded p-2.5 bg-slate-50">
+              <p className="font-black text-slate-900 border-b border-slate-300 pb-1 mb-1.5 uppercase text-[10px] flex justify-between">
+                <span>Sienna Fleet Collections Summary:</span>
+                <span className="text-amber-700 font-bold">Page 2 Total</span>
               </p>
-              <div className="space-y-1 text-[10px]">
+              <div className="space-y-1 text-[9.5px]">
                 <div className="flex justify-between text-slate-700">
-                  <span>1. Nissans Total Revenue (Page 1):</span>
-                  <span className="font-bold text-slate-900">KES {nissanTotal.toLocaleString()}</span>
+                  <span>Total Sienna 7-Seater Vehicles:</span>
+                  <span className="font-bold text-slate-900">{sientaRows.length}</span>
                 </div>
                 <div className="flex justify-between text-slate-700">
-                  <span>2. Sientas Total Revenue (Page 2):</span>
-                  <span className="font-bold text-slate-900">KES {sientaTotal.toLocaleString()}</span>
+                  <span>Total Fleet Operations &amp; S/Ticket:</span>
+                  <span className="font-bold text-slate-900">KES {(sientaOperation + sientaSTicket).toLocaleString()}</span>
                 </div>
-                <div className="flex justify-between border-t border-slate-300 pt-0.5 font-bold text-slate-950">
-                  <span>GROSS FIELD DEPOSITS:</span>
-                  <span>KES {totalRevenue.toLocaleString()}</span>
+                <div className="flex justify-between text-slate-700">
+                  <span>Total Members Savings &amp; Loan Repay:</span>
+                  <span className="font-bold text-slate-900">KES {(sientaSavings + sientaLoanRepay).toLocaleString()}</span>
                 </div>
-                <div className="flex justify-between text-rose-700">
-                  <span>Less Total Stage Deductions:</span>
-                  <span className="font-bold">- KES {totalExpenses.toLocaleString()}</span>
-                </div>
-                <div className="flex justify-between font-black border-t border-slate-900 pt-1 text-[11px] bg-emerald-50 text-emerald-950 p-1 rounded">
-                  <span>NET SACCO INFLOW TO VAULT:</span>
-                  <span className="text-emerald-700 font-black">KES {netIncome.toLocaleString()}.00</span>
+                <div className="flex justify-between border-t border-slate-900 pt-1 font-black text-slate-950 text-[10.5px]">
+                  <span>TOTAL SIENNA REVENUE:</span>
+                  <span className="text-amber-800">KES {sientaTotal.toLocaleString()}</span>
                 </div>
               </div>
             </div>
 
-            <div className="border border-slate-900 rounded p-2 bg-white flex flex-col justify-between">
+            <div className="border border-slate-900 rounded p-2.5 bg-white flex flex-col justify-between">
               <p className="font-black text-slate-900 border-b border-slate-300 pb-1 uppercase text-[10px]">
-                Executive Management &amp; Audit Approval:
+                Stage Marshall Certification:
               </p>
               <div className="space-y-2 text-[10px] pt-1 text-slate-800">
                 <div className="flex justify-between items-center">
-                  <span>Treasurer: ____________________</span>
-                  <span>Sign: _______________</span>
+                  <span>Stage Marshall: _______________________</span>
+                  <span>Sign: ___________</span>
                 </div>
                 <div className="flex justify-between items-center">
-                  <span>Chairman: ____________________</span>
-                  <span>Sign: _______________</span>
+                  <span>Stage Location: <strong>{selectedRoute}</strong></span>
+                  <span>Stamp: ___________</span>
                 </div>
-                <div className="flex justify-between items-center border-t border-slate-200 pt-0.5">
-                  <span className="text-slate-600">Auditor Seal: <strong>CS/NO. 22239</strong></span>
-                  <span>Stamp Date: ____________</span>
+              </div>
+              <p className="text-[8px] text-slate-500 italic text-right mt-1">Certified Page 2 of 3: Sienna register.</p>
+            </div>
+          </div>
+        </div>
+
+        {/* =====================================================================
+            PAGE 3: FLEET AGGREGATION & COMBINED RECONCILIATION SUMMARY
+            ===================================================================== */}
+        <div className="p-2">
+          {/* SOWETAMU OFFICIAL HEADER */}
+          <div className="flex justify-between items-center border-b-2 border-slate-900 pb-2 mb-2">
+            <div className="flex items-center space-x-2.5">
+              <div className="w-10 h-10 rounded bg-slate-900 text-emerald-400 flex flex-col items-center justify-center font-black font-mono border border-slate-950 shrink-0">
+                <span className="text-[10px] leading-tight">SWT</span>
+                <span className="text-[6px] text-amber-400 tracking-wider">SACCO</span>
+              </div>
+              <div>
+                <h1 className="text-lg font-black font-display tracking-tight text-slate-950 uppercase leading-none">
+                  SOWETAMU TRAVELLERS SACCO SOCIETY LTD
+                </h1>
+                <p className="text-[9px] text-slate-700 font-bold uppercase tracking-wider font-mono mt-0.5">
+                  Co-operative Societies Act Cap 490 &bull; Reg: CS/NO. 22239
+                </p>
+                <p className="text-[8px] text-slate-500 italic">"We Serve with Courtesy, Discipline &amp; Dignity"</p>
+              </div>
+            </div>
+
+            <div className="text-right text-[9px] font-mono text-slate-700 space-y-0.5">
+              <p className="font-bold text-slate-900">P.O. BOX 1324-00518, NAIROBI</p>
+              <p>Email: sowetamusaacco@gmail.com &bull; Tel: 0715 600 000</p>
+              <p className="text-slate-500 font-bold">Currency: KENYA SHILLINGS (KES)</p>
+            </div>
+          </div>
+
+          {/* PAGE 3 METADATA BANNER */}
+          <div className="flex justify-between items-center bg-slate-900 text-white px-2.5 py-1 mb-2 rounded font-mono text-[11px] uppercase tracking-wide">
+            <span className="font-black text-emerald-400">
+              PAGE 3 OF 3 &bull; FLEET AGGREGATION &amp; COMBINED FINANCIAL RECONCILIATION
+            </span>
+            <div className="space-x-3 font-bold text-[10px]">
+              <span>STAGE ROUTE: <strong className="text-amber-400">{selectedRoute}</strong></span>
+              <span>DATE: <strong className="text-emerald-400">{selectedDate}</strong></span>
+            </div>
+          </div>
+
+          {/* TABLE 1: FLEET AGGREGATION TABLE (NISSAN + SIENNA) */}
+          <div className="mb-3">
+            <p className="text-[10px] font-black uppercase text-slate-900 tracking-wider font-mono mb-1">
+              1. Fleet Collections Aggregation (Nissan &amp; Sienna Fleet Totals)
+            </p>
+            <table className="print-table">
+              <thead>
+                <tr>
+                  <th style={{ width: "130px", textAlign: "left" }}>FLEET CATEGORY</th>
+                  <th style={{ width: "65px", textAlign: "center" }}>VEHICLES</th>
+                  <th style={{ textAlign: "right" }}>OPERATION</th>
+                  <th style={{ textAlign: "right" }}>ENTRANCE</th>
+                  <th style={{ textAlign: "right" }}>LOAN REPAY</th>
+                  <th style={{ textAlign: "right" }}>SAVINGS</th>
+                  <th style={{ textAlign: "right" }}>S/TICKET</th>
+                  <th style={{ textAlign: "right" }}>LEGAL FEE</th>
+                  <th style={{ textAlign: "right", width: "120px" }}>SUB-TOTAL (KES)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td style={{ fontWeight: 900 }}>1. Nissan (14-Seaters)</td>
+                  <td style={{ textAlign: "center", fontWeight: 700 }}>{nissanRows.length}</td>
+                  <td style={{ textAlign: "right" }}>{nissanOperation.toLocaleString()}</td>
+                  <td style={{ textAlign: "right" }}>{nissanEntrance.toLocaleString()}</td>
+                  <td style={{ textAlign: "right" }}>{nissanLoanRepay.toLocaleString()}</td>
+                  <td style={{ textAlign: "right" }}>{nissanSavings.toLocaleString()}</td>
+                  <td style={{ textAlign: "right" }}>{nissanSTicket.toLocaleString()}</td>
+                  <td style={{ textAlign: "right" }}>{nissanLegalFee.toLocaleString()}</td>
+                  <td style={{ textAlign: "right", fontWeight: 900 }}>KES {nissanTotal.toLocaleString()}</td>
+                </tr>
+
+                <tr>
+                  <td style={{ fontWeight: 900 }}>2. Sienna (7-Seaters)</td>
+                  <td style={{ textAlign: "center", fontWeight: 700 }}>{sientaRows.length}</td>
+                  <td style={{ textAlign: "right" }}>{sientaOperation.toLocaleString()}</td>
+                  <td style={{ textAlign: "right" }}>{sientaEntrance.toLocaleString()}</td>
+                  <td style={{ textAlign: "right" }}>{sientaLoanRepay.toLocaleString()}</td>
+                  <td style={{ textAlign: "right" }}>{sientaSavings.toLocaleString()}</td>
+                  <td style={{ textAlign: "right" }}>{sientaSTicket.toLocaleString()}</td>
+                  <td style={{ textAlign: "right" }}>{sientaLegalFee.toLocaleString()}</td>
+                  <td style={{ textAlign: "right", fontWeight: 900 }}>KES {sientaTotal.toLocaleString()}</td>
+                </tr>
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td style={{ textAlign: "left", fontWeight: 900 }}>COMBINED FLEET TOTALS</td>
+                  <td style={{ textAlign: "center", fontWeight: 900 }}>{rows.length}</td>
+                  <td style={{ textAlign: "right" }}>{totalOperation.toLocaleString()}</td>
+                  <td style={{ textAlign: "right" }}>{totalEntrance.toLocaleString()}</td>
+                  <td style={{ textAlign: "right" }}>{totalLoanRepay.toLocaleString()}</td>
+                  <td style={{ textAlign: "right" }}>{totalSavings.toLocaleString()}</td>
+                  <td style={{ textAlign: "right" }}>{totalSTicket.toLocaleString()}</td>
+                  <td style={{ textAlign: "right" }}>{totalLegalFee.toLocaleString()}</td>
+                  <td style={{ textAlign: "right", fontSize: "12px" }}>KES {totalRevenue.toLocaleString()}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+
+          {/* TABLE 2: STAGE EXPENSES & RECONCILIATION */}
+          <div className="grid grid-cols-2 gap-3 mb-2 font-mono text-[10px]">
+            <div className="border border-slate-900 rounded p-2 bg-slate-50">
+              <p className="font-black text-slate-900 border-b border-slate-300 pb-1 mb-1 uppercase text-[10px] flex justify-between">
+                <span>2. Stage Deductions &amp; Route Expenses:</span>
+                <span className="text-slate-500 font-normal">{expenses.length} Entries</span>
+              </p>
+              {expenses.length > 0 ? (
+                <div className="max-h-[130px] overflow-hidden">
+                  {expenses.map((e, i) => (
+                    <div key={i} className="flex justify-between text-[9.5px] py-0.5 border-b border-slate-200 last:border-0">
+                      <span className="text-slate-700 truncate mr-2">{i + 1}. {e.description}</span>
+                      <span className="font-bold text-slate-900 shrink-0">KES {Number(e.amount).toLocaleString()}</span>
+                    </div>
+                  ))}
                 </div>
+              ) : (
+                <p className="text-[9.5px] text-slate-500 italic py-1">Nil stage expenses recorded for this date.</p>
+              )}
+              <div className="flex justify-between font-black border-t border-slate-900 pt-1 mt-1 text-[10px] text-slate-950">
+                <span>TOTAL STAGE DEDUCTIONS:</span>
+                <span className="text-rose-700">KES {totalExpenses.toLocaleString()}</span>
+              </div>
+            </div>
+
+            {/* GRAND TOTAL AGGREGATION BOX AT THE END OF THE PAGE */}
+            <div className="border-2 border-slate-900 rounded p-2.5 bg-slate-50 flex flex-col justify-between">
+              <p className="font-black text-slate-900 border-b border-slate-300 pb-1 uppercase text-[10.5px] flex justify-between">
+                <span>3. End of Page Aggregation (Nissan + Sienna):</span>
+                <span className="text-emerald-700 font-bold">Net Sacco Inflow</span>
+              </p>
+              <div className="space-y-1.5 text-[10px]">
+                <div className="flex justify-between text-slate-700">
+                  <span>Gross Nissan Collections (Page 1):</span>
+                  <span className="font-bold text-slate-900">KES {nissanTotal.toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between text-slate-700">
+                  <span>Gross Sienna Collections (Page 2):</span>
+                  <span className="font-bold text-slate-900">KES {sientaTotal.toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between border-t border-slate-300 pt-1 font-bold text-slate-950">
+                  <span>TOTAL GROSS FLEET DEPOSITS:</span>
+                  <span className="text-slate-950">KES {totalRevenue.toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between text-rose-700 font-bold">
+                  <span>Less Total Stage Deductions:</span>
+                  <span>- KES {totalExpenses.toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between font-black border-t-2 border-slate-900 pt-1.5 text-[11px] bg-emerald-100 text-emerald-950 p-1.5 rounded">
+                  <span>NET SACCO INFLOW TO VAULT:</span>
+                  <span className="text-emerald-900 font-black">KES {netIncome.toLocaleString()}.00</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* EXECUTIVE MANAGEMENT & AUDIT SIGN-OFF */}
+          <div className="border border-slate-900 rounded p-2.5 bg-white font-mono text-[9.5px]">
+            <p className="font-black text-slate-900 border-b border-slate-300 pb-1 mb-2 uppercase text-[10px]">
+              Executive Management &amp; Regulatory Audit Certification:
+            </p>
+            <div className="grid grid-cols-3 gap-4 text-slate-800">
+              <div className="space-y-1">
+                <p>Treasurer: _______________________</p>
+                <p>Sign: ____________ Date: ________</p>
+              </div>
+              <div className="space-y-1">
+                <p>Chairman: _______________________</p>
+                <p>Sign: ____________ Date: ________</p>
+              </div>
+              <div className="space-y-1">
+                <p>Official Auditor Seal: <strong>CS/NO. 22239</strong></p>
+                <p>Stamp / Verification Date: ________</p>
               </div>
             </div>
           </div>
         </div>
 
       </div>
+
+      {/* CONFIRMATION / WARNING MODAL */}
+      {confirmationConfig && (
+        <ActionConfirmationModal
+          isOpen={true}
+          title={confirmationConfig.title}
+          variant={confirmationConfig.variant}
+          summaryText={confirmationConfig.summaryText}
+          consequenceText={confirmationConfig.consequenceText}
+          details={confirmationConfig.details}
+          confirmButtonText={confirmationConfig.confirmButtonText}
+          onConfirm={confirmationConfig.onConfirm}
+          onCancel={() => setConfirmationConfig(null)}
+        />
+      )}
 
     </div>
   );
