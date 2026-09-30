@@ -10,6 +10,7 @@ React dashboard and Express API for members, vehicles, ledger transactions, paym
 ## Completed on this branch
 
 - Changed Firestore rules from public read/write to deny all direct client access. The server-side Firestore SDK remains the intended access path.
+- Production now returns a 503 error when persistent Firestore storage is unavailable instead of silently using an in-memory ledger.
 
 ## Release blockers, in order
 
