@@ -481,6 +481,9 @@ async function safeDbOperation<T>(
   collectionName: string
 ): Promise<T> {
   if (!useFirestore) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new HttpError(503, 'Persistent ledger storage is unavailable.', 'LEDGER_STORAGE_UNAVAILABLE');
+    }
     return Promise.resolve(fallback());
   }
   try {
@@ -489,7 +492,11 @@ async function safeDbOperation<T>(
     if (error instanceof HttpError) {
       throw error;
     }
-    console.warn(`[Sacco Ledger OS] Firestore connection/permission unavailable for [${collectionName}]. Operating in high-security Local Ledger Fallback Mode.`, error.message || error);
+    if (process.env.NODE_ENV === 'production') {
+      console.error(`[Sacco Ledger OS] Firestore unavailable for [${collectionName}].`, error);
+      throw new HttpError(503, 'Persistent ledger storage is unavailable.', 'LEDGER_STORAGE_UNAVAILABLE');
+    }
+    console.warn(`[Sacco Ledger OS] Firestore connection/permission unavailable for [${collectionName}]. Using local development fallback.`, error.message || error);
     useFirestore = false;
     return Promise.resolve(fallback());
   }
