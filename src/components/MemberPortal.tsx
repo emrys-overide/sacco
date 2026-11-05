@@ -335,11 +335,6 @@ export default function MemberPortal({
       setStkFeedback("Enter a valid payment amount greater than KES 0.");
       return;
     }
-    if (!payVehiclePlate.trim()) {
-      setStkStep("FAILED");
-      setStkFeedback("Please enter or select your vehicle registration number.");
-      return;
-    }
     if (!payPhone.trim()) {
       setStkStep("FAILED");
       setStkFeedback(
@@ -357,6 +352,11 @@ export default function MemberPortal({
 
     try {
       const cleanPlate = payVehiclePlate.trim().toUpperCase();
+      const accountRefBase = cleanPlate
+        ? cleanPlate.replace(/\s+/g, "")
+        : (data.member.membershipNumber || data.member.name.replace(/[^a-zA-Z0-9]/g, "").slice(0, 7) || "MEM");
+      const accountRef = `${accountRefBase}-${payPurpose === "LOAN_REPAYMENT" ? "LOAN" : "SAV"}`.slice(0, 12);
+
       const response = await postSaccoJson<{
         success: boolean;
         message: string;
@@ -367,14 +367,12 @@ export default function MemberPortal({
         "/api/v1/mpesa/stk-push",
         {
           memberId: data.member.id,
-          vehiclePlate: cleanPlate,
+          vehiclePlate: cleanPlate || undefined,
+          payerName: data.member.name,
           transactionType: payPurpose,
           amount: numericAmount,
           phoneNumber: payPhone.trim(),
-          accountReference: `${cleanPlate.replace(/\s+/g, "")}-${payPurpose === "LOAN_REPAYMENT" ? "LOAN" : "SAV"}`.slice(
-            0,
-            12,
-          ),
+          accountReference: accountRef,
           simulateLag,
         },
         effectiveToken,
@@ -1243,49 +1241,111 @@ export default function MemberPortal({
                 </div>
 
                 <form onSubmit={submitMpesaPayment} className="space-y-4">
-                  {/* Step 1: Vehicle Number */}
-                  <div>
-                    <div className="flex items-center justify-between mb-1.5">
-                      <label
-                        htmlFor="mpesa-vehicle-plate-input"
-                        className="text-xs font-black uppercase tracking-wider text-slate-700"
-                      >
-                        1. Vehicle Number Plate
-                      </label>
+                  {/* Step 1: Contributor Profile & Optional Vehicle Number */}
+                  <div className="rounded-2xl border border-slate-200 bg-white p-3.5 shadow-2xs space-y-3">
+                    {/* Contributor Profile (Permanent) */}
+                    <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
+                      <div className="flex items-center gap-2.5">
+                        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-100 text-emerald-700 font-bold">
+                          <UserRound className="h-5 w-5" />
+                        </div>
+                        <div>
+                          <p className="text-xs font-black text-slate-900 leading-tight">
+                            {data.member.name}
+                          </p>
+                          <p className="text-[10px] font-bold text-slate-500">
+                            Member No: {data.member.membershipNumber || "Registered Member"} • {data.profile.phone || "SACCO Member"}
+                          </p>
+                        </div>
+                      </div>
+                      <span className="rounded-full bg-emerald-50 border border-emerald-200 px-2 py-0.5 text-[9px] font-black uppercase text-emerald-800">
+                        Payer / Owner
+                      </span>
+                    </div>
+
+                    {/* Optional Vehicle Plate Selection */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <label
+                          htmlFor="mpesa-vehicle-plate-input"
+                          className="text-xs font-black uppercase tracking-wider text-slate-700"
+                        >
+                          Vehicle Plate <span className="text-slate-400 font-normal lowercase">(optional — leave blank if no vehicle)</span>
+                        </label>
+                        {payVehiclePlate && (
+                          <button
+                            type="button"
+                            onClick={() => setPayVehiclePlate("")}
+                            className="text-[10px] font-bold text-rose-600 hover:underline cursor-pointer"
+                          >
+                            ✕ Clear (Pay without vehicle)
+                          </button>
+                        )}
+                      </div>
+
                       {data.vehicles.length > 0 && (
-                        <div className="flex flex-wrap gap-1">
+                        <div className="mb-2 flex flex-wrap gap-1.5 items-center">
+                          <span className="text-[10px] font-bold uppercase text-slate-400">Your Fleet:</span>
                           {data.vehicles.map((v) => (
                             <button
                               key={v.id}
                               type="button"
                               onClick={() => setPayVehiclePlate(v.plateNumber)}
-                              className={`rounded-lg px-2 py-0.5 text-[10px] font-bold transition cursor-pointer ${
-                                payVehiclePlate.toUpperCase() ===
-                                v.plateNumber.toUpperCase()
-                                  ? "bg-emerald-600 text-white"
+                              className={`rounded-lg px-2.5 py-1 text-[11px] font-mono font-bold transition cursor-pointer ${
+                                payVehiclePlate.toUpperCase() === v.plateNumber.toUpperCase()
+                                  ? "bg-emerald-600 text-white shadow-xs"
                                   : "bg-slate-100 text-slate-700 hover:bg-slate-200"
                               }`}
                             >
-                              {v.plateNumber}
+                              🚗 {v.plateNumber}
                             </button>
                           ))}
+                          <button
+                            type="button"
+                            onClick={() => setPayVehiclePlate("")}
+                            className={`rounded-lg px-2.5 py-1 text-[11px] font-bold transition cursor-pointer ${
+                              !payVehiclePlate
+                                ? "bg-emerald-600 text-white shadow-xs"
+                                : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                            }`}
+                          >
+                            👤 Direct Member (No Vehicle)
+                          </button>
                         </div>
                       )}
-                    </div>
-                    <div className="relative">
-                      <Bus className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                      <input
-                        id="mpesa-vehicle-plate-input"
-                        data-testid="mpesa-vehicle-plate-input"
-                        type="text"
-                        value={payVehiclePlate}
-                        onChange={(e) =>
-                          setPayVehiclePlate(e.target.value.toUpperCase())
-                        }
-                        placeholder="e.g. KDA 123A"
-                        required
-                        className="w-full rounded-2xl border border-slate-300 bg-slate-50 py-3 pl-10 pr-4 font-mono text-sm font-bold uppercase text-slate-900 outline-none transition focus:border-emerald-600 focus:bg-white focus:ring-2 focus:ring-emerald-500/20"
-                      />
+
+                      <div className="relative">
+                        {payVehiclePlate ? (
+                          <Bus className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-emerald-600" />
+                        ) : (
+                          <UserRound className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                        )}
+                        <input
+                          id="mpesa-vehicle-plate-input"
+                          data-testid="mpesa-vehicle-plate-input"
+                          type="text"
+                          value={payVehiclePlate}
+                          onChange={(e) =>
+                            setPayVehiclePlate(e.target.value.toUpperCase())
+                          }
+                          placeholder="e.g. KDA 123A (Optional — leave blank if paying as member)"
+                          className="w-full rounded-2xl border border-slate-300 bg-slate-50 py-3 pl-10 pr-4 font-mono text-sm font-bold uppercase text-slate-900 outline-none transition focus:border-emerald-600 focus:bg-white focus:ring-2 focus:ring-emerald-500/20"
+                        />
+                      </div>
+
+                      <div className="mt-1 flex items-center justify-between text-[11px]">
+                        {payVehiclePlate ? (
+                          <span className="font-semibold text-emerald-700 flex items-center gap-1">
+                            <BadgeCheck className="h-3.5 w-3.5 text-emerald-600" />
+                            Linked to vehicle <strong className="font-mono">{payVehiclePlate}</strong> &amp; owner {data.member.name}
+                          </span>
+                        ) : (
+                          <span className="font-medium text-slate-500 flex items-center gap-1">
+                            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                            Direct contribution credited to {data.member.name} (Member No: {data.member.membershipNumber || 'M-Direct'})
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
 

@@ -14,7 +14,9 @@ import {
   ArrowRight,
   ShieldCheck,
   RefreshCw,
-  Receipt
+  Receipt,
+  UserRound,
+  BadgeCheck
 } from 'lucide-react';
 import { Member, Vehicle, VehicleClass, Transaction } from '../types';
 
@@ -88,8 +90,9 @@ export const CollectionPaymentModal: React.FC<CollectionPaymentModalProps> = ({
       setIsSubmitting(false);
 
       if (initialRow) {
-        setVehiclePlate(initialRow.vehiclePlate || '');
-        setVehicleClass(initialRow.vehicleClass || 'Nissan');
+        const rowPlate = (initialRow.vehiclePlate || '').trim();
+        setVehiclePlate(rowPlate);
+        setVehicleClass(initialRow.vehicleClass || (rowPlate ? 'Nissan' : 'Member Contribution'));
         setOperationAmount(initialRow.operation || 0);
         setEntranceFee(initialRow.entranceFee || 0);
         setLoanRepay(initialRow.loanRepay || 0);
@@ -98,31 +101,54 @@ export const CollectionPaymentModal: React.FC<CollectionPaymentModalProps> = ({
         setLegalFee(initialRow.legalFee || 0);
 
         // Attempt to find owner
-        const matchedVeh = vehicles.find(v => v.plateNumber === initialRow.vehiclePlate);
-        if (matchedVeh && matchedVeh.ownerId) {
-          const owner = members.find(m => m.id === matchedVeh.ownerId);
-          if (owner) {
-            setMemberId(owner.id);
-            setMemberName(owner.name);
-            setPhoneNumber(owner.phoneNumber || '');
+        if (rowPlate) {
+          const matchedVeh = vehicles.find(v => v.plateNumber === rowPlate);
+          if (matchedVeh && matchedVeh.ownerId) {
+            const owner = members.find(m => m.id === matchedVeh.ownerId);
+            if (owner) {
+              setMemberId(owner.id);
+              setMemberName(owner.name);
+              setPhoneNumber(owner.phoneNumber || '');
+            }
+          }
+        } else {
+          const rowMemId = (initialRow as any).memberId;
+          const rowMemName = (initialRow as any).memberName;
+          const matchedMem = members.find(m => m.id === rowMemId || m.name.toLowerCase() === (rowMemName || '').toLowerCase());
+          if (matchedMem) {
+            setMemberId(matchedMem.id);
+            setMemberName(matchedMem.name);
+            setPhoneNumber(matchedMem.phoneNumber || '');
+          } else if (rowMemName) {
+            setMemberName(rowMemName);
           }
         }
       } else {
-        // Defaults
-        const firstVeh = vehicles[0];
-        if (firstVeh) {
-          setVehiclePlate(firstVeh.plateNumber);
-          setVehicleClass(firstVeh.capacity && firstVeh.capacity > 7 ? 'Nissan' : 'Sienta');
-          const owner = members.find(m => m.id === firstVeh.ownerId);
+        // Defaults: Member-first design
+        if (members[0]) {
+          setMemberId(members[0].id);
+          setMemberName(members[0].name);
+          setPhoneNumber(members[0].phoneNumber || '');
+          const ownerVeh = vehicles.find(v => v.ownerId === members[0].id || v.plateNumber === members[0].vehicleAssigned);
+          if (ownerVeh) {
+            setVehiclePlate(ownerVeh.plateNumber);
+            setVehicleClass(ownerVeh.capacity && ownerVeh.capacity > 7 ? 'Nissan' : 'Sienta');
+          } else {
+            setVehiclePlate('');
+            setVehicleClass('Member Contribution');
+          }
+        } else if (vehicles[0]) {
+          setVehiclePlate(vehicles[0].plateNumber);
+          setVehicleClass(vehicles[0].capacity && vehicles[0].capacity > 7 ? 'Nissan' : 'Sienta');
+          const owner = members.find(m => m.id === vehicles[0].ownerId);
           if (owner) {
             setMemberId(owner.id);
             setMemberName(owner.name);
             setPhoneNumber(owner.phoneNumber || '');
           }
-        } else if (members[0]) {
-          setMemberId(members[0].id);
-          setMemberName(members[0].name);
-          setPhoneNumber(members[0].phoneNumber || '');
+        } else {
+          setVehiclePlate('');
+          setVehicleClass('Member Contribution');
         }
         setOperationAmount(400);
         setEntranceFee(0);
@@ -136,17 +162,27 @@ export const CollectionPaymentModal: React.FC<CollectionPaymentModalProps> = ({
 
   // Handle vehicle plate selection change
   const handleVehicleChange = (plate: string) => {
-    setVehiclePlate(plate);
-    const matched = vehicles.find(v => v.plateNumber === plate);
-    if (matched) {
-      setVehicleClass(matched.capacity && matched.capacity > 7 ? 'Nissan' : 'Sienta');
-      const owner = members.find(m => m.id === matched.ownerId);
-      if (owner) {
-        setMemberId(owner.id);
-        setMemberName(owner.name);
-        setPhoneNumber(owner.phoneNumber || '');
+    const cleanPlate = plate.toUpperCase().trim();
+    setVehiclePlate(cleanPlate);
+    if (cleanPlate) {
+      const matched = vehicles.find(v => v.plateNumber.replace(/\s+/g, '').toUpperCase() === cleanPlate.replace(/\s+/g, ''));
+      if (matched) {
+        setVehicleClass(matched.capacity && matched.capacity > 7 ? 'Nissan' : 'Sienta');
+        const owner = members.find(m => m.id === matched.ownerId);
+        if (owner) {
+          setMemberId(owner.id);
+          setMemberName(owner.name);
+          setPhoneNumber(owner.phoneNumber || '');
+        }
       }
+    } else {
+      setVehicleClass('Member Contribution');
     }
+  };
+
+  const handleClearVehicle = () => {
+    setVehiclePlate('');
+    setVehicleClass('Member Contribution');
   };
 
   // Handle member selection change
@@ -156,6 +192,17 @@ export const CollectionPaymentModal: React.FC<CollectionPaymentModalProps> = ({
     if (matched) {
       setMemberName(matched.name);
       setPhoneNumber(matched.phoneNumber || '');
+      // If member has a vehicle, auto-fill it; otherwise clear plate and switch to Member Contribution
+      const ownerVeh = vehicles.find(v => v.ownerId === matched.id || v.plateNumber === matched.vehicleAssigned);
+      if (ownerVeh) {
+        setVehiclePlate(ownerVeh.plateNumber);
+        setVehicleClass(ownerVeh.capacity && ownerVeh.capacity > 7 ? 'Nissan' : 'Sienta');
+      } else {
+        setVehiclePlate('');
+        setVehicleClass('Member Contribution');
+      }
+    } else {
+      setMemberName('');
     }
   };
 
@@ -193,14 +240,20 @@ export const CollectionPaymentModal: React.FC<CollectionPaymentModalProps> = ({
               clearInterval(interval);
 
               // Auto-book to daily ledger table
+              const cleanPlate = vehiclePlate.trim();
+              const payer = memberName.trim() || 'Registered Member';
+              const autoDesc = cleanPlate
+                ? `Daily collection for ${payer} - ${cleanPlate} (${vehicleClass}) [${receipt}]`
+                : `Daily contribution for ${payer} (${vehicleClass}) [${receipt}]`;
+
               await onComplete({
                 timestamp: `${entryDate}T${new Date().toTimeString().slice(0, 8)}.000Z`,
                 type: 'Credit',
                 category: 'Daily Contribution',
                 amount: totalAmount,
                 memberId: memberId || undefined,
-                memberName: memberName || undefined,
-                vehiclePlate: vehiclePlate || undefined,
+                memberName: memberName.trim() || undefined,
+                vehiclePlate: cleanPlate || undefined,
                 vehicleClass,
                 operationAmount,
                 entranceFee,
@@ -209,7 +262,7 @@ export const CollectionPaymentModal: React.FC<CollectionPaymentModalProps> = ({
                 sTicket,
                 legalFee,
                 refCode: receipt,
-                description: `Daily collection for ${vehiclePlate} (${vehicleClass}) [${receipt}]`,
+                description: autoDesc,
                 tillNumber: 'VehicleTill'
               });
             } else if (data.transaction.status === 'FAILED' || data.transaction.status === 'EXPIRED_UNPAID') {
@@ -252,8 +305,8 @@ export const CollectionPaymentModal: React.FC<CollectionPaymentModalProps> = ({
     e.preventDefault();
     setErrorMessage('');
 
-    if (!vehiclePlate.trim()) {
-      setErrorMessage('Please select or specify a vehicle plate number.');
+    if (!memberName.trim() && !memberId) {
+      setErrorMessage('Please select a member or enter the payer name.');
       return;
     }
     if (totalAmount <= 0) {
@@ -273,13 +326,21 @@ export const CollectionPaymentModal: React.FC<CollectionPaymentModalProps> = ({
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (token) headers['Authorization'] = `Bearer ${token}`;
 
+        const cleanPlate = vehiclePlate.trim();
+        const payer = memberName.trim() || 'MEMBER';
+        const accRef = cleanPlate
+          ? cleanPlate.replace(/\s+/g, '').slice(0, 12)
+          : payer.replace(/[^a-zA-Z0-9]/g, '').slice(0, 10);
+
         const res = await fetch('/api/v1/mpesa/stk-push', {
           method: 'POST',
           headers,
           body: JSON.stringify({
             memberId: memberId || 'mem-direct',
             transactionType: loanRepay > 0 ? 'LOAN_REPAYMENT' : 'SAVINGS',
-            accountReference: vehiclePlate.replace(/\s+/g, ''),
+            accountReference: accRef,
+            vehiclePlate: cleanPlate || undefined,
+            payerName: payer,
             amount: totalAmount,
             phoneNumber: cleanPhone
           })
@@ -302,14 +363,20 @@ export const CollectionPaymentModal: React.FC<CollectionPaymentModalProps> = ({
       const ref = directRefCode.trim() || `CASH-${Date.now().toString().slice(-6)}`;
       setIsSubmitting(true);
       try {
+        const cleanPlate = vehiclePlate.trim();
+        const payer = memberName.trim() || 'Registered Member';
+        const directDesc = cleanPlate
+          ? `Daily collection for ${payer} - ${cleanPlate} (${vehicleClass}) [${ref}]`
+          : `Daily contribution for ${payer} (${vehicleClass}) [${ref}]`;
+
         await onComplete({
           timestamp: `${entryDate}T${new Date().toTimeString().slice(0, 8)}.000Z`,
           type: 'Credit',
           category: 'Daily Contribution',
           amount: totalAmount,
           memberId: memberId || undefined,
-          memberName: memberName || undefined,
-          vehiclePlate: vehiclePlate || undefined,
+          memberName: memberName.trim() || undefined,
+          vehiclePlate: cleanPlate || undefined,
           vehicleClass,
           operationAmount,
           entranceFee,
@@ -318,7 +385,7 @@ export const CollectionPaymentModal: React.FC<CollectionPaymentModalProps> = ({
           sTicket,
           legalFee,
           refCode: ref,
-          description: `Daily collection for ${vehiclePlate} (${vehicleClass}) [${ref}]`,
+          description: directDesc,
           tillNumber: 'VehicleTill'
         });
         onClose();
@@ -435,52 +502,143 @@ export const CollectionPaymentModal: React.FC<CollectionPaymentModalProps> = ({
           {/* Form Content (Disabled when waiting for STK) */}
           <form onSubmit={handlePayClick} className={`space-y-5 ${activeCheckoutId && stkStatus?.status === 'PENDING' ? 'opacity-50 pointer-events-none' : ''}`}>
             
-            {/* Section 1: Vehicle & Member Identifiers */}
+            {/* Section 1: Member & Optional Vehicle Identifiers */}
             <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-2xs space-y-3">
-              <div className="flex items-center gap-1.5 border-b border-slate-100 pb-2 text-xs font-bold uppercase tracking-wider text-slate-700">
-                <Bus className="h-4 w-4 text-emerald-600" />
-                <span>Vehicle &amp; Member Identification</span>
+              <div className="flex items-center justify-between border-b border-slate-100 pb-2 text-xs font-bold uppercase tracking-wider text-slate-700">
+                <span className="flex items-center gap-1.5">
+                  <UserRound className="h-4 w-4 text-emerald-600" />
+                  <span>Contributor &amp; Vehicle Identification</span>
+                </span>
+                <span className="text-[10px] text-slate-400 font-normal">
+                  {vehiclePlate ? 'Vehicle & Owner Linked' : 'Direct Member Contribution'}
+                </span>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                {/* Date */}
-                <div>
-                  <label className="block text-[11px] font-bold uppercase text-slate-500 mb-1">Collection Date</label>
-                  <div className="relative">
-                    <input
-                      type="date"
-                      value={entryDate}
-                      onChange={e => setEntryDate(e.target.value)}
-                      className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-900 focus:border-emerald-600 focus:outline-none"
-                      required
-                    />
-                  </div>
+              {/* Row 1: Member / Contributor Name (Permanent & Primary) */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-[11px] font-bold uppercase text-slate-700">
+                    1. Member / Payer Name <span className="text-rose-500">* (Required)</span>
+                  </label>
+                  {memberId ? (
+                    <span className="rounded-full bg-emerald-50 border border-emerald-200 px-2 py-0.5 text-[10px] font-bold text-emerald-800 flex items-center gap-1">
+                      <BadgeCheck className="h-3 w-3 text-emerald-600" />
+                      Active Member Record
+                    </span>
+                  ) : (
+                    <span className="text-[10px] font-semibold text-slate-400">
+                      Select or type below
+                    </span>
+                  )}
                 </div>
 
-                {/* Vehicle Plate */}
-                <div>
-                  <label className="block text-[11px] font-bold uppercase text-slate-500 mb-1">V.REG (Plate)</label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <select
+                    value={memberId}
+                    onChange={e => handleMemberChange(e.target.value)}
+                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-900 focus:border-emerald-600 focus:outline-none"
+                  >
+                    <option value="">-- Select Member from Directory --</option>
+                    {members.map(m => (
+                      <option key={m.id} value={m.id}>
+                        {m.name} ({m.membershipNumber || 'Member'}) {m.phoneNumber ? `• ${m.phoneNumber}` : ''}
+                      </option>
+                    ))}
+                  </select>
                   <input
                     type="text"
-                    list="registered-plates"
-                    value={vehiclePlate}
-                    onChange={e => handleVehicleChange(e.target.value.toUpperCase())}
-                    placeholder="e.g. KDA 123A"
-                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold uppercase font-mono text-slate-900 focus:border-emerald-600 focus:outline-none"
+                    value={memberName}
+                    onChange={e => {
+                      setMemberName(e.target.value);
+                      if (!e.target.value) setMemberId('');
+                    }}
+                    placeholder="Or type payer / owner name"
+                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-900 focus:border-emerald-600 focus:outline-none"
                     required
                   />
+                </div>
+
+                {/* Quick Fleet Tag for selected member */}
+                {(() => {
+                  const memberVehicles = vehicles.filter(v => v.ownerId === memberId || (memberId && members.find(m => m.id === memberId)?.vehicleAssigned === v.plateNumber));
+                  if (memberVehicles.length > 0) {
+                    return (
+                      <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+                        <span className="text-[10px] font-bold text-slate-500 uppercase">Registered Fleet:</span>
+                        {memberVehicles.map(v => (
+                          <button
+                            key={v.id}
+                            type="button"
+                            onClick={() => handleVehicleChange(v.plateNumber)}
+                            className={`rounded-md px-2 py-0.5 text-[10px] font-bold font-mono transition cursor-pointer ${
+                              vehiclePlate.toUpperCase() === v.plateNumber.toUpperCase()
+                                ? 'bg-emerald-600 text-white shadow-xs'
+                                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                            }`}
+                          >
+                            🚗 {v.plateNumber}
+                          </button>
+                        ))}
+                        {vehiclePlate && (
+                          <button
+                            type="button"
+                            onClick={handleClearVehicle}
+                            className="rounded-md border border-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500 hover:text-slate-800"
+                          >
+                            ✕ Detach Vehicle
+                          </button>
+                        )}
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+              </div>
+
+              {/* Row 2: Vehicle Plate (Optional) + Contribution Type + Collection Date */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+                {/* Vehicle Plate */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-[11px] font-bold uppercase text-slate-600">
+                      Vehicle Plate <span className="text-slate-400 font-normal">(Optional)</span>
+                    </label>
+                    {vehiclePlate && (
+                      <button
+                        type="button"
+                        onClick={handleClearVehicle}
+                        className="text-[10px] font-bold text-rose-500 hover:underline cursor-pointer"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                  <div className="relative">
+                    <Bus className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type="text"
+                      list="registered-plates"
+                      value={vehiclePlate}
+                      onChange={e => handleVehicleChange(e.target.value.toUpperCase())}
+                      placeholder="Optional plate"
+                      className="w-full rounded-lg border border-slate-300 bg-white py-2 pl-8 pr-3 text-xs font-bold uppercase font-mono text-slate-900 focus:border-emerald-600 focus:outline-none"
+                    />
+                  </div>
                   <datalist id="registered-plates">
                     {vehicles.map(v => (
                       <option key={v.id} value={v.plateNumber}>
-                        {v.model || 'Vehicle'} (Cap: {v.capacity || 14})
+                        {v.ownerName ? `${v.plateNumber} - ${v.ownerName}` : v.plateNumber}
                       </option>
                     ))}
                   </datalist>
+                  <p className="mt-0.5 text-[10px] text-slate-400">
+                    {vehiclePlate ? 'Attached to vehicle' : 'No vehicle — direct member contribution'}
+                  </p>
                 </div>
 
-                {/* Vehicle Class */}
+                {/* Contribution Type / Fleet Class */}
                 <div>
-                  <label className="block text-[11px] font-bold uppercase text-slate-500 mb-1">Fleet Class</label>
+                  <label className="block text-[11px] font-bold uppercase text-slate-600 mb-1">Contribution Type</label>
                   <select
                     value={vehicleClass}
                     onChange={e => setVehicleClass(e.target.value as VehicleClass)}
@@ -488,42 +646,38 @@ export const CollectionPaymentModal: React.FC<CollectionPaymentModalProps> = ({
                   >
                     <option value="Nissan">Nissan (14s)</option>
                     <option value="Sienta">Sienna (7s)</option>
-                    <option value="Member Contribution">Member Contrib</option>
+                    <option value="Member Contribution">Member Contribution (No Vehicle)</option>
                   </select>
+                </div>
+
+                {/* Date */}
+                <div>
+                  <label className="block text-[11px] font-bold uppercase text-slate-600 mb-1">Collection Date</label>
+                  <input
+                    type="date"
+                    value={entryDate}
+                    onChange={e => setEntryDate(e.target.value)}
+                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-900 focus:border-emerald-600 focus:outline-none"
+                    required
+                  />
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-                {/* Member / Owner */}
-                <div>
-                  <label className="block text-[11px] font-bold uppercase text-slate-500 mb-1">Member / Owner Name</label>
-                  <select
-                    value={memberId}
-                    onChange={e => handleMemberChange(e.target.value)}
-                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-900 focus:border-emerald-600 focus:outline-none"
-                  >
-                    <option value="">-- Choose Member --</option>
-                    {members.map(m => (
-                      <option key={m.id} value={m.id}>
-                        {m.name} ({m.membershipNumber || 'No No.'})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                {/* Handset Phone */}
-                <div>
-                  <label className="block text-[11px] font-bold uppercase text-slate-500 mb-1">Payer M-Pesa Phone</label>
-                  <div className="relative">
-                    <input
-                      type="text"
-                      value={phoneNumber}
-                      onChange={e => setPhoneNumber(e.target.value)}
-                      placeholder="e.g. 0712345678"
-                      className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold font-mono text-slate-900 focus:border-emerald-600 focus:outline-none"
-                      required={paymentMethod === 'STK'}
-                    />
-                  </div>
+              {/* Row 3: Payer M-Pesa Phone */}
+              <div className="pt-1">
+                <label className="block text-[11px] font-bold uppercase text-slate-600 mb-1">
+                  Payer M-Pesa Phone <span className="text-slate-400 font-normal">(for STK push)</span>
+                </label>
+                <div className="relative">
+                  <Phone className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    value={phoneNumber}
+                    onChange={e => setPhoneNumber(e.target.value)}
+                    placeholder="e.g. 0712345678"
+                    className="w-full rounded-lg border border-slate-300 bg-white py-2 pl-8 pr-3 text-xs font-bold font-mono text-slate-900 focus:border-emerald-600 focus:outline-none"
+                    required={paymentMethod === 'STK'}
+                  />
                 </div>
               </div>
             </div>

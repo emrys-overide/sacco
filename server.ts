@@ -4964,12 +4964,13 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
     const member = localStore.members.find(m => m.id === localTx.memberId);
     const isLoan = localTx.transactionType === 'LOAN_REPAYMENT';
     const nowIso = new Date().toISOString();
+    const payerName = String(txMeta.payerName || member?.name || 'Member');
 
     const creditTx: Transaction = {
       id: `TX-MPESA-${Date.now()}-${crypto.randomUUID().slice(0, 6)}`,
       memberId: localTx.memberId,
-      memberName: member?.name || 'Member',
-      vehiclePlate: vehiclePlate || member?.vehicleAssigned || '',
+      memberName: payerName,
+      vehiclePlate: vehiclePlate || '',
       timestamp: nowIso,
       entryDate: nowIso.slice(0, 10),
       type: 'Credit',
@@ -4977,8 +4978,8 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       amount: effectiveAmount,
       grossAmount: effectiveAmount,
       description: isLoan
-        ? `M-Pesa STK Loan Repayment [${input.mpesaReceiptNumber}]${vehiclePlate ? ` — ${vehiclePlate}` : ''}`
-        : `M-Pesa STK Savings Deposit [${input.mpesaReceiptNumber}]${vehiclePlate ? ` — ${vehiclePlate}` : ''}`,
+        ? `M-Pesa STK Loan Repayment [${input.mpesaReceiptNumber}]${vehiclePlate ? ` — ${vehiclePlate}` : ` — ${payerName}`}`
+        : `M-Pesa STK Savings Deposit [${input.mpesaReceiptNumber}]${vehiclePlate ? ` — ${vehiclePlate}` : ` — ${payerName}`}`,
       refCode: input.mpesaReceiptNumber,
       recorderName: 'M-Pesa Daraja STK',
       tillNumber: isLoan ? 'VehicleTill' : 'UtilityTill',
@@ -5047,7 +5048,7 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
   app.post('/api/v1/mpesa/stk-push', authenticateSaccoUser, async (req, res) => {
     try {
       const user = requireAuthenticatedUser(req);
-      const { memberId, transactionType, accountReference, amount, phoneNumber, vehiclePlate, simulateLag } = req.body;
+      const { memberId, transactionType, accountReference, amount, phoneNumber, vehiclePlate, simulateLag, payerName } = req.body;
       if (!amount || Number(amount) <= 0) {
         throw new HttpError(400, 'Amount must be greater than zero.', 'INVALID_AMOUNT');
       }
@@ -5059,7 +5060,7 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       const cleanPlate = sanitizeVehiclePlate(vehiclePlate || '');
       const resolvedType: SaccoTransactionType = transactionType === 'LOAN_REPAYMENT' ? 'LOAN_REPAYMENT' : 'SAVINGS';
       const resolvedAccountRef = String(
-        accountReference || `${(cleanPlate || 'SACCO').replace(/\s+/g, '')}-${resolvedType === 'LOAN_REPAYMENT' ? 'LOAN' : 'SAV'}`
+        accountReference || `${(cleanPlate || payerName || 'SACCO').replace(/[^a-zA-Z0-9]/g, '')}-${resolvedType === 'LOAN_REPAYMENT' ? 'LOAN' : 'SAV'}`
       ).slice(0, 12);
 
       const pushResult = await initiateStkPush({
@@ -5070,7 +5071,8 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       });
 
       const txMetadata: Record<string, unknown> = {
-        vehiclePlate: cleanPlate,
+        vehiclePlate: cleanPlate || null,
+        payerName: payerName || user.name,
         simulateLag: Boolean(simulateLag),
         flaggedDelayedCallback: false,
         initiatedByUserId: user.id
