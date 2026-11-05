@@ -17,8 +17,10 @@ import {
   History,
   RefreshCw,
   Clock,
-  Car
+  Car,
+  CreditCard
 } from "lucide-react";
+import { CollectionPaymentModal } from "./CollectionPaymentModal";
 
 interface DailyCollectionsViewProps {
   vehicles: Vehicle[];
@@ -30,6 +32,7 @@ interface DailyCollectionsViewProps {
   onRefreshData?: () => void;
   currentUserRole: string;
   currentUserName: string;
+  authToken?: string;
 }
 
 interface CollectionRow {
@@ -128,8 +131,31 @@ export default function DailyCollectionsView({
   onDeleteTransaction,
   onRefreshData,
   currentUserRole,
-  currentUserName
+  currentUserName,
+  authToken
 }: DailyCollectionsViewProps) {
+  
+  // Payment Form Modal State
+  const [isPaymentModalOpen, setIsPaymentModalOpen] = useState<boolean>(false);
+  const [paymentModalRow, setPaymentModalRow] = useState<CollectionRow | null>(null);
+
+  const handleOpenNewPaymentModal = () => {
+    setPaymentModalRow(null);
+    setIsPaymentModalOpen(true);
+  };
+
+  const handleOpenRowPaymentModal = (row: CollectionRow) => {
+    setPaymentModalRow(row);
+    setIsPaymentModalOpen(true);
+  };
+
+  const handlePaymentModalComplete = async (savedTx: Omit<Transaction, "id" | "recorderName">) => {
+    await onAddTransaction(savedTx);
+    setIsDirty(false);
+    setSuccessMessage(`Payment of KES ${Number(savedTx.amount).toLocaleString()} successfully processed and recorded!`);
+    setTimeout(() => setSuccessMessage(""), 4000);
+    if (onRefreshData) onRefreshData();
+  };
   
   // Basic Sheet State
   const [selectedDate, setSelectedDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
@@ -851,6 +877,14 @@ export default function DailyCollectionsView({
               </button>
             )}
             <button
+              onClick={handleOpenNewPaymentModal}
+              className="px-4 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white font-black text-xs uppercase tracking-wider rounded-xl border border-emerald-800 flex items-center space-x-2 transition-all shadow-md active:scale-95 cursor-pointer"
+              title="Open payment form capturing all table fields to Pay"
+            >
+              <CreditCard className="w-4 h-4 text-emerald-300" />
+              <span>Payment Form (Pay)</span>
+            </button>
+            <button
               onClick={triggerPrint}
               className="px-4 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs uppercase tracking-wider rounded-xl border border-emerald-600 flex items-center space-x-2 transition-all shadow-md active:scale-95 cursor-pointer"
               title="Print official 3-page register in portrait mode"
@@ -1298,14 +1332,27 @@ export default function DailyCollectionsView({
                       </td>
 
                       <td className="px-3 py-2 text-center no-print">
-                        <button
-                          onClick={() => handleDeleteRowClick(row.no)}
-                          disabled={isReadOnly}
-                          className="text-slate-300 hover:text-rose-600 p-1 rounded transition-colors cursor-pointer"
-                          title="Delete this log record"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        <div className="flex items-center justify-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenRowPaymentModal(row)}
+                            disabled={isReadOnly}
+                            className="px-2 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded font-bold text-[10.5px] uppercase tracking-wider flex items-center space-x-1 transition-all cursor-pointer shadow-2xs"
+                            title="Open Payment Form with these table details"
+                          >
+                            <CreditCard className="w-3 h-3 text-emerald-700" />
+                            <span>Pay</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteRowClick(row.no)}
+                            disabled={isReadOnly}
+                            className="text-slate-300 hover:text-rose-600 p-1 rounded transition-colors cursor-pointer"
+                            title="Delete this log record"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -1354,6 +1401,14 @@ export default function DailyCollectionsView({
 
           {!isReadOnly && (
             <div className="flex space-x-2 mb-6 no-print">
+              <button
+                type="button"
+                onClick={handleOpenNewPaymentModal}
+                className="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white border-2 border-emerald-800 rounded-xl font-bold text-xs uppercase tracking-wider flex items-center space-x-1.5 transition-all cursor-pointer shadow-md active:scale-95"
+              >
+                <CreditCard className="w-4 h-4 text-emerald-300" />
+                <span>Payment Form (Pay)</span>
+              </button>
               <button
                 onClick={handleAddRow}
                 className="px-4 py-2 bg-slate-100 hover:bg-slate-200 border-2 border-slate-900 rounded-xl font-bold text-xs uppercase tracking-wider flex items-center space-x-1.5 transition-all cursor-pointer"
@@ -1926,6 +1981,18 @@ export default function DailyCollectionsView({
         </div>
 
       </div>
+
+      {/* COLLECTION PAYMENT MODAL */}
+      <CollectionPaymentModal
+        isOpen={isPaymentModalOpen}
+        onClose={() => setIsPaymentModalOpen(false)}
+        selectedDate={selectedDate}
+        vehicles={vehicles}
+        members={members}
+        token={authToken}
+        initialRow={paymentModalRow}
+        onComplete={handlePaymentModalComplete}
+      />
 
       {/* CONFIRMATION / WARNING MODAL */}
       {confirmationConfig && (

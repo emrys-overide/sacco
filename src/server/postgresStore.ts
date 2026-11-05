@@ -6,7 +6,10 @@ import type {
   PaymentRecord,
   Transaction,
   TransactionCategory,
-  Vehicle
+  Vehicle,
+  SaccoTransaction,
+  SaccoTransactionType,
+  SaccoTransactionStatus
 } from '../types';
 import { normalizeTransactionInput, type LedgerInput } from './ledgerPolicy';
 
@@ -240,7 +243,8 @@ export async function listPostgresMembers(pool: Pool): Promise<Member[]> {
                ELSE le.amount * 0.70 END)
            ELSE 0 END) AS savings_amount,
          SUM((CASE WHEN le.transaction_type = 'Credit' THEN 1 ELSE -1 END) *
-           COALESCE((le.metadata->>'loanRepay')::numeric, 0)) AS loan_repaid
+           CASE WHEN COALESCE((le.metadata->>'countedInLoanRepayments')::boolean, false) THEN 0
+                ELSE COALESCE((le.metadata->>'loanRepay')::numeric, 0) END) AS loan_repaid
        FROM ledger_entries le
        WHERE le.member_id = m.id AND le.status IN ('Posted', 'Reversed')
      ) fin ON TRUE
@@ -284,7 +288,8 @@ export async function getPostgresMember(pool: Pool, memberId: string): Promise<M
                ELSE le.amount * 0.70 END)
            ELSE 0 END) AS savings_amount,
          SUM((CASE WHEN le.transaction_type = 'Credit' THEN 1 ELSE -1 END) *
-           COALESCE((le.metadata->>'loanRepay')::numeric, 0)) AS loan_repaid
+           CASE WHEN COALESCE((le.metadata->>'countedInLoanRepayments')::boolean, false) THEN 0
+                ELSE COALESCE((le.metadata->>'loanRepay')::numeric, 0) END) AS loan_repaid
        FROM ledger_entries le
        WHERE le.member_id = m.id AND le.status IN ('Posted', 'Reversed')
      ) fin ON TRUE
@@ -1051,4 +1056,328 @@ export async function reconcilePostgresPayment(
   } finally {
     client.release();
   }
+}
+
+
+function mapSaccoTransaction(row: QueryResultRow): SaccoTransaction {
+  return {
+    id: String(row.id),
+    memberId: String(row.member_id),
+    transactionType: row.transaction_type,
+    accountReference: row.account_reference,
+    amount: toNumber(row.amount),
+    phoneNumber: row.phone_number,
+    merchantRequestId: row.merchant_request_id,
+    checkoutRequestId: row.checkout_request_id,
+    mpesaReceiptNumber: row.mpesa_receipt_number || undefined,
+    status: row.status,
+    resultCode: row.result_code !== null ? Number(row.result_code) : undefined,
+    resultDescription: row.result_description || undefined,
+    ledgerEntryId: row.ledger_entry_id ? String(row.ledger_entry_id) : undefined,
+    metadata: row.metadata || undefined,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString()
+  };
+}
+
+export async function createPendingStkTransaction(
+  pool: Pool,
+  input: {
+    memberId: string;
+    transactionType: SaccoTransactionType;
+    accountReference: string;
+    amount: number;
+    phoneNumber: string;
+    merchantRequestId: string;
+    checkoutRequestId: string;
+    metadata?: Record<string, unknown>;
+  }
+): Promise<SaccoTransaction> {
+  const result = await pool.query(
+    `INSERT INTO sacco_transactions (
+       member_id, transaction_type, account_reference, amount, phone_number,
+       merchant_request_id, checkout_request_id, status, metadata
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING', $8::jsonb)
+     RETURNING *`,
+    [
+      input.memberId,
+      input.transactionType,
+      input.accountReference,
+      input.amount,
+      input.phoneNumber,
+      input.merchantRequestId,
+      input.checkoutRequestId,
+      JSON.stringify(input.metadata || {})
+    ]
+  );
+  return mapSaccoTransaction(result.rows[0]);
+}
+
+export async function completeStkTransaction(
+  pool: Pool,
+  input: {
+    checkoutRequestId: string;
+    mpesaReceiptNumber: string;
+    amount?: number;
+    resultCode?: number;
+    resultDescription?: string;
+    finalStatus?: 'SUCCESS' | 'RESOLVED_RECONCILED';
+    metadataPatch?: Record<string, unknown>;
+  }
+): Promise<SaccoTransaction> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const existingResult = await client.query(
+      'SELECT * FROM sacco_transactions WHERE checkout_request_id = $1 FOR UPDATE',
+      [input.checkoutRequestId]
+    );
+    const tx = existingResult.rows[0];
+    if (!tx) {
+      throw new PersistenceError(404, 'STK Transaction not found.', 'STK_TX_NOT_FOUND');
+    }
+    if (['SUCCESS', 'RESOLVED_RECONCILED'].includes(tx.status)) {
+      await client.query('COMMIT');
+      return mapSaccoTransaction(tx);
+    }
+
+    const effectiveAmount = input.amount || Number(tx.amount);
+    const txMetadata = (tx.metadata && typeof tx.metadata === 'object' ? tx.metadata : {}) as Record<string, unknown>;
+    const vehiclePlate = String(txMetadata.vehiclePlate || '').trim();
+    const memberResult = await client.query(
+      'SELECT id, full_name, loan_balance FROM members WHERE id = $1',
+      [tx.member_id]
+    );
+    const memberName = memberResult.rows[0]?.full_name || 'Member';
+
+    let hasActiveLoanRow = false;
+    if (tx.transaction_type === 'LOAN_REPAYMENT') {
+      const activeLoan = await client.query(
+        `SELECT id, remaining_balance FROM loans
+          WHERE member_id = $1 AND status IN ('Active', 'Approved')
+          ORDER BY created_at DESC LIMIT 1`,
+        [tx.member_id]
+      );
+      if (activeLoan.rows[0]) {
+        hasActiveLoanRow = true;
+        const loanId = activeLoan.rows[0].id;
+        const currentBal = Number(activeLoan.rows[0].remaining_balance);
+        const newBal = Math.max(0, currentBal - effectiveAmount);
+        const newStatus = newBal <= 0 ? 'Cleared' : 'Active';
+        await client.query(
+          `UPDATE loans SET remaining_balance = $1, status = $2, updated_at = now() WHERE id = $3`,
+          [newBal, newStatus, loanId]
+        );
+        await client.query(
+          `INSERT INTO loan_repayments (
+             loan_id, amount, payment_method, reference_code, notes
+           ) VALUES ($1, $2, 'M-Pesa', $3, 'STK Push Collection')`,
+          [loanId, effectiveAmount, input.mpesaReceiptNumber]
+        );
+      }
+      await client.query(
+        `UPDATE members
+           SET loan_balance = GREATEST(0, COALESCE(loan_balance, 0) - $1),
+               last_daily_collection_at = now(),
+               inactivity_warned_at = NULL,
+               updated_at = now()
+           WHERE id = $2`,
+        [effectiveAmount, tx.member_id]
+      );
+    }
+
+    let ledgerEntryId: string | null = null;
+    const accountType = tx.transaction_type === 'SAVINGS' ? 'Savings' : 'DailyContribution';
+    const tillType = tx.transaction_type === 'SAVINGS' ? 'UtilityTill' : 'VehicleTill';
+    const description = tx.transaction_type === 'SAVINGS'
+      ? `M-Pesa STK Savings Deposit [${input.mpesaReceiptNumber}]${vehiclePlate ? ` — ${vehiclePlate}` : ''}`
+      : `M-Pesa STK Loan Repayment [${input.mpesaReceiptNumber}]${vehiclePlate ? ` — ${vehiclePlate}` : ''}`;
+
+    const ledgerMetadata = {
+      source: 'MPESA_STK',
+      checkoutRequestId: input.checkoutRequestId,
+      mpesaReceiptNumber: input.mpesaReceiptNumber,
+      memberName,
+      vehiclePlate,
+      recorderName: 'M-Pesa Daraja STK',
+      ...(tx.transaction_type === 'SAVINGS'
+        ? { savingsContribution: effectiveAmount }
+        : {
+            savingsContribution: 0,
+            loanRepay: effectiveAmount,
+            countedInLoanRepayments: hasActiveLoanRow
+          })
+    };
+
+    const ledgerResult = await client.query(
+      `INSERT INTO ledger_entries (
+         entry_date, entry_time, transaction_type, account_type, till_type, amount,
+         member_id, vehicle_id, reference_code, description, source, status, metadata
+       ) VALUES (
+         current_date, now(), 'Credit', $1, $2, $3, $4,
+         (SELECT id FROM vehicles WHERE upper(replace(plate_number, ' ', '')) = upper(replace($5, ' ', '')) LIMIT 1),
+         $6, $7, 'Webhook', 'Posted', $8::jsonb
+       ) RETURNING id`,
+      [
+        accountType,
+        tillType,
+        effectiveAmount,
+        tx.member_id,
+        vehiclePlate,
+        input.mpesaReceiptNumber,
+        description,
+        JSON.stringify(ledgerMetadata)
+      ]
+    );
+    ledgerEntryId = String(ledgerResult.rows[0].id);
+
+    const mergedMetadata = {
+      ...txMetadata,
+      ...(input.metadataPatch || {})
+    };
+    const finalStatus = input.finalStatus || 'SUCCESS';
+
+    const updatedResult = await client.query(
+      `UPDATE sacco_transactions
+         SET status = $1,
+             mpesa_receipt_number = $2,
+             result_code = COALESCE($3, 0),
+             result_description = COALESCE($4, 'Success'),
+             ledger_entry_id = $5,
+             metadata = $6::jsonb,
+             updated_at = now()
+         WHERE id = $7
+         RETURNING *`,
+      [
+        finalStatus,
+        input.mpesaReceiptNumber,
+        input.resultCode ?? 0,
+        input.resultDescription || 'Success',
+        ledgerEntryId,
+        JSON.stringify(mergedMetadata),
+        tx.id
+      ]
+    );
+
+    await client.query('COMMIT');
+    return mapSaccoTransaction(updatedResult.rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    return translatePgError(err);
+  } finally {
+    client.release();
+  }
+}
+
+export async function flagDelayedStkTransaction(
+  pool: Pool,
+  checkoutRequestId: string,
+  flagReason: string
+): Promise<SaccoTransaction | null> {
+  const result = await pool.query(
+    `UPDATE sacco_transactions
+        SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+          'flaggedDelayedCallback', true,
+          'flaggedAt', now(),
+          'flagReason', $2::text
+        ),
+        updated_at = now()
+      WHERE checkout_request_id = $1
+      RETURNING *`,
+    [checkoutRequestId, flagReason]
+  );
+  return result.rows[0] ? mapSaccoTransaction(result.rows[0]) : null;
+}
+
+export async function failStkTransaction(
+  pool: Pool,
+  input: {
+    checkoutRequestId: string;
+    resultCode: number;
+    resultDescription: string;
+  }
+): Promise<SaccoTransaction> {
+  const result = await pool.query(
+    `UPDATE sacco_transactions
+       SET status = 'FAILED',
+           result_code = $1,
+           result_description = $2,
+           updated_at = now()
+       WHERE checkout_request_id = $3
+       RETURNING *`,
+    [input.resultCode, input.resultDescription, input.checkoutRequestId]
+  );
+  if (!result.rows[0]) {
+    throw new PersistenceError(404, 'STK Transaction not found.', 'STK_TX_NOT_FOUND');
+  }
+  return mapSaccoTransaction(result.rows[0]);
+}
+
+export async function getSaccoTransactionByCheckoutId(
+  pool: Pool,
+  checkoutRequestId: string
+): Promise<SaccoTransaction | null> {
+  const result = await pool.query(
+    'SELECT * FROM sacco_transactions WHERE checkout_request_id = $1',
+    [checkoutRequestId]
+  );
+  return result.rows[0] ? mapSaccoTransaction(result.rows[0]) : null;
+}
+
+export async function listPendingStkTransactionsForReconciliation(
+  pool: Pool
+): Promise<SaccoTransaction[]> {
+  const result = await pool.query(
+    `SELECT * FROM sacco_transactions
+       WHERE status = 'PENDING'
+         AND created_at <= now() - INTERVAL '15 minutes'
+         AND created_at >= now() - INTERVAL '24 hours'
+       ORDER BY created_at ASC`
+  );
+  return result.rows.map(mapSaccoTransaction);
+}
+
+export async function resolveReconciledStkTransaction(
+  pool: Pool,
+  input: {
+    checkoutRequestId: string;
+    mpesaReceiptNumber?: string;
+    status: 'RESOLVED_RECONCILED' | 'EXPIRED_UNPAID';
+    resultDescription?: string;
+  }
+): Promise<SaccoTransaction> {
+  if (input.status === 'RESOLVED_RECONCILED' && input.mpesaReceiptNumber) {
+    return completeStkTransaction(pool, {
+      checkoutRequestId: input.checkoutRequestId,
+      mpesaReceiptNumber: input.mpesaReceiptNumber,
+      resultCode: 0,
+      resultDescription: input.resultDescription || 'Reconciled via active Daraja query',
+      finalStatus: 'RESOLVED_RECONCILED'
+    });
+  }
+
+  const result = await pool.query(
+    `UPDATE sacco_transactions
+       SET status = $1,
+           result_description = $2,
+           updated_at = now()
+       WHERE checkout_request_id = $3
+       RETURNING *`,
+    [input.status, input.resultDescription || 'Marked during reconciliation', input.checkoutRequestId]
+  );
+  if (!result.rows[0]) {
+    throw new PersistenceError(404, 'STK Transaction not found.', 'STK_TX_NOT_FOUND');
+  }
+  return mapSaccoTransaction(result.rows[0]);
+}
+
+export async function listMemberSaccoTransactions(
+  pool: Pool,
+  memberId: string
+): Promise<SaccoTransaction[]> {
+  const result = await pool.query(
+    'SELECT * FROM sacco_transactions WHERE member_id = $1 ORDER BY created_at DESC LIMIT 50',
+    [memberId]
+  );
+  return result.rows.map(mapSaccoTransaction);
 }

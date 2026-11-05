@@ -3,6 +3,34 @@ import express from 'express';
 import path from 'path';
 import crypto from 'node:crypto';
 import type { Pool } from 'pg';
+import {
+  initiateStkPush,
+  queryDarajaStkStatus,
+  parseCallbackMetadata,
+  normalizeMpesaPhoneNumber,
+  getDarajaConfig
+} from './src/server/darajaMpesa';
+import {
+  createPendingStkTransaction,
+  completeStkTransaction,
+  failStkTransaction,
+  flagDelayedStkTransaction,
+  getSaccoTransactionByCheckoutId,
+  listPendingStkTransactionsForReconciliation,
+  resolveReconciledStkTransaction,
+  listMemberSaccoTransactions
+} from './src/server/postgresStore';
+import {
+  processMemberChat,
+  type MemberFinancialContext,
+  type ChatMessage
+} from './src/server/conversationalCollections';
+import {
+  runNightlyReconciliation,
+  startNightlyReconciliationScheduler
+} from './src/server/nightlyReconciliation';
+import type { SaccoTransaction, SaccoTransactionType, SaccoTransactionStatus } from './src/types';
+
 import { createDatabasePool } from './database-config.mjs';
 import {
   PersistenceError,
@@ -892,6 +920,7 @@ const localStore = {
   vehicles: [...initialVehicles],
   transactions: [...initialTransactions],
   payments: [] as PaymentRecord[],
+  saccoTransactions: [] as SaccoTransaction[],
   coopBankEvents: [] as Array<CoopBankEvent & { rawPayload: unknown }>,
   mfaChallenges: [] as Array<{
     id: string;
@@ -1444,8 +1473,12 @@ function applyLocalMemberBalance(tx: Transaction) {
 
   member.sharesAmount = Math.max(0, (member.sharesAmount || 0) + delta.shares);
   member.savingsAmount = Math.max(0, (member.savingsAmount || 0) + delta.savings);
-  const loanCeiling = Number(member.initialLoanAmount ?? member.loanBalance ?? 0);
-  member.loanBalance = Math.min(loanCeiling, Math.max(0, Number(member.loanBalance || 0) + delta.loan));
+  const currentLoan = Number(member.loanBalance || 0);
+  const loanCeiling = Math.max(Number(member.initialLoanAmount || 0), currentLoan + Math.max(0, delta.loan));
+  if (!member.initialLoanAmount && currentLoan > 0) {
+    member.initialLoanAmount = currentLoan;
+  }
+  member.loanBalance = Math.min(loanCeiling, Math.max(0, currentLoan + delta.loan));
 }
 
 async function assertLedgerMonthIsOpen(timestamp: string): Promise<void> {
@@ -1686,13 +1719,14 @@ function toMemberPortalPayment(payment: PaymentRecord): PaymentRecord {
 async function getMemberPortalData(user: AuthorizedUser): Promise<MemberPortalData> {
   const linkedMemberId = requireLinkedMember(user);
   if (postgresPool) {
-    const [member, vehicles, driverAssignments, transactions, payments, loans, profileResult] = await Promise.all([
+    const [member, vehicles, driverAssignments, transactions, payments, loans, saccoTransactions, profileResult] = await Promise.all([
       getPostgresMember(postgresPool, linkedMemberId),
       listPostgresVehiclesByOwner(postgresPool, linkedMemberId),
       listPostgresDriverAssignmentsByOwner(postgresPool, linkedMemberId),
       listPostgresTransactionsByMember(postgresPool, linkedMemberId),
       listPostgresPaymentsByMember(postgresPool, linkedMemberId),
       listPostgresLoansByMember(postgresPool, linkedMemberId),
+      listMemberSaccoTransactions(postgresPool, linkedMemberId).catch(() => []),
       postgresPool.query('SELECT email, phone, profile_photo_data FROM users WHERE id = $1 LIMIT 1', [user.id])
     ]);
     if (!member) {
@@ -1712,7 +1746,8 @@ async function getMemberPortalData(user: AuthorizedUser): Promise<MemberPortalDa
       driverAssignments,
       transactions: transactions.map(toMemberPortalTransaction),
       payments: payments.map(toMemberPortalPayment),
-      loans
+      loans,
+      saccoTransactions
     };
   }
 
@@ -1731,6 +1766,23 @@ async function getMemberPortalData(user: AuthorizedUser): Promise<MemberPortalDa
     throw new HttpError(403, 'This member account is not linked to an active SACCO member record.', 'MEMBER_LINK_INVALID');
   }
   const ownedVehicles = vehicles.filter(vehicle => vehicle.ownerId === linkedMemberId);
+  const principalLoan = Math.max(Number(member.initialLoanAmount || 0), Number(member.loanBalance || 0));
+  const outstandingLoan = Number(member.loanBalance || 0);
+  const paidSoFar = Math.max(0, principalLoan - outstandingLoan);
+  const syntheticLoans = principalLoan > 0 ? [{
+    id: `loan-${member.id}`,
+    principalAmount: principalLoan,
+    outstandingBalance: outstandingLoan,
+    amountPaid: paidSoFar,
+    issueDate: member.dateRegistered || new Date().toISOString().slice(0, 10),
+    status: outstandingLoan <= 0 ? 'Cleared' : 'Active',
+    loanType: 'Development',
+    repaymentPeriodMonths: 12,
+    repaymentMethod: 'M-Pesa / SACCO collection',
+    repayments: transactions
+      .filter(tx => Number(tx.loanRepay || 0) > 0)
+      .map(tx => ({ id: tx.id, repaymentDate: tx.timestamp.slice(0, 10), amount: Number(tx.loanRepay || 0) }))
+  }] : [];
   return {
     member: toMemberPortalProfile(member),
     profile: {
@@ -1748,7 +1800,10 @@ async function getMemberPortalData(user: AuthorizedUser): Promise<MemberPortalDa
     payments: payments
       .filter(payment => payment.memberId === linkedMemberId || (payment.vehiclePlate && ownedVehicles.some(vehicle => vehicle.plateNumber === payment.vehiclePlate)))
       .map(toMemberPortalPayment),
-    loans: []
+    loans: syntheticLoans,
+    saccoTransactions: localStore.saccoTransactions
+      .filter(tx => tx.memberId === linkedMemberId)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
   };
 }
 
@@ -2353,6 +2408,78 @@ async function seedDatabaseIfEmpty() {
 
   if (allowInMemoryStore) {
     console.warn('No persistent database configured. ALLOW_IN_MEMORY_DB is enabled; all development data will be lost when the server stops.');
+    if (process.env.SEED_DEMO_DATA === 'true' && localStore.users.length === 0) {
+      const chairmanId = 'u-demo-chairman';
+      const secretaryId = 'u-demo-secretary';
+      const memberId = 'm-demo-grace-042';
+      const memberUserId = 'u-demo-grace-042';
+      const today = new Date().toISOString().slice(0, 10);
+
+      localStore.users.push(
+        {
+          id: chairmanId,
+          name: 'Samuel Kariuki (Chairman)',
+          email: 'chairman@sowetamu.co.ke',
+          phone: '0711000001',
+          role: 'Chairman',
+          isActive: true,
+          accountStatus: 'Active',
+          devPassword: 'AdminPassword123!'
+        },
+        {
+          id: secretaryId,
+          name: 'Demo Secretary',
+          email: 'demo@sowetamu.co.ke',
+          phone: '0712345678',
+          role: 'Secretary',
+          isActive: true,
+          accountStatus: 'Active',
+          devPassword: 'DemoPassword123!'
+        },
+        {
+          id: memberUserId,
+          name: 'Grace Wanjiku',
+          email: 'grace@example.com',
+          phone: '0722112233',
+          role: 'Member',
+          isActive: true,
+          accountStatus: 'Active',
+          linkedMemberId: memberId,
+          devPassword: 'DemoPassword123!'
+        }
+      );
+
+      localStore.members.push({
+        id: memberId,
+        membershipNumber: 'SOW042',
+        name: 'Grace Wanjiku',
+        idNumber: '29384756',
+        phoneNumber: '0722112233',
+        email: 'grace@example.com',
+        status: 'Active',
+        dateRegistered: today,
+        vehicleAssigned: 'KDA 123A',
+        sharesAmount: 20000,
+        savingsAmount: 45000,
+        initialLoanAmount: 15000,
+        loanBalance: 15000
+      });
+
+      localStore.vehicles.push({
+        id: 'v-demo-kda123a',
+        plateNumber: 'KDA 123A',
+        ownerId: memberId,
+        ownerName: 'Grace Wanjiku',
+        ownerPhone: '0722112233',
+        ownerIdNumber: '29384756',
+        driverName: 'Peter Njoroge',
+        driverPhone: '0733445566',
+        route: 'Nairobi - Thika (Route 237)',
+        capacity: 14,
+        status: 'Active',
+        dateRegistered: today
+      });
+    }
   } else {
     console.warn('No persistent database configured. Functional API requests will fail closed.');
   }
@@ -4788,6 +4915,478 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       });
       await recordAuditLog(req, 'MEMBER_SELF_SUSPENDED', 'members', memberId, undefined, { reason });
       res.json({ suspended: true });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  
+  // ==========================================
+  // SACCO M-PESA EXPRESS (STK PUSH) & RECONCILIATION
+  // ==========================================
+
+  const settleStkPayment = async (input: {
+    checkoutRequestId: string;
+    mpesaReceiptNumber: string;
+    amount?: number;
+    resultCode?: number;
+    resultDescription?: string;
+    finalStatus?: 'SUCCESS' | 'RESOLVED_RECONCILED';
+    metadataPatch?: Record<string, unknown>;
+  }): Promise<SaccoTransaction | null> => {
+    if (postgresPool) {
+      const completed = await completeStkTransaction(postgresPool, input);
+      const isLoan = completed.transactionType === 'LOAN_REPAYMENT';
+      void notifyMember(completed.memberId, {
+        category: 'PAYMENT',
+        title: isLoan ? 'M-Pesa Loan Repayment Credited' : 'M-Pesa Savings Deposit Credited',
+        message: `KES ${completed.amount.toLocaleString('en-KE')} (${input.mpesaReceiptNumber}) has been ${isLoan ? 'deducted from your loan balance' : 'added to your SACCO savings'}.`,
+        destination: 'My Account'
+      });
+      void notifyRole('Treasurer', {
+        category: 'PAYMENT',
+        title: 'M-Pesa STK Payment Reconciled',
+        message: `Member payment of KES ${completed.amount.toLocaleString('en-KE')} (${input.mpesaReceiptNumber}) posted to ledger.`,
+        destination: 'Daily Collections'
+      });
+      return completed;
+    }
+
+    const localTx = localStore.saccoTransactions.find(t => t.checkoutRequestId === input.checkoutRequestId);
+    if (!localTx) return null;
+    if (['SUCCESS', 'RESOLVED_RECONCILED'].includes(localTx.status)) {
+      return localTx;
+    }
+
+    const effectiveAmount = Number(input.amount || localTx.amount);
+    const txMeta = (localTx.metadata && typeof localTx.metadata === 'object' ? localTx.metadata : {}) as Record<string, unknown>;
+    const vehiclePlate = String(txMeta.vehiclePlate || '').trim();
+    const member = localStore.members.find(m => m.id === localTx.memberId);
+    const isLoan = localTx.transactionType === 'LOAN_REPAYMENT';
+    const nowIso = new Date().toISOString();
+
+    const creditTx: Transaction = {
+      id: `TX-MPESA-${Date.now()}-${crypto.randomUUID().slice(0, 6)}`,
+      memberId: localTx.memberId,
+      memberName: member?.name || 'Member',
+      vehiclePlate: vehiclePlate || member?.vehicleAssigned || '',
+      timestamp: nowIso,
+      entryDate: nowIso.slice(0, 10),
+      type: 'Credit',
+      category: isLoan ? 'Daily Contribution' : 'Savings Contribution',
+      amount: effectiveAmount,
+      grossAmount: effectiveAmount,
+      description: isLoan
+        ? `M-Pesa STK Loan Repayment [${input.mpesaReceiptNumber}]${vehiclePlate ? ` — ${vehiclePlate}` : ''}`
+        : `M-Pesa STK Savings Deposit [${input.mpesaReceiptNumber}]${vehiclePlate ? ` — ${vehiclePlate}` : ''}`,
+      refCode: input.mpesaReceiptNumber,
+      recorderName: 'M-Pesa Daraja STK',
+      tillNumber: isLoan ? 'VehicleTill' : 'UtilityTill',
+      ...(isLoan
+        ? { savingsContribution: 0, loanRepay: effectiveAmount }
+        : { savingsContribution: effectiveAmount })
+    };
+
+    applyLocalMemberBalance(creditTx);
+    if (member) {
+      member.lastDailyCollectionAt = nowIso;
+      member.inactivityDays = 0;
+    }
+    localStore.transactions.unshift(creditTx);
+
+    const paymentRecord: PaymentRecord = {
+      id: `PAY-MPESA-${Date.now()}-${crypto.randomUUID().slice(0, 6)}`,
+      timestamp: nowIso,
+      source: 'Webhook',
+      status: 'Reconciled',
+      refCode: input.mpesaReceiptNumber,
+      amount: effectiveAmount,
+      tillNumber: isLoan ? 'VehicleTill' : 'UtilityTill',
+      category: isLoan ? 'Daily Contribution' : 'Savings Contribution',
+      accountReference: localTx.accountReference,
+      payerName: member?.name || 'SACCO Member',
+      payerPhone: localTx.phoneNumber,
+      memberId: localTx.memberId,
+      memberName: member?.name,
+      vehiclePlate: creditTx.vehiclePlate,
+      matchMethod: creditTx.vehiclePlate ? 'Vehicle Plate' : 'Phone Number',
+      transactionId: creditTx.id,
+      note: input.finalStatus === 'RESOLVED_RECONCILED'
+        ? 'Reconciled via active Daraja status verification after callback lag.'
+        : 'Captured automatically via Safaricom Daraja STK callback.'
+    };
+    localStore.payments.unshift(paymentRecord);
+
+    localTx.status = input.finalStatus || 'SUCCESS';
+    localTx.mpesaReceiptNumber = input.mpesaReceiptNumber;
+    localTx.resultCode = input.resultCode ?? 0;
+    localTx.resultDescription = input.resultDescription || 'The service request is processed successfully.';
+    localTx.ledgerEntryId = creditTx.id;
+    localTx.metadata = {
+      ...txMeta,
+      ...(input.metadataPatch || {})
+    };
+    localTx.updatedAt = nowIso;
+
+    void notifyMember(localTx.memberId, {
+      category: 'PAYMENT',
+      title: isLoan ? 'M-Pesa Loan Repayment Credited' : 'M-Pesa Savings Deposit Credited',
+      message: `KES ${effectiveAmount.toLocaleString('en-KE')} (Receipt: ${input.mpesaReceiptNumber}) has been ${isLoan ? 'deducted from your loan balance' : 'added to your SACCO savings'}.`,
+      destination: 'My Account'
+    });
+    void notifyRole('Treasurer', {
+      category: 'PAYMENT',
+      title: 'M-Pesa STK Payment Reconciled',
+      message: `${member?.name || 'Member'} paid KES ${effectiveAmount.toLocaleString('en-KE')} (${input.mpesaReceiptNumber}) for ${isLoan ? 'Loan Repayment' : 'Savings'}.`,
+      destination: 'Daily Collections'
+    });
+
+    return localTx;
+  };
+
+  app.post('/api/v1/mpesa/stk-push', authenticateSaccoUser, async (req, res) => {
+    try {
+      const user = requireAuthenticatedUser(req);
+      const { memberId, transactionType, accountReference, amount, phoneNumber, vehiclePlate, simulateLag } = req.body;
+      if (!amount || Number(amount) <= 0) {
+        throw new HttpError(400, 'Amount must be greater than zero.', 'INVALID_AMOUNT');
+      }
+      const resolvedMemberId = isMemberUser(user) ? (user.linkedMemberId || memberId) : memberId;
+      if (!resolvedMemberId) {
+        throw new HttpError(400, 'A valid member ID is required.', 'MEMBER_REQUIRED');
+      }
+      const normalizedPhone = normalizeMpesaPhoneNumber(phoneNumber || user.phone || '');
+      const cleanPlate = sanitizeVehiclePlate(vehiclePlate || '');
+      const resolvedType: SaccoTransactionType = transactionType === 'LOAN_REPAYMENT' ? 'LOAN_REPAYMENT' : 'SAVINGS';
+      const resolvedAccountRef = String(
+        accountReference || `${(cleanPlate || 'SACCO').replace(/\s+/g, '')}-${resolvedType === 'LOAN_REPAYMENT' ? 'LOAN' : 'SAV'}`
+      ).slice(0, 12);
+
+      const pushResult = await initiateStkPush({
+        phoneNumber: normalizedPhone,
+        amount: Number(amount),
+        accountReference: resolvedAccountRef,
+        transactionDesc: `Sowetamu ${resolvedType === 'LOAN_REPAYMENT' ? 'Loan' : 'Savings'}`
+      });
+
+      const txMetadata: Record<string, unknown> = {
+        vehiclePlate: cleanPlate,
+        simulateLag: Boolean(simulateLag),
+        flaggedDelayedCallback: false,
+        initiatedByUserId: user.id
+      };
+
+      let savedTx: SaccoTransaction;
+      if (postgresPool) {
+        savedTx = await createPendingStkTransaction(postgresPool, {
+          memberId: resolvedMemberId,
+          transactionType: resolvedType,
+          accountReference: resolvedAccountRef,
+          amount: Number(amount),
+          phoneNumber: normalizedPhone,
+          merchantRequestId: pushResult.merchantRequestId,
+          checkoutRequestId: pushResult.checkoutRequestId,
+          metadata: txMetadata
+        });
+      } else {
+        savedTx = {
+          id: crypto.randomUUID(),
+          memberId: resolvedMemberId,
+          transactionType: resolvedType,
+          accountReference: resolvedAccountRef,
+          amount: Number(amount),
+          phoneNumber: normalizedPhone,
+          merchantRequestId: pushResult.merchantRequestId,
+          checkoutRequestId: pushResult.checkoutRequestId,
+          status: 'PENDING',
+          metadata: txMetadata,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+        localStore.saccoTransactions.push(savedTx);
+      }
+
+      // In local development / sandbox mode (when live Daraja credentials are not set)
+      // and when not explicitly simulating a delayed callback, simulate the handset PIN
+      // entry + Safaricom webhook return after a 2.5s real-time delay.
+      const darajaCfg = getDarajaConfig();
+      const isMockDaraja = !darajaCfg.consumerKey || !darajaCfg.consumerSecret;
+      if (isMockDaraja && !simulateLag && process.env.NODE_ENV !== 'test' && process.env.SACCO_TEST_MODE !== 'true') {
+        const autoReceipt = `SOW${Date.now().toString(36).toUpperCase().slice(-5)}${Math.random().toString(36).substring(2, 5).toUpperCase()}`;
+        setTimeout(() => {
+          void settleStkPayment({
+            checkoutRequestId: pushResult.checkoutRequestId,
+            mpesaReceiptNumber: autoReceipt,
+            amount: Number(amount),
+            resultCode: 0,
+            resultDescription: 'The service request is processed successfully (Safaricom Callback).',
+            finalStatus: 'SUCCESS',
+            metadataPatch: { capturedBy: 'SAFARICOM_CALLBACK' }
+          }).catch(err => console.error('[M-Pesa Auto Sandbox Callback Error]', err));
+        }, 2500);
+      }
+
+      res.json({
+        success: true,
+        message: pushResult.customerMessage,
+        checkoutRequestId: pushResult.checkoutRequestId,
+        merchantRequestId: pushResult.merchantRequestId,
+        transaction: savedTx
+      });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  // Secure Render Webhook Callback Handler
+  app.post('/api/v1/mpesa/callback', async (req, res) => {
+    // 1. Immediately acknowledge within < 2 seconds to prevent Safaricom retry storms
+    res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
+
+    // 2. Process callback asynchronously in background
+    setImmediate(async () => {
+      try {
+        const callback = req.body?.Body?.stkCallback;
+        if (!callback) {
+          console.warn('[M-Pesa Webhook] Empty or invalid stkCallback body received.');
+          return;
+        }
+        const { CheckoutRequestID, ResultCode, ResultDesc, CallbackMetadata } = callback;
+        console.log(`[M-Pesa Webhook] Received callback: CheckoutRequestID=${CheckoutRequestID}, ResultCode=${ResultCode}`);
+
+        const meta = parseCallbackMetadata(CallbackMetadata);
+
+        if (ResultCode === 0 && meta.mpesaReceiptNumber) {
+          await settleStkPayment({
+            checkoutRequestId: CheckoutRequestID,
+            mpesaReceiptNumber: meta.mpesaReceiptNumber,
+            amount: meta.amount,
+            resultCode: ResultCode,
+            resultDescription: ResultDesc,
+            finalStatus: 'SUCCESS',
+            metadataPatch: { capturedBy: 'SAFARICOM_WEBHOOK' }
+          });
+        } else {
+          // Failed or cancelled
+          if (postgresPool) {
+            await failStkTransaction(postgresPool, {
+              checkoutRequestId: CheckoutRequestID,
+              resultCode: ResultCode,
+              resultDescription: ResultDesc || 'M-Pesa transaction was cancelled or failed.'
+            });
+          } else {
+            const localTx = localStore.saccoTransactions.find(t => t.checkoutRequestId === CheckoutRequestID);
+            if (localTx && localTx.status === 'PENDING') {
+              localTx.status = 'FAILED';
+              localTx.resultCode = ResultCode;
+              localTx.resultDescription = ResultDesc;
+              localTx.updatedAt = new Date().toISOString();
+            }
+          }
+        }
+      } catch (err) {
+        console.error('[M-Pesa Webhook] Asynchronous processing failure:', err);
+      }
+    });
+  });
+
+  // Polling endpoint for frontend status
+  app.get('/api/v1/mpesa/transactions/:checkoutRequestId', authenticateSaccoUser, async (req, res) => {
+    try {
+      const { checkoutRequestId } = req.params;
+      let tx: SaccoTransaction | null = null;
+      if (postgresPool) {
+        tx = await getSaccoTransactionByCheckoutId(postgresPool, checkoutRequestId);
+      } else {
+        tx = localStore.saccoTransactions.find(t => t.checkoutRequestId === checkoutRequestId) || null;
+      }
+      if (!tx) {
+        throw new HttpError(404, 'Transaction was not found.', 'TX_NOT_FOUND');
+      }
+      res.json({ transaction: tx });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  // Active Database & Daraja Query Fallback when Safaricom callback lags or fails to arrive
+  app.post('/api/v1/mpesa/transactions/:checkoutRequestId/verify', authenticateSaccoUser, async (req, res) => {
+    try {
+      const { checkoutRequestId } = req.params;
+      const reason = String(req.body?.reason || 'Safaricom callback delayed; active database & Daraja status query triggered.');
+
+      // Step 1: Query SACCO database first to see if transaction was already captured
+      let tx: SaccoTransaction | null = null;
+      if (postgresPool) {
+        tx = await getSaccoTransactionByCheckoutId(postgresPool, checkoutRequestId);
+      } else {
+        tx = localStore.saccoTransactions.find(t => t.checkoutRequestId === checkoutRequestId) || null;
+      }
+      if (!tx) {
+        throw new HttpError(404, 'STK Push transaction was not found in the SACCO database.', 'TX_NOT_FOUND');
+      }
+
+      if (['SUCCESS', 'RESOLVED_RECONCILED'].includes(tx.status)) {
+        return res.json({
+          verified: true,
+          alreadyCaptured: true,
+          flaggedDelayedCallback: Boolean(tx.metadata?.flaggedDelayedCallback),
+          message: `Payment of KES ${tx.amount.toLocaleString('en-KE')} (Receipt: ${tx.mpesaReceiptNumber}) is already captured and reconciled in your SACCO account.`,
+          transaction: tx
+        });
+      }
+
+      // Step 2: Flag the transaction in the database because Safaricom notification lagged / did not return on time
+      const flaggedAt = new Date().toISOString();
+      if (postgresPool) {
+        tx = (await flagDelayedStkTransaction(postgresPool, checkoutRequestId, reason)) || tx;
+      } else {
+        tx.metadata = {
+          ...(tx.metadata || {}),
+          flaggedDelayedCallback: true,
+          flaggedAt,
+          flagReason: reason
+        };
+        tx.updatedAt = flaggedAt;
+      }
+
+      // Step 3: Query Safaricom Daraja STK Status API directly
+      const statusResult = await queryDarajaStkStatus(checkoutRequestId);
+      if (statusResult.resultCode === 0) {
+        const receipt = statusResult.mpesaReceiptNumber || `SOWR${Date.now().toString(36).toUpperCase().slice(-6)}`;
+        const reconciledTx = await settleStkPayment({
+          checkoutRequestId,
+          mpesaReceiptNumber: receipt,
+          amount: tx.amount,
+          resultCode: 0,
+          resultDescription: `${statusResult.resultDesc} (Recovered via Active Database & Daraja Status Query)`,
+          finalStatus: 'RESOLVED_RECONCILED',
+          metadataPatch: {
+            flaggedDelayedCallback: true,
+            flaggedAt,
+            flagReason: reason,
+            capturedBy: 'ACTIVE_DB_DARAJA_QUERY_FALLBACK'
+          }
+        });
+        return res.json({
+          verified: true,
+          flaggedDelayedCallback: true,
+          message: `Delayed Safaricom callback flagged and resolved! Payment of KES ${tx.amount.toLocaleString('en-KE')} (Receipt: ${receipt}) was verified with Safaricom and applied to your SACCO account.`,
+          transaction: reconciledTx
+        });
+      }
+
+      // If Safaricom reports failure/cancellation
+      if (postgresPool) {
+        tx = await failStkTransaction(postgresPool, {
+          checkoutRequestId,
+          resultCode: statusResult.resultCode,
+          resultDescription: statusResult.resultDesc || 'Transaction not completed on handset.'
+        });
+      } else {
+        tx.status = 'FAILED';
+        tx.resultCode = statusResult.resultCode;
+        tx.resultDescription = statusResult.resultDesc || 'Transaction not completed on handset.';
+        tx.updatedAt = new Date().toISOString();
+      }
+
+      return res.json({
+        verified: false,
+        flaggedDelayedCallback: true,
+        message: `Transaction flagged and queried: Safaricom reported status ${statusResult.resultCode} (${statusResult.resultDesc}).`,
+        transaction: tx
+      });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  // Member transaction list
+  app.get('/api/v1/mpesa/transactions/member/:memberId', authenticateSaccoUser, async (req, res) => {
+    try {
+      const user = requireAuthenticatedUser(req);
+      const targetMemberId = isMemberUser(user) ? (user.linkedMemberId || req.params.memberId) : req.params.memberId;
+      let list: SaccoTransaction[] = [];
+      if (postgresPool) {
+        list = await listMemberSaccoTransactions(postgresPool, targetMemberId);
+      } else {
+        list = localStore.saccoTransactions.filter(t => t.memberId === targetMemberId);
+      }
+      res.json({ transactions: list });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  // Conversational Collections Assistant endpoint
+  app.post('/api/v1/mpesa/conversational-assistant', authenticateSaccoUser, async (req, res) => {
+    try {
+      const user = requireAuthenticatedUser(req);
+      const { message, history } = req.body;
+      if (!message || typeof message !== 'string') {
+        throw new HttpError(400, 'A message string is required.', 'INVALID_MESSAGE');
+      }
+
+      let member: Member | null = null;
+      let loans: any[] = [];
+      let savingsBalance = 0;
+      let loanBalance = 0;
+
+      if (postgresPool) {
+        const memberId = user.linkedMemberId;
+        if (memberId) {
+          member = await getPostgresMember(postgresPool, memberId);
+          loans = await listPostgresLoansByMember(postgresPool, memberId);
+          loanBalance = Number(member?.loanBalance || 0);
+          savingsBalance = Number(member?.savingsAmount || 0);
+        }
+      } else {
+        member = localStore.members.find(m => m.id === user.linkedMemberId) || null;
+        loanBalance = Number(member?.loanBalance || 0);
+        savingsBalance = Number(member?.savingsAmount || 0);
+      }
+
+      if (!member) {
+        throw new HttpError(400, 'Member context could not be identified.', 'MEMBER_NOT_FOUND');
+      }
+
+      const context: MemberFinancialContext = {
+        memberId: member.id,
+        fullName: member.name,
+        phoneNumber: member.phoneNumber || user.phone || '',
+        membershipNumber: member.membershipNumber,
+        savingsBalance,
+        loanBalance,
+        activeLoans: loans.map(l => ({
+          id: String(l.id || l.loanId),
+          amount: Number(l.loanAmount || l.amount || 0),
+          remainingBalance: Number(l.remainingBalance || l.balance || 0),
+          dueDate: l.dueDate
+        }))
+      };
+
+      const chatResponse = await processMemberChat(message, history || [], context);
+      res.json(chatResponse);
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  // On-demand reconciliation trigger
+  app.post('/api/v1/mpesa/reconciliation/run', authenticateSaccoUser, requirePermission('payments.reconcile'), async (_req, res) => {
+    try {
+      if (!postgresPool) {
+        return res.json({ message: 'PostgreSQL inactive; running in mock local mode.', report: { totalPendingScanned: 0 } });
+      }
+      const report = await runNightlyReconciliation(postgresPool, async (rep) => {
+        await notifyRole('Chairman', {
+          category: 'AUDIT',
+          title: 'Nightly M-Pesa Reconciliation Complete',
+          message: `Audited ${rep.totalPendingScanned} pending items: ${rep.reconciledSuccessCount} auto-reconciled, ${rep.expiredUnpaidCount} expired.`,
+          destination: '/payments'
+        });
+      });
+      res.json({ success: true, report });
     } catch (error: any) {
       sendApiError(res, error);
     }
