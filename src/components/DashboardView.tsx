@@ -236,7 +236,17 @@ export default function DashboardView({
 
   const dashboardMetrics = calculateDashboardMetrics(transactions, vehicles, members);
   const {
-    totalCredits: todayCredits,
+    todayCredits,
+    operationalDateLabel,
+    activeOperationalDate,
+    yesterdayCredits,
+    dailyPercentChange,
+    monthToDateCredits,
+    monthToDateDebits,
+    allTimeCredits,
+    allTimeDebits,
+    operationsAccountBalance,
+    utilityTillCredits,
     activeFleetCount,
     pendingMembersCount,
     totalMpesaDeposits,
@@ -490,7 +500,7 @@ export default function DashboardView({
             {/* Stat Preview inside minimized card */}
             <div className="w-full bg-slate-50 border border-slate-100 rounded-2xl p-4 flex items-center justify-between font-mono text-left">
               <div>
-                <p className="text-[9px] text-slate-400 uppercase tracking-wider font-bold">Today's Pool</p>
+                <p className="text-[9px] text-slate-400 uppercase tracking-wider font-bold">Daily Pool ({operationalDateLabel})</p>
                 <p className="text-sm font-black text-slate-700">KES {todayCredits.toLocaleString()}</p>
               </div>
               <div className="text-right">
@@ -607,8 +617,38 @@ export default function DashboardView({
           </div>
         )}
 
+        {/* SUMMARY PERIOD TOTALS STRIP (Clear separation of Daily, Month-to-date, and 2-Month All-Time) */}
+        <div className="md:col-span-12 bg-white border border-slate-200/80 rounded-2xl p-4 shadow-2xs flex flex-wrap items-center justify-between gap-4 font-mono">
+          <div className="flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+            <span className="text-xs font-bold text-slate-800 font-sans">Active Ledger Metrics</span>
+            <span className="text-[10px] text-slate-400 font-sans">({new Date(activeOperationalDate + 'T00:00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' })})</span>
+          </div>
+          <div className="flex flex-wrap items-center gap-4 text-xs">
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-400 font-sans">Daily Pool ({operationalDateLabel}):</span>
+              <span className="font-bold text-slate-900 bg-slate-100 px-2 py-0.5 rounded-lg">KES {todayCredits.toLocaleString()}</span>
+            </div>
+            <div className="text-slate-200">|</div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-400 font-sans">This Month Total:</span>
+              <span className="font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-lg">KES {monthToDateCredits.toLocaleString()}</span>
+            </div>
+            <div className="text-slate-200">|</div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-400 font-sans">2-Month Cumulative (Sept 1 – Present):</span>
+              <span className="font-bold text-purple-700 bg-purple-50 px-2 py-0.5 rounded-lg">KES {allTimeCredits.toLocaleString()}</span>
+            </div>
+            <div className="text-slate-200">|</div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-400 font-sans">Expenses Disbursed:</span>
+              <span className="font-bold text-rose-700 bg-rose-50 px-2 py-0.5 rounded-lg">KES {allTimeDebits.toLocaleString()}</span>
+            </div>
+          </div>
+        </div>
+
         {/* BENTO STATS CARDS */}
-        {/* Card 1: Unified Conjunction Pool */}
+        {/* Card 1: Daily Collections Pool */}
         <motion.div 
           initial={{ opacity: 0, y: 15 }}
           animate={{ opacity: 1, y: 0 }}
@@ -617,7 +657,10 @@ export default function DashboardView({
         >
           <div>
             <div className="flex items-center justify-between">
-              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest font-mono">Unified Conjunction Pool</span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest font-mono">Daily Pool</span>
+                <span className="text-[9px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-md font-mono">{operationalDateLabel}</span>
+              </div>
               <div className="w-8 h-8 rounded-full bg-amber-50 flex items-center justify-center group-hover:scale-110 transition-transform duration-300">
                 <DollarSign className="w-4 h-4 text-amber-600" />
               </div>
@@ -625,14 +668,19 @@ export default function DashboardView({
             <p className="text-2xl font-black text-slate-800 mt-3 font-mono tracking-tight">KES {todayCredits.toLocaleString()}</p>
           </div>
           <div className="flex items-end justify-between mt-4 pt-4 border-t border-slate-50">
-            <div className="text-[10px] text-emerald-600 font-bold flex items-center bg-emerald-50/70 px-2 py-1 rounded-lg border border-emerald-100">
-              <ArrowUpRight className="w-3.5 h-3.5 mr-0.5 text-emerald-500" /> +12.4% vs yesterday
+            <div className={`text-[10px] font-bold flex items-center px-2 py-1 rounded-lg border ${
+              dailyPercentChange >= 0
+                ? 'text-emerald-600 bg-emerald-50/70 border-emerald-100'
+                : 'text-slate-600 bg-slate-50 border-slate-200'
+            }`}>
+              <ArrowUpRight className={`w-3.5 h-3.5 mr-0.5 ${dailyPercentChange >= 0 ? 'text-emerald-500' : 'text-slate-400 rotate-90'}`} />
+              {dailyPercentChange >= 0 ? `+${dailyPercentChange.toFixed(1)}%` : `${dailyPercentChange.toFixed(1)}%`} vs prev day
             </div>
-            <Sparkline data={[todayCredits * 0.72, todayCredits * 0.81, todayCredits * 0.75, todayCredits * 0.89, todayCredits]} color="#eab308" />
+            <Sparkline data={fleetSparkData} color="#eab308" />
           </div>
         </motion.div>
 
-        {/* Card 2: Fleet Till */}
+        {/* Card 2: Operations Account: 48277 */}
         <motion.div 
           initial={{ opacity: 0, y: 15 }}
           animate={{ opacity: 1, y: 0 }}
@@ -641,18 +689,21 @@ export default function DashboardView({
         >
           <div>
             <div className="flex items-center justify-between">
-              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest font-mono">Operations Account: 48277</span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest font-mono">Operations: 48277</span>
+                <span className="text-[9px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-md font-mono">Net Balance</span>
+              </div>
               <div className="w-8 h-8 rounded-full bg-emerald-50 flex items-center justify-center group-hover:scale-110 transition-transform duration-300">
                 <Activity className="w-4 h-4 text-emerald-600" />
               </div>
             </div>
             <p className="text-2xl font-black text-slate-800 mt-3 font-mono tracking-tight">
-              KES {transactions.filter(t => t.tillNumber === 'VehicleTill' && t.type === 'Credit').reduce((acc, t) => acc + t.amount, 0).toLocaleString()}
+              KES {operationsAccountBalance.toLocaleString()}
             </p>
           </div>
           <div className="flex items-end justify-between mt-4 pt-4 border-t border-slate-50">
             <p className="text-[10px] text-slate-400 font-medium">
-              Daily collections and operations
+              This Month: <span className="font-semibold text-slate-600">KES {monthToDateCredits.toLocaleString()}</span>
             </p>
             <Sparkline data={fleetSparkData} color="#10b981" />
           </div>
@@ -673,7 +724,7 @@ export default function DashboardView({
               </div>
             </div>
             <p className="text-2xl font-black text-slate-800 mt-3 font-mono tracking-tight">
-              KES {transactions.filter(t => t.tillNumber === 'UtilityTill' && t.type === 'Credit').reduce((acc, t) => acc + t.amount, 0).toLocaleString()}
+              KES {utilityTillCredits.toLocaleString()}
             </p>
           </div>
           <div className="flex items-end justify-between mt-4 pt-4 border-t border-slate-50">
