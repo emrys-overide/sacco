@@ -22,6 +22,15 @@ export const SOWETAMU_AUDIT_REFERENCE = {
   }
 } as const;
 
+function isHistoricalTransaction(tx: Transaction): boolean {
+  return Boolean(
+    (tx as any).isHistorical ||
+    tx.refCode?.startsWith('SWT-IMP25-') ||
+    tx.entryDate?.startsWith('2025-') ||
+    tx.timestamp?.startsWith('2025-')
+  );
+}
+
 function tillSummary(transactions: Transaction[], tillNumber: Transaction['tillNumber']) {
   const entries = transactions.filter(transaction => transaction.tillNumber === tillNumber);
   const credits = entries.filter(transaction => transaction.type === 'Credit').reduce((sum, transaction) => sum + transaction.amount, 0);
@@ -30,19 +39,22 @@ function tillSummary(transactions: Transaction[], tillNumber: Transaction['tillN
 }
 
 export function calculateReportFinancials(transactions: Transaction[], members: Member[]) {
-  const totalCredits = transactions.filter(transaction => transaction.type === 'Credit').reduce((sum, transaction) => sum + transaction.amount, 0);
-  const totalDebits = transactions.filter(transaction => transaction.type === 'Debit').reduce((sum, transaction) => sum + transaction.amount, 0);
+  // Exclude historical archive transactions so current report financials remain strictly current period
+  const currentTransactions = transactions.filter(tx => !isHistoricalTransaction(tx));
+
+  const totalCredits = currentTransactions.filter(transaction => transaction.type === 'Credit').reduce((sum, transaction) => sum + transaction.amount, 0);
+  const totalDebits = currentTransactions.filter(transaction => transaction.type === 'Debit').reduce((sum, transaction) => sum + transaction.amount, 0);
   const netBalance = totalCredits - totalDebits;
-  const vehicle = tillSummary(transactions, 'VehicleTill');
-  const utility = tillSummary(transactions, 'UtilityTill');
-  const cash = tillSummary(transactions, 'None');
-  const categorySummary = transactions.reduce<Record<string, number>>((summary, transaction) => {
+  const vehicle = tillSummary(currentTransactions, 'VehicleTill');
+  const utility = tillSummary(currentTransactions, 'UtilityTill');
+  const cash = tillSummary(currentTransactions, 'None');
+  const categorySummary = currentTransactions.reduce<Record<string, number>>((summary, transaction) => {
     summary[transaction.category] = (summary[transaction.category] || 0) + transaction.amount;
     return summary;
   }, {});
   const activeCount = members.filter(member => member.status === 'Active').length;
   const memberDeposits = members.reduce((sum, member) => sum + Number(member.savingsAmount || 0), 0);
-  const ppeCarrying = transactions
+  const ppeCarrying = currentTransactions
     .filter(transaction => transaction.category === 'Equipment')
     .reduce((sum, transaction) => sum + (transaction.type === 'Debit' ? transaction.amount : -transaction.amount), 0);
 
