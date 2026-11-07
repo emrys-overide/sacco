@@ -2755,6 +2755,7 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
   app.use('/api/password-reset-requests', authenticateSaccoUser);
   app.use('/api/chairman-recovery-requests', authenticateSaccoUser);
   app.use('/api/notifications', authenticateSaccoUser);
+  app.use('/api/historical-manifests', authenticateSaccoUser);
 
   app.get('/api/developer-errors/access', (req, res) => {
     const user = requireAuthenticatedUser(req);
@@ -4325,6 +4326,221 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       const user = (req as any).user;
       const payment = await reconcilePaymentRecord(req.params.id, req.body.memberId, user?.name || 'Sacco Ledger OS');
       res.json(payment);
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  // API 8D: Isolated Historical Manifest Archives (2025 Collections)
+  app.get('/api/historical-manifests/dates', async (req, res) => {
+    try {
+      requireAuthenticatedUser(req);
+      if (!postgresPool) return res.json([]);
+      const result = await postgresPool.query(`
+        SELECT 
+          to_char(record_date, 'YYYY-MM-DD') AS "recordDate",
+          nissan_total::numeric AS "nissanTotal",
+          sienta_total::numeric AS "sientaTotal",
+          gross_total::numeric AS "grossTotal",
+          total_expenses::numeric AS "totalExpenses",
+          net_vault_inflow::numeric AS "netVaultInflow"
+        FROM historical_manifest_days
+        ORDER BY record_date ASC
+      `);
+      res.json(result.rows);
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.get('/api/historical-manifests/day/:date', async (req, res) => {
+    try {
+      requireAuthenticatedUser(req);
+      const date = req.params.date;
+      if (!postgresPool) throw new HttpError(503, 'Database not connected');
+
+      const [dayRes, entriesRes, expensesRes] = await Promise.all([
+        postgresPool.query(
+          `SELECT 
+             to_char(record_date, 'YYYY-MM-DD') AS "recordDate",
+             nissan_total::numeric AS "nissanTotal",
+             sienta_total::numeric AS "sientaTotal",
+             gross_total::numeric AS "grossTotal",
+             total_expenses::numeric AS "totalExpenses",
+             net_vault_inflow::numeric AS "netVaultInflow"
+           FROM historical_manifest_days
+           WHERE record_date = $1::date`,
+          [date]
+        ),
+        postgresPool.query(
+          `SELECT 
+             id,
+             to_char(record_date, 'YYYY-MM-DD') AS "recordDate",
+             fleet,
+             row_no AS "rowNo",
+             plate_number AS "plateNumber",
+             operation::numeric,
+             entrance::numeric,
+             loan_repay AS "loanRepay",
+             savings::numeric,
+             s_ticket AS "sTicket",
+             legal_fee AS "legalFee",
+             total_amount AS "totalAmount"
+           FROM historical_manifest_entries
+           WHERE record_date = $1::date
+           ORDER BY fleet ASC, row_no ASC, id ASC`,
+          [date]
+        ),
+        postgresPool.query(
+          `SELECT 
+             id,
+             to_char(record_date, 'YYYY-MM-DD') AS "recordDate",
+             item_no AS "itemNo",
+             description,
+             amount::numeric
+           FROM historical_manifest_expenses
+           WHERE record_date = $1::date
+           ORDER BY item_no ASC, id ASC`,
+          [date]
+        )
+      ]);
+
+      const nissan = entriesRes.rows.filter(r => r.fleet === 'Nissan');
+      const sienta = entriesRes.rows.filter(r => r.fleet === 'Sienta');
+
+      res.json({
+        day: dayRes.rows[0] || {
+          recordDate: date,
+          nissanTotal: 0,
+          sientaTotal: 0,
+          grossTotal: 0,
+          totalExpenses: 0,
+          netVaultInflow: 0
+        },
+        nissan,
+        sienta,
+        expenses: expensesRes.rows
+      });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.put('/api/historical-manifests/day/:date', requirePermission('ledger.write'), async (req, res) => {
+    try {
+      requireAuthenticatedUser(req);
+      const date = req.params.date;
+      const { nissan = [], sienta = [], expenses = [] } = req.body;
+
+      if (!postgresPool) throw new HttpError(503, 'Database not connected');
+
+      const client = await postgresPool.connect();
+      try {
+        await client.query('BEGIN');
+
+        await client.query('DELETE FROM historical_manifest_entries WHERE record_date = $1::date', [date]);
+        await client.query('DELETE FROM historical_manifest_expenses WHERE record_date = $1::date', [date]);
+
+        let nissanSum = 0;
+        let sientaSum = 0;
+
+        for (let i = 0; i < nissan.length; i++) {
+          const r = nissan[i];
+          const op = Math.max(0, Number(r.operation || 0));
+          const ent = Math.max(0, Number(r.entrance || 0));
+          const loan = Math.max(0, Number(r.loanRepay || r.loan_repay || 0));
+          const sav = Math.max(0, Number(r.savings || 0));
+          const st = Math.max(0, Number(r.sTicket || r.s_ticket || 0));
+          const leg = Math.max(0, Number(r.legalFee || r.legal_fee || 0));
+          const tot = op + ent + loan + sav + st + leg;
+          nissanSum += tot;
+
+          await client.query(
+            `INSERT INTO historical_manifest_entries (
+               record_date, fleet, row_no, plate_number, operation, entrance, loan_repay, savings, s_ticket, legal_fee, total_amount
+             ) VALUES ($1::date, 'Nissan', $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+            [date, i + 1, (r.plateNumber || r.plate_number || '').trim().toUpperCase(), op, ent, loan, sav, st, leg, tot]
+          );
+        }
+
+        for (let i = 0; i < sienta.length; i++) {
+          const r = sienta[i];
+          const op = Math.max(0, Number(r.operation || 0));
+          const ent = Math.max(0, Number(r.entrance || 0));
+          const loan = Math.max(0, Number(r.loanRepay || r.loan_repay || 0));
+          const sav = Math.max(0, Number(r.savings || 0));
+          const st = Math.max(0, Number(r.sTicket || r.s_ticket || 0));
+          const leg = Math.max(0, Number(r.legalFee || r.legal_fee || 0));
+          const tot = op + ent + loan + sav + st + leg;
+          sientaSum += tot;
+
+          await client.query(
+            `INSERT INTO historical_manifest_entries (
+               record_date, fleet, row_no, plate_number, operation, entrance, loan_repay, savings, s_ticket, legal_fee, total_amount
+             ) VALUES ($1::date, 'Sienta', $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+            [date, i + 1, (r.plateNumber || r.plate_number || '').trim().toUpperCase(), op, ent, loan, sav, st, leg, tot]
+          );
+        }
+
+        let expenseSum = 0;
+        for (let i = 0; i < expenses.length; i++) {
+          const e = expenses[i];
+          const amt = Math.max(0, Number(e.amount || 0));
+          expenseSum += amt;
+          await client.query(
+            `INSERT INTO historical_manifest_expenses (
+               record_date, item_no, description, amount
+             ) VALUES ($1::date, $2, $3, $4)`,
+            [date, i + 1, (e.description || '').trim(), amt]
+          );
+        }
+
+        const gross = nissanSum + sientaSum;
+        const net = gross - expenseSum;
+
+        await client.query(
+          `INSERT INTO historical_manifest_days (
+             record_date, nissan_total, sienta_total, gross_total, total_expenses, net_vault_inflow, updated_at
+           ) VALUES ($1::date, $2, $3, $4, $5, $6, now())
+           ON CONFLICT (record_date) DO UPDATE SET
+             nissan_total = EXCLUDED.nissan_total,
+             sienta_total = EXCLUDED.sienta_total,
+             gross_total = EXCLUDED.gross_total,
+             total_expenses = EXCLUDED.total_expenses,
+             net_vault_inflow = EXCLUDED.net_vault_inflow,
+             updated_at = now()`,
+          [date, nissanSum, sientaSum, gross, expenseSum, net]
+        );
+
+        await client.query('COMMIT');
+        await recordAuditLog(req, 'HISTORICAL_MANIFEST_SAVED', 'historical_manifest_days', date, undefined, {
+          date,
+          nissanEntries: nissan.length,
+          sientaEntries: sienta.length,
+          expenses: expenses.length,
+          grossTotal: gross,
+          totalExpenses: expenseSum,
+          netVaultInflow: net
+        });
+
+        res.json({
+          success: true,
+          date,
+          day: {
+            recordDate: date,
+            nissanTotal: nissanSum,
+            sientaTotal: sientaSum,
+            grossTotal: gross,
+            totalExpenses: expenseSum,
+            netVaultInflow: net
+          }
+        });
+      } catch (innerError) {
+        await client.query('ROLLBACK');
+        throw innerError;
+      } finally {
+        client.release();
+      }
     } catch (error: any) {
       sendApiError(res, error);
     }

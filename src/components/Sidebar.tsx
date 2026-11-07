@@ -23,6 +23,7 @@ import {
   CalendarClock,
   Bug,
   KeyRound,
+  History,
   Settings
 } from 'lucide-react';
 
@@ -59,6 +60,7 @@ export default function Sidebar({
   const administratorMenuItems = [
     { name: 'Dashboard', icon: <LayoutDashboard className="w-4 h-4" /> },
     { name: 'Daily Collections', icon: <ClipboardList className="w-4 h-4" /> },
+    { name: 'Historical Archives', icon: <History className="w-4 h-4" /> },
     { name: 'Expenses', icon: <Receipt className="w-4 h-4" /> },
     { name: 'Members', icon: <Users className="w-4 h-4" /> },
     { name: 'Loans', icon: <Landmark className="w-4 h-4" /> },

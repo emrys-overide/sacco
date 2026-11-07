@@ -14,6 +14,8 @@
     "db:status": "node scripts/database.mjs status",
     "db:backup": "node scripts/database-backup.mjs",
     "db:restore-test": "node scripts/restore-backup-test.mjs",
+    "db:replicate": "node scripts/replicate-database.mjs",
+    "db:replica-verify": "node scripts/verify-replica-failover.mjs",
     "db:down": "node scripts/database.mjs down",
     "simulate:coop-ipn": "node scripts/simulate-coop-ipn.mjs",
     "clean": "rm -rf dist server.js",

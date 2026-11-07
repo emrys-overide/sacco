@@ -3,6 +3,8 @@ build/
 dist/
 coverage/
 .backups/
+database/replica/*
+!database/replica/.gitkeep
 .DS_Store
 *.log
 gha-creds-*.json

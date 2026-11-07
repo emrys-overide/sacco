@@ -16,6 +16,7 @@ const MembersView = lazy(() => import('./components/MembersView'));
 const VehiclesView = lazy(() => import('./components/VehiclesView'));
 const ReportsView = lazy(() => import('./components/ReportsView'));
 const DailyCollectionsView = lazy(() => import('./components/DailyCollectionsView'));
+const HistoricalManifestView = lazy(() => import('./components/HistoricalManifestView'));
 const BlueprintView = lazy(() => import('./components/BlueprintView'));
 const ExpensesView = lazy(() => import('./components/ExpensesView'));
 const CoopBankView = lazy(() => import('./components/CoopBankView'));
@@ -552,6 +553,14 @@ export default function App() {
             currentUserRole={currentUser.role}
             currentUserName={currentUser.name}
             onRefreshData={handleRefreshData}
+          />
+        );
+      case 'Historical Archives':
+        return (
+          <HistoricalManifestView
+            token={authToken}
+            currentUserRole={currentUser.role}
+            currentUserName={currentUser.name}
           />
         );
       case 'Expenses':
