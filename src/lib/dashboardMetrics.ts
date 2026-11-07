@@ -1,14 +1,5 @@
 import type { Member, Transaction, Vehicle } from '../types';
 
-export function isHistoricalTransaction(tx: Transaction): boolean {
-  return Boolean(
-    (tx as any).isHistorical ||
-    tx.refCode?.startsWith('SWT-IMP25-') ||
-    tx.entryDate?.startsWith('2025-') ||
-    tx.timestamp?.startsWith('2025-')
-  );
-}
-
 export function getRecentDailySeries(
   transactions: Transaction[],
   include: (transaction: Transaction) => boolean,
@@ -36,34 +27,31 @@ export function getRecentDailySeries(
 }
 
 export function calculateDashboardMetrics(transactions: Transaction[], vehicles: Vehicle[], members: Member[]) {
-  // Historical archive records are excluded so they do not alter current period totals/KPIs
-  const currentTransactions = transactions.filter(tx => !isHistoricalTransaction(tx));
-
-  const recentWeekDates = new Set(getRecentDailySeries(currentTransactions, () => true, 7).map(day => day.dateString));
-  const weeklyCreditTotal = getRecentDailySeries(currentTransactions, transaction => transaction.type === 'Credit', 7)
+  const recentWeekDates = new Set(getRecentDailySeries(transactions, () => true, 7).map(day => day.dateString));
+  const weeklyCreditTotal = getRecentDailySeries(transactions, transaction => transaction.type === 'Credit', 7)
     .reduce((sum, day) => sum + day.amount, 0);
-  const weeklySavings = currentTransactions
+  const weeklySavings = transactions
     .filter(transaction => transaction.type === 'Credit' && (transaction.savingsContribution !== undefined || transaction.category === 'Savings Contribution'))
     .filter(transaction => recentWeekDates.has(transaction.timestamp.slice(0, 10)))
     .reduce((sum, transaction) => sum + (transaction.category === 'Savings Contribution' ? transaction.amount : Number(transaction.savingsContribution || 0)), 0);
-  const weeklyLoanRepayments = currentTransactions
+  const weeklyLoanRepayments = transactions
     .filter(transaction => transaction.type === 'Credit' && transaction.loanRepay !== undefined)
     .filter(transaction => recentWeekDates.has(transaction.timestamp.slice(0, 10)))
     .reduce((sum, transaction) => sum + Number(transaction.loanRepay || 0), 0);
 
   return {
-    totalCredits: currentTransactions.filter(transaction => transaction.type === 'Credit').reduce((sum, transaction) => sum + transaction.amount, 0),
+    totalCredits: transactions.filter(transaction => transaction.type === 'Credit').reduce((sum, transaction) => sum + transaction.amount, 0),
     activeFleetCount: vehicles.filter(vehicle => vehicle.status === 'Active').length,
     pendingMembersCount: members.filter(member => member.status === 'Pending').length,
-    totalMpesaDeposits: currentTransactions
+    totalMpesaDeposits: transactions
       .filter(transaction => transaction.type === 'Credit' && transaction.refCode.toUpperCase().startsWith('Q'))
       .reduce((sum, transaction) => sum + transaction.amount, 0),
-    fleetSparkData: getRecentDailySeries(currentTransactions, transaction => transaction.type === 'Credit' && transaction.tillNumber === 'VehicleTill', 6).map(day => day.amount),
-    utilitySparkData: getRecentDailySeries(currentTransactions, transaction => transaction.type === 'Credit' && transaction.tillNumber === 'UtilityTill', 6).map(day => day.amount),
+    fleetSparkData: getRecentDailySeries(transactions, transaction => transaction.type === 'Credit' && transaction.tillNumber === 'VehicleTill', 6).map(day => day.amount),
+    utilitySparkData: getRecentDailySeries(transactions, transaction => transaction.type === 'Credit' && transaction.tillNumber === 'UtilityTill', 6).map(day => day.amount),
     weeklySavings,
     weeklyLoanRepayments,
     savingsShare: weeklyCreditTotal > 0 ? Math.min(100, (weeklySavings / weeklyCreditTotal) * 100) : 0,
     loanRepaymentShare: weeklyCreditTotal > 0 ? Math.min(100, (weeklyLoanRepayments / weeklyCreditTotal) * 100) : 0,
-    ledgerEntryCount: currentTransactions.length
+    ledgerEntryCount: transactions.length
   };
 }
