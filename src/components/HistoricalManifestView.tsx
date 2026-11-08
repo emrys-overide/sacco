@@ -16,7 +16,11 @@ import {
   Receipt, 
   ShieldCheck,
   Search,
-  Check
+  Check,
+  Eye,
+  EyeOff,
+  Image,
+  X
 } from 'lucide-react';
 
 interface ManifestEntry {
@@ -76,6 +80,12 @@ export default function HistoricalManifestView({
   const [nissanRows, setNissanRows] = useState<ManifestEntry[]>([]);
   const [sientaRows, setSientaRows] = useState<ManifestEntry[]>([]);
   const [expenseRows, setExpenseRows] = useState<ExpenseEntry[]>([]);
+
+  // Stage 5: Crop-Alongside-Cell Verification State
+  const [inspectedNissanRow, setInspectedNissanRow] = useState<number | null>(null);
+  const [inspectedSientaRow, setInspectedSientaRow] = useState<number | null>(null);
+  const [showAllCrops, setShowAllCrops] = useState<boolean>(false);
+  const [showFooterModal, setShowFooterModal] = useState<boolean>(false);
 
   const isOfficer = ['Chairman', 'Treasurer', 'Accountant', 'Secretary'].includes(currentUserRole);
 
@@ -537,12 +547,36 @@ export default function HistoricalManifestView({
             </div>
           </div>
 
-          <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+          <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto justify-end">
             {isDirty && (
               <span className="text-xs font-medium text-amber-600 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-lg animate-pulse">
                 Unsaved Edits
               </span>
             )}
+
+            <button
+              type="button"
+              onClick={() => setShowAllCrops(prev => !prev)}
+              className={`flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl border transition-all ${
+                showAllCrops 
+                  ? 'bg-amber-100 text-amber-900 border-amber-300 shadow-2xs' 
+                  : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+              }`}
+              title="Toggle authentic handwritten row crop preview for all vehicles"
+            >
+              <Eye className="w-3.5 h-3.5 text-amber-600" />
+              {showAllCrops ? 'Collapse Ink Crops' : 'Inspect All Ink Crops'}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowFooterModal(true)}
+              className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-xl transition-all shadow-2xs"
+              title="Audit handwritten banking receipts and expense entries on physical sheet"
+            >
+              <Receipt className="w-3.5 h-3.5 text-emerald-600" />
+              Audit Sheet Ink & Footer
+            </button>
 
             <button
               type="button"
@@ -591,6 +625,7 @@ export default function HistoricalManifestView({
                 <thead>
                   <tr className="bg-slate-100/70 text-slate-600 font-semibold border-b border-slate-200">
                     <th className="py-2.5 px-3 w-12 text-center">#</th>
+                    <th className="py-2.5 px-2 w-12 text-center">Ink</th>
                     <th className="py-2.5 px-3 w-32">Plate Number</th>
                     <th className="py-2.5 px-3 w-24 text-right">Operation</th>
                     <th className="py-2.5 px-3 w-24 text-right">Entrance</th>
@@ -605,65 +640,124 @@ export default function HistoricalManifestView({
                 <tbody className="divide-y divide-slate-100 font-mono">
                   {nissanRows.length === 0 ? (
                     <tr>
-                      <td colSpan={10} className="py-6 text-center text-slate-400 font-sans">
+                      <td colSpan={11} className="py-6 text-center text-slate-400 font-sans">
                         No Nissan entries recorded for this date.
                       </td>
                     </tr>
                   ) : (
                     nissanRows.map((row, idx) => (
-                      <tr key={idx} className="hover:bg-slate-50/70 transition-colors">
-                        <td className="py-2 px-3 text-center text-slate-400 font-sans">{idx + 1}</td>
-                        <td className="py-1 px-2 font-sans">
-                          {isOfficer ? (
-                            <input
-                              type="text"
-                              value={row.plateNumber}
-                              onChange={(e) => handleNissanChange(idx, 'plateNumber', e.target.value.toUpperCase())}
-                              className="w-full uppercase font-bold text-slate-800 bg-transparent px-2 py-1 rounded border border-transparent hover:border-slate-300 focus:border-blue-500 focus:bg-white focus:outline-hidden"
-                              placeholder="KXX 000X"
-                            />
-                          ) : (
-                            <span className="font-bold text-slate-800 px-2 py-1">{row.plateNumber}</span>
-                          )}
-                        </td>
-                        {(['operation', 'entrance', 'loanRepay', 'savings', 'sTicket', 'legalFee'] as const).map((field) => (
-                          <td key={field} className="py-1 px-2 text-right">
-                            {isOfficer ? (
-                              <input
-                                type="number"
-                                min="0"
-                                step="10"
-                                value={row[field] || 0}
-                                onChange={(e) => handleNissanChange(idx, field, e.target.value)}
-                                className="w-full text-right text-slate-700 bg-transparent px-2 py-1 rounded border border-transparent hover:border-slate-300 focus:border-blue-500 focus:bg-white focus:outline-hidden font-mono"
-                              />
-                            ) : (
-                              <span className="px-2 py-1 text-slate-700">{(row[field] || 0).toLocaleString()}</span>
-                            )}
-                          </td>
-                        ))}
-                        <td className="py-2 px-3 text-right font-bold text-slate-900">
-                          {((row.operation || 0) + (row.entrance || 0) + (row.loanRepay || 0) + (row.savings || 0) + (row.sTicket || 0) + (row.legalFee || 0)).toLocaleString()}
-                        </td>
-                        {isOfficer && (
-                          <td className="py-1 px-2 text-center font-sans">
+                      <React.Fragment key={idx}>
+                        <tr className="hover:bg-slate-50/70 transition-colors">
+                          <td className="py-2 px-3 text-center text-slate-400 font-sans">{idx + 1}</td>
+                          <td className="py-1 px-1 text-center font-sans">
                             <button
                               type="button"
-                              onClick={() => handleDeleteNissanRow(idx)}
-                              className="p-1 text-slate-400 hover:text-rose-600 rounded transition-all"
-                              title="Delete Row"
+                              onClick={() => setInspectedNissanRow(prev => prev === idx ? null : idx)}
+                              className={`p-1 rounded-lg border transition-all ${
+                                inspectedNissanRow === idx || showAllCrops
+                                  ? 'bg-amber-100 text-amber-800 border-amber-300 font-bold'
+                                  : 'bg-slate-50 text-slate-400 border-slate-200 hover:bg-slate-100 hover:text-slate-600'
+                              }`}
+                              title="Inspect physical ballpoint ink crop"
                             >
-                              <Trash2 className="w-3.5 h-3.5" />
+                              <Eye className="w-3.5 h-3.5" />
                             </button>
                           </td>
+                          <td className="py-1 px-2 font-sans">
+                            {isOfficer ? (
+                              <input
+                                type="text"
+                                value={row.plateNumber}
+                                onChange={(e) => handleNissanChange(idx, 'plateNumber', e.target.value.toUpperCase())}
+                                className="w-full uppercase font-bold text-slate-800 bg-transparent px-2 py-1 rounded border border-transparent hover:border-slate-300 focus:border-blue-500 focus:bg-white focus:outline-hidden"
+                                placeholder="KXX 000X"
+                              />
+                            ) : (
+                              <span className="font-bold text-slate-800 px-2 py-1">{row.plateNumber}</span>
+                            )}
+                          </td>
+                          {(['operation', 'entrance', 'loanRepay', 'savings', 'sTicket', 'legalFee'] as const).map((field) => (
+                            <td key={field} className="py-1 px-2 text-right">
+                              {isOfficer ? (
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="10"
+                                  value={row[field] || 0}
+                                  onChange={(e) => handleNissanChange(idx, field, e.target.value)}
+                                  className="w-full text-right text-slate-700 bg-transparent px-2 py-1 rounded border border-transparent hover:border-slate-300 focus:border-blue-500 focus:bg-white focus:outline-hidden font-mono"
+                                />
+                              ) : (
+                                <span className="px-2 py-1 text-slate-700">{(row[field] || 0).toLocaleString()}</span>
+                              )}
+                            </td>
+                          ))}
+                          <td className="py-2 px-3 text-right font-bold text-slate-900">
+                            {((row.operation || 0) + (row.entrance || 0) + (row.loanRepay || 0) + (row.savings || 0) + (row.sTicket || 0) + (row.legalFee || 0)).toLocaleString()}
+                          </td>
+                          {isOfficer && (
+                            <td className="py-1 px-2 text-center font-sans">
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteNissanRow(idx)}
+                                className="p-1 text-slate-400 hover:text-rose-600 rounded transition-all"
+                                title="Delete Row"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </td>
+                          )}
+                        </tr>
+                        {(inspectedNissanRow === idx || showAllCrops) && (
+                          <tr className="bg-amber-50/40 border-y border-amber-200">
+                            <td colSpan={isOfficer ? 11 : 10} className="p-3">
+                              <div className="bg-white rounded-xl p-3 border border-amber-200 shadow-2xs space-y-2">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <div className="flex items-center gap-2">
+                                    <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></span>
+                                    <span className="text-xs font-bold text-slate-800">
+                                      Handwritten Ledger Snippet: Row {idx + 1} ({row.plateNumber || 'Blank'})
+                                    </span>
+                                    <span className="text-2xs text-slate-400 font-mono bg-slate-100 px-2 py-0.5 rounded">
+                                      {selectedDate}_Nissan_r{idx + 1}.jpg
+                                    </span>
+                                  </div>
+                                  {((row.operation || 0) + (row.entrance || 0) + (row.loanRepay || 0) + (row.savings || 0) + (row.sTicket || 0) + (row.legalFee || 0)) !== (row.totalAmount || 0) && (
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-rose-100 text-rose-800 border border-rose-200">
+                                        ⚠️ Paper Clerical Mismatch: Sum is {((row.operation || 0) + (row.entrance || 0) + (row.loanRepay || 0) + (row.savings || 0) + (row.sTicket || 0) + (row.legalFee || 0)).toLocaleString()} vs Written {Number(row.totalAmount || 0).toLocaleString()}
+                                      </span>
+                                      {isOfficer && (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleNissanChange(idx, 'totalAmount', (row.operation || 0) + (row.entrance || 0) + (row.loanRepay || 0) + (row.savings || 0) + (row.sTicket || 0) + (row.legalFee || 0))}
+                                          className="text-xs font-semibold px-2 py-0.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 transition-all shadow-2xs"
+                                        >
+                                          Balance Total
+                                        </button>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                                <div className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-900/5 p-1 flex justify-center">
+                                  <img
+                                    src={`/api/historical-manifests/crop/${selectedDate}/Nissan/${idx + 1}`}
+                                    alt={`Nissan Row ${idx + 1} authentic ink`}
+                                    className="max-w-full h-auto min-h-[45px] object-contain rounded"
+                                    loading="lazy"
+                                  />
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
                         )}
-                      </tr>
+                      </React.Fragment>
                     ))
                   )}
                 </tbody>
                 <tfoot>
                   <tr className="bg-slate-50 font-bold text-slate-800 border-t-2 border-slate-200 font-mono">
-                    <td colSpan={2} className="py-2.5 px-3 text-right font-sans text-xs">Nissan Subtotal:</td>
+                    <td colSpan={3} className="py-2.5 px-3 text-right font-sans text-xs">Nissan Subtotal:</td>
                     <td className="py-2.5 px-3 text-right">{nissanRows.reduce((s, r) => s + (r.operation || 0), 0).toLocaleString()}</td>
                     <td className="py-2.5 px-3 text-right">{nissanRows.reduce((s, r) => s + (r.entrance || 0), 0).toLocaleString()}</td>
                     <td className="py-2.5 px-3 text-right">{nissanRows.reduce((s, r) => s + (r.loanRepay || 0), 0).toLocaleString()}</td>
@@ -704,6 +798,7 @@ export default function HistoricalManifestView({
                 <thead>
                   <tr className="bg-slate-100/70 text-slate-600 font-semibold border-b border-slate-200">
                     <th className="py-2.5 px-3 w-12 text-center">#</th>
+                    <th className="py-2.5 px-2 w-12 text-center">Ink</th>
                     <th className="py-2.5 px-3 w-32">Plate Number</th>
                     <th className="py-2.5 px-3 w-24 text-right">Operation</th>
                     <th className="py-2.5 px-3 w-24 text-right">Entrance</th>
@@ -718,65 +813,124 @@ export default function HistoricalManifestView({
                 <tbody className="divide-y divide-slate-100 font-mono">
                   {sientaRows.length === 0 ? (
                     <tr>
-                      <td colSpan={10} className="py-6 text-center text-slate-400 font-sans">
+                      <td colSpan={11} className="py-6 text-center text-slate-400 font-sans">
                         No Sienta entries recorded for this date.
                       </td>
                     </tr>
                   ) : (
                     sientaRows.map((row, idx) => (
-                      <tr key={idx} className="hover:bg-slate-50/70 transition-colors">
-                        <td className="py-2 px-3 text-center text-slate-400 font-sans">{idx + 1}</td>
-                        <td className="py-1 px-2 font-sans">
-                          {isOfficer ? (
-                            <input
-                              type="text"
-                              value={row.plateNumber}
-                              onChange={(e) => handleSientaChange(idx, 'plateNumber', e.target.value.toUpperCase())}
-                              className="w-full uppercase font-bold text-slate-800 bg-transparent px-2 py-1 rounded border border-transparent hover:border-slate-300 focus:border-indigo-500 focus:bg-white focus:outline-hidden"
-                              placeholder="KXX 000X"
-                            />
-                          ) : (
-                            <span className="font-bold text-slate-800 px-2 py-1">{row.plateNumber}</span>
-                          )}
-                        </td>
-                        {(['operation', 'entrance', 'loanRepay', 'savings', 'sTicket', 'legalFee'] as const).map((field) => (
-                          <td key={field} className="py-1 px-2 text-right">
-                            {isOfficer ? (
-                              <input
-                                type="number"
-                                min="0"
-                                step="10"
-                                value={row[field] || 0}
-                                onChange={(e) => handleSientaChange(idx, field, e.target.value)}
-                                className="w-full text-right text-slate-700 bg-transparent px-2 py-1 rounded border border-transparent hover:border-slate-300 focus:border-indigo-500 focus:bg-white focus:outline-hidden font-mono"
-                              />
-                            ) : (
-                              <span className="px-2 py-1 text-slate-700">{(row[field] || 0).toLocaleString()}</span>
-                            )}
-                          </td>
-                        ))}
-                        <td className="py-2 px-3 text-right font-bold text-slate-900">
-                          {((row.operation || 0) + (row.entrance || 0) + (row.loanRepay || 0) + (row.savings || 0) + (row.sTicket || 0) + (row.legalFee || 0)).toLocaleString()}
-                        </td>
-                        {isOfficer && (
-                          <td className="py-1 px-2 text-center font-sans">
+                      <React.Fragment key={idx}>
+                        <tr className="hover:bg-slate-50/70 transition-colors">
+                          <td className="py-2 px-3 text-center text-slate-400 font-sans">{idx + 1}</td>
+                          <td className="py-1 px-1 text-center font-sans">
                             <button
                               type="button"
-                              onClick={() => handleDeleteSientaRow(idx)}
-                              className="p-1 text-slate-400 hover:text-rose-600 rounded transition-all"
-                              title="Delete Row"
+                              onClick={() => setInspectedSientaRow(prev => prev === idx ? null : idx)}
+                              className={`p-1 rounded-lg border transition-all ${
+                                inspectedSientaRow === idx || showAllCrops
+                                  ? 'bg-indigo-100 text-indigo-800 border-indigo-300 font-bold'
+                                  : 'bg-slate-50 text-slate-400 border-slate-200 hover:bg-slate-100 hover:text-slate-600'
+                              }`}
+                              title="Inspect physical ballpoint ink crop"
                             >
-                              <Trash2 className="w-3.5 h-3.5" />
+                              <Eye className="w-3.5 h-3.5" />
                             </button>
                           </td>
+                          <td className="py-1 px-2 font-sans">
+                            {isOfficer ? (
+                              <input
+                                type="text"
+                                value={row.plateNumber}
+                                onChange={(e) => handleSientaChange(idx, 'plateNumber', e.target.value.toUpperCase())}
+                                className="w-full uppercase font-bold text-slate-800 bg-transparent px-2 py-1 rounded border border-transparent hover:border-slate-300 focus:border-indigo-500 focus:bg-white focus:outline-hidden"
+                                placeholder="KXX 000X"
+                              />
+                            ) : (
+                              <span className="font-bold text-slate-800 px-2 py-1">{row.plateNumber}</span>
+                            )}
+                          </td>
+                          {(['operation', 'entrance', 'loanRepay', 'savings', 'sTicket', 'legalFee'] as const).map((field) => (
+                            <td key={field} className="py-1 px-2 text-right">
+                              {isOfficer ? (
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="10"
+                                  value={row[field] || 0}
+                                  onChange={(e) => handleSientaChange(idx, field, e.target.value)}
+                                  className="w-full text-right text-slate-700 bg-transparent px-2 py-1 rounded border border-transparent hover:border-slate-300 focus:border-indigo-500 focus:bg-white focus:outline-hidden font-mono"
+                                />
+                              ) : (
+                                <span className="px-2 py-1 text-slate-700">{(row[field] || 0).toLocaleString()}</span>
+                              )}
+                            </td>
+                          ))}
+                          <td className="py-2 px-3 text-right font-bold text-slate-900">
+                            {((row.operation || 0) + (row.entrance || 0) + (row.loanRepay || 0) + (row.savings || 0) + (row.sTicket || 0) + (row.legalFee || 0)).toLocaleString()}
+                          </td>
+                          {isOfficer && (
+                            <td className="py-1 px-2 text-center font-sans">
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteSientaRow(idx)}
+                                className="p-1 text-slate-400 hover:text-rose-600 rounded transition-all"
+                                title="Delete Row"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </td>
+                          )}
+                        </tr>
+                        {(inspectedSientaRow === idx || showAllCrops) && (
+                          <tr className="bg-indigo-50/40 border-y border-indigo-200">
+                            <td colSpan={isOfficer ? 11 : 10} className="p-3">
+                              <div className="bg-white rounded-xl p-3 border border-indigo-200 shadow-2xs space-y-2">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <div className="flex items-center gap-2">
+                                    <span className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></span>
+                                    <span className="text-xs font-bold text-slate-800">
+                                      Handwritten Ledger Snippet: Row {idx + 1} ({row.plateNumber || 'Blank'})
+                                    </span>
+                                    <span className="text-2xs text-slate-400 font-mono bg-slate-100 px-2 py-0.5 rounded">
+                                      {selectedDate}_Sienta_r{idx + 1}.jpg
+                                    </span>
+                                  </div>
+                                  {((row.operation || 0) + (row.entrance || 0) + (row.loanRepay || 0) + (row.savings || 0) + (row.sTicket || 0) + (row.legalFee || 0)) !== (row.totalAmount || 0) && (
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-rose-100 text-rose-800 border border-rose-200">
+                                        ⚠️ Paper Clerical Mismatch: Sum is {((row.operation || 0) + (row.entrance || 0) + (row.loanRepay || 0) + (row.savings || 0) + (row.sTicket || 0) + (row.legalFee || 0)).toLocaleString()} vs Written {Number(row.totalAmount || 0).toLocaleString()}
+                                      </span>
+                                      {isOfficer && (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleSientaChange(idx, 'totalAmount', (row.operation || 0) + (row.entrance || 0) + (row.loanRepay || 0) + (row.savings || 0) + (row.sTicket || 0) + (row.legalFee || 0))}
+                                          className="text-xs font-semibold px-2 py-0.5 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-all shadow-2xs"
+                                        >
+                                          Balance Total
+                                        </button>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                                <div className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-900/5 p-1 flex justify-center">
+                                  <img
+                                    src={`/api/historical-manifests/crop/${selectedDate}/Sienta/${idx + 1}`}
+                                    alt={`Sienta Row ${idx + 1} authentic ink`}
+                                    className="max-w-full h-auto min-h-[45px] object-contain rounded"
+                                    loading="lazy"
+                                  />
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
                         )}
-                      </tr>
+                      </React.Fragment>
                     ))
                   )}
                 </tbody>
                 <tfoot>
                   <tr className="bg-slate-50 font-bold text-slate-800 border-t-2 border-slate-200 font-mono">
-                    <td colSpan={2} className="py-2.5 px-3 text-right font-sans text-xs">Sienta Subtotal:</td>
+                    <td colSpan={3} className="py-2.5 px-3 text-right font-sans text-xs">Sienta Subtotal:</td>
                     <td className="py-2.5 px-3 text-right">{sientaRows.reduce((s, r) => s + (r.operation || 0), 0).toLocaleString()}</td>
                     <td className="py-2.5 px-3 text-right">{sientaRows.reduce((s, r) => s + (r.entrance || 0), 0).toLocaleString()}</td>
                     <td className="py-2.5 px-3 text-right">{sientaRows.reduce((s, r) => s + (r.loanRepay || 0), 0).toLocaleString()}</td>
@@ -886,6 +1040,68 @@ export default function HistoricalManifestView({
           </div>
         </div>
       </div>
+
+      {/* FOOTER & RECONCILIATION IMAGE MODAL */}
+      {showFooterModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-4xl w-full max-h-[90vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+              <div className="flex items-center gap-2">
+                <Receipt className="w-5 h-5 text-emerald-600" />
+                <h2 className="text-base font-bold text-slate-800">
+                  Physical Ledger Footers, Banking & Expenses — {selectedDate}
+                </h2>
+              </div>
+              <button
+                onClick={() => setShowFooterModal(false)}
+                className="p-1 rounded-lg hover:bg-slate-200 text-slate-500 transition-all cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-6 overflow-y-auto space-y-6">
+              <div>
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
+                  Nissan Collection Sheet Footer (Handwritten Totals & Expense Deductions)
+                </h3>
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-2 flex justify-center overflow-x-auto">
+                  <img
+                    src={`/api/historical-manifests/footer-crop/${selectedDate}/Nissan`}
+                    alt="Nissan Footer Crop"
+                    className="max-w-full h-auto rounded shadow-2xs"
+                    onError={(e) => {
+                      (e.target as HTMLElement).style.display = 'none';
+                    }}
+                  />
+                </div>
+              </div>
+              <div>
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
+                  Sienta Collection Sheet Footer (Handwritten Totals & Grand Vault Banking Slip)
+                </h3>
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-2 flex justify-center overflow-x-auto">
+                  <img
+                    src={`/api/historical-manifests/footer-crop/${selectedDate}/Sienta`}
+                    alt="Sienta Footer Crop"
+                    className="max-w-full h-auto rounded shadow-2xs"
+                    onError={(e) => {
+                      (e.target as HTMLElement).style.display = 'none';
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+            <div className="px-6 py-3 border-t border-slate-200 bg-slate-50 flex justify-end">
+              <button
+                onClick={() => setShowFooterModal(false)}
+                className="px-4 py-2 text-xs font-semibold text-white bg-slate-800 hover:bg-slate-900 rounded-xl transition-all cursor-pointer shadow-xs"
+              >
+                Close Preview
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

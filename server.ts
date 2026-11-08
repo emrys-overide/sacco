@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import path from 'path';
+import fs from 'node:fs';
 import crypto from 'node:crypto';
 import type { Pool } from 'pg';
 import { createDatabasePool } from './database-config.mjs';
@@ -4541,6 +4542,68 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
       } finally {
         client.release();
       }
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  // API 8E: Crop-Alongside-Cell Verification Endpoints
+  app.get('/api/historical-manifests/crop/:date/:fleet/:rowNo', async (req, res) => {
+    try {
+      requireAuthenticatedUser(req);
+      const { date, fleet, rowNo } = req.params;
+      const normalizedFleet = fleet.toLowerCase().includes('nissan') ? 'Nissan' : 'Sienta';
+      const cropFilename = `${date}_${normalizedFleet}_r${rowNo}.jpg`;
+      const possiblePaths = [
+        path.join(process.cwd(), 'public', 'manifest_crops', cropFilename),
+        path.join(process.cwd(), 'dist', 'client', 'manifest_crops', cropFilename),
+        path.join(process.cwd(), 'manifest_crops', cropFilename)
+      ];
+      for (const p of possiblePaths) {
+        if (fs.existsSync(p)) {
+          res.setHeader('Content-Type', 'image/jpeg');
+          res.setHeader('Cache-Control', 'public, max-age=86400');
+          return res.sendFile(p);
+        }
+      }
+      res.status(404).json({ error: 'Crop image not found for this row' });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.get('/api/historical-manifests/footer-crop/:date/:fleet', async (req, res) => {
+    try {
+      requireAuthenticatedUser(req);
+      const { date, fleet } = req.params;
+      const normalizedFleet = fleet.toLowerCase().includes('nissan') ? 'Nissan' : 'Sienta';
+      const cropFilename = `${date}_${normalizedFleet}_footer.jpg`;
+      const possiblePaths = [
+        path.join(process.cwd(), 'public', 'manifest_crops', cropFilename),
+        path.join(process.cwd(), 'dist', 'client', 'manifest_crops', cropFilename),
+        path.join(process.cwd(), 'manifest_crops', cropFilename)
+      ];
+      for (const p of possiblePaths) {
+        if (fs.existsSync(p)) {
+          res.setHeader('Content-Type', 'image/jpeg');
+          res.setHeader('Cache-Control', 'public, max-age=86400');
+          return res.sendFile(p);
+        }
+      }
+      res.status(404).json({ error: 'Footer crop image not found' });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.get('/api/historical-manifests/crops-index', async (req, res) => {
+    try {
+      requireAuthenticatedUser(req);
+      const indexPath = path.join(process.cwd(), 'public', 'manifest_crops', 'manifest_crops_index.json');
+      if (fs.existsSync(indexPath)) {
+        return res.sendFile(indexPath);
+      }
+      res.json({});
     } catch (error: any) {
       sendApiError(res, error);
     }

@@ -59,4 +59,26 @@ test('historical manifests and replica verification', async (t) => {
       assert.equal(Number(r.total_amount), computedTotal, `Total must match sum of individual line fees for row ${r.id}`);
     }
   });
+
+  await t.test('manifest crops index exists and maps dates to physical ledger row crops', () => {
+    const indexPath = path.resolve('public/manifest_crops/manifest_crops_index.json');
+    assert.ok(fs.existsSync(indexPath), 'manifest_crops_index.json must exist in public/manifest_crops');
+
+    const index = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+    const dates = Object.keys(index);
+    assert.ok(dates.length >= 120, 'Must contain index for at least 120 collection dates');
+
+    // Check sample date 2025-11-30
+    const d1130 = index['2025-11-30'];
+    assert.ok(d1130, 'Date 2025-11-30 must be indexed');
+    assert.ok(d1130.Nissan, 'Must have Nissan fleet crops');
+    assert.ok(d1130.Sienta, 'Must have Sienta fleet crops');
+
+    assert.equal(d1130.Nissan.total_rows, 27);
+    assert.equal(d1130.Sienta.total_rows, 40);
+
+    // Verify physical file exists on disk
+    const sampleCrop = path.resolve('public/manifest_crops', d1130.Nissan.rows['1'].file);
+    assert.ok(fs.existsSync(sampleCrop), `Crop file must exist: ${sampleCrop}`);
+  });
 });

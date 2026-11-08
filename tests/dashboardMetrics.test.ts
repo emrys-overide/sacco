@@ -5,13 +5,13 @@ import type { Transaction, Vehicle, Member } from '../src/types.ts';
 
 test('dashboardMetrics temporal scoping and accurate calculations', async (t) => {
   const dummyVehicles: Vehicle[] = [
-    { id: 'v1', plateNumber: 'KAA 001A', status: 'Active', capacity: 14, route: 'Town', ownerId: 'm1' },
-    { id: 'v2', plateNumber: 'KBB 002B', status: 'Active', capacity: 14, route: 'Town', ownerId: 'm2' }
+    { id: 'v1', plateNumber: 'KAA 001A', status: 'Active', capacity: 14, route: 'Town', ownerId: 'm1', ownerName: 'Alice', driverName: 'Driver 1', driverPhone: '0700000001', dateRegistered: '2026-01-01' },
+    { id: 'v2', plateNumber: 'KBB 002B', status: 'Active', capacity: 14, route: 'Town', ownerId: 'm2', ownerName: 'Bob', driverName: 'Driver 2', driverPhone: '0700000002', dateRegistered: '2026-01-01' }
   ];
 
   const dummyMembers: Member[] = [
-    { id: 'm1', name: 'Alice Member', memberNumber: 'SWT-001', phone: '0711111111', status: 'Active', sharesAmount: 5000, savingsAmount: 10000 },
-    { id: 'm2', name: 'Bob Member', memberNumber: 'SWT-002', phone: '0722222222', status: 'Active', sharesAmount: 5000, savingsAmount: 10000 }
+    { id: 'm1', name: 'Alice Member', membershipNumber: 'SWT-001', phoneNumber: '0711111111', idNumber: '11111111', dateRegistered: '2026-01-01', status: 'Active', sharesAmount: 5000, savingsAmount: 10000 },
+    { id: 'm2', name: 'Bob Member', membershipNumber: 'SWT-002', phoneNumber: '0722222222', idNumber: '22222222', dateRegistered: '2026-01-01', status: 'Active', sharesAmount: 5000, savingsAmount: 10000 }
   ];
 
   const transactions: Transaction[] = [
