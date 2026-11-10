@@ -80,6 +80,14 @@ import {
   type CoopReconciliationStatus,
   type NormalizedCoopEvent
 } from './src/server/coopBankIpn';
+import {
+  MpesaError,
+  initiateStkPush,
+  loadMpesaConfig,
+  matchMpesaReference,
+  parseMpesaC2bPayload,
+  parseMpesaStkCallback
+} from './src/server/mpesaDaraja';
 import type {
   CoopBankEvent,
   Member,
@@ -4827,6 +4835,94 @@ export async function createSaccoApp(options: SaccoAppOptions = {}) {
   app.post('/api/webhooks/coop-bank/b2b-ipn', receiveCoopBankIpn);
   app.all(['/api/integrations/coop/ipn', '/api/webhooks/coop-bank/b2b-ipn'], (_req, res) => {
     res.status(405).json({ MessageCode: '405', Message: 'Method not allowed' });
+  });
+
+  // --- M-Pesa Daraja Integration Endpoints ---
+  app.post('/api/mpesa/stk-push', authenticateSaccoUser, async (req, res) => {
+    try {
+      const { phone, amount, accountReference, transactionDesc } = req.body || {};
+      const result = await initiateStkPush({
+        phone: String(phone || ''),
+        amount: Number(amount || 0),
+        accountReference: String(accountReference || ''),
+        transactionDesc: String(transactionDesc || '')
+      });
+      res.json({ success: true, result });
+    } catch (error: any) {
+      sendApiError(res, error);
+    }
+  });
+
+  app.post('/api/mpesa/callback', async (req, res) => {
+    try {
+      console.info('[M-Pesa STK Callback Received]', JSON.stringify(req.body));
+      const parsed = parseMpesaStkCallback(req.body);
+      if (parsed.isSuccess && parsed.amount > 0) {
+        const [members, vehicles] = await Promise.all([getAllMembers(), getAllVehicles()]);
+        const match = matchMpesaReference(parsed.accountReference, members, vehicles);
+        const record: PaymentRecord = {
+          id: `mpesa-${crypto.randomUUID()}`,
+          timestamp: parsed.transactionTime,
+          source: 'Webhook',
+          status: 'Pending',
+          refCode: parsed.transId,
+          amount: parsed.amount,
+          tillNumber: 'VehicleTill',
+          category: 'Daily Contribution',
+          accountReference: parsed.accountReference || parsed.transId,
+          payerName: match.memberName || 'M-Pesa Payer',
+          payerPhone: parsed.phoneNumber,
+          memberId: match.memberId,
+          memberName: match.memberName,
+          vehiclePlate: match.vehiclePlate,
+          matchMethod: match.matchMethod,
+          rawPayload: req.body
+        };
+        await savePaymentRecord(record);
+      }
+      res.status(200).json({ ResultCode: 0, ResultDesc: 'Callback processed successfully' });
+    } catch (error: any) {
+      console.warn('[M-Pesa Callback Error]', error?.message);
+      res.status(200).json({ ResultCode: 0, ResultDesc: 'Callback received with warnings' });
+    }
+  });
+
+  app.post('/api/mpesa/c2b/validation', async (_req, res) => {
+    res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
+  });
+
+  app.post('/api/mpesa/c2b/confirmation', async (req, res) => {
+    try {
+      console.info('[M-Pesa C2B Confirmation Received]', JSON.stringify(req.body));
+      const parsed = parseMpesaC2bPayload(req.body);
+      if (parsed.isSuccess && parsed.amount > 0) {
+        const [members, vehicles] = await Promise.all([getAllMembers(), getAllVehicles()]);
+        const match = matchMpesaReference(parsed.accountReference, members, vehicles);
+        const record: PaymentRecord = {
+          id: `mpesa-${crypto.randomUUID()}`,
+          timestamp: parsed.transactionTime,
+          source: 'Webhook',
+          status: 'Pending',
+          refCode: parsed.transId,
+          amount: parsed.amount,
+          tillNumber: 'VehicleTill',
+          category: 'Daily Contribution',
+          accountReference: parsed.accountReference || parsed.transId,
+          payerName: match.memberName || 'M-Pesa Payer',
+          payerPhone: parsed.phoneNumber,
+          memberId: match.memberId,
+          memberName: match.memberName,
+          vehiclePlate: match.vehiclePlate,
+          matchMethod: match.matchMethod,
+          rawPayload: req.body
+        };
+        await savePaymentRecord(record);
+      }
+      res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
+    } catch (error: any) {
+      console.warn('[M-Pesa C2B Error]', error?.message);
+      res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
+    }
   });
 
   app.use((error: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
