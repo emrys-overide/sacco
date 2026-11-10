@@ -7,6 +7,8 @@ export interface MpesaConfig {
   consumerKey: string;
   consumerSecret: string;
   shortcode: string;
+  tillNumber?: string;
+  transactionType?: 'CustomerPayBillOnline' | 'CustomerBuyGoodsOnline';
   passkey: string;
   callbackUrl: string;
 }
@@ -53,8 +55,11 @@ export function loadMpesaConfig(env: NodeJS.ProcessEnv = process.env): MpesaConf
   const consumerSecret = String(env.MPESA_CONSUMER_SECRET || 'i2B7NMRUxJmBYMRltQ89u8iqS6SSk3eyQq26Ah7qTcrCSVedHpeBZHsLpbbWLNG9').trim();
   const passkey = String(env.MPESA_PASSKEY || 'bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919').trim();
   const shortcode = String(env.MPESA_SHORTCODE || '174379').trim();
+  const tillNumber = String(env.MPESA_TILL_NUMBER || shortcode).trim();
   const callbackUrl = String(env.MPESA_CALLBACK_URL || 'https://sacco-vq1v.onrender.com/api/mpesa/callback').trim();
   const environment = env.MPESA_ENVIRONMENT === 'production' ? 'production' : 'sandbox';
+  const defaultTxType = env.MPESA_TILL_NUMBER || environment === 'production' ? 'CustomerBuyGoodsOnline' : 'CustomerPayBillOnline';
+  const transactionType = (env.MPESA_TRANSACTION_TYPE as 'CustomerPayBillOnline' | 'CustomerBuyGoodsOnline') || defaultTxType;
   const enabled = Boolean(consumerKey && consumerSecret && shortcode && passkey);
 
   return {
@@ -63,6 +68,8 @@ export function loadMpesaConfig(env: NodeJS.ProcessEnv = process.env): MpesaConf
     consumerKey,
     consumerSecret,
     shortcode,
+    tillNumber,
+    transactionType,
     passkey,
     callbackUrl
   };
@@ -174,10 +181,10 @@ export async function initiateStkPush(
     BusinessShortCode: config.shortcode,
     Password: password,
     Timestamp: timestamp,
-    TransactionType: config.environment === 'sandbox' ? 'CustomerPayBillOnline' : 'CustomerBuyGoodsOnline',
+    TransactionType: config.transactionType || (config.environment === 'sandbox' ? 'CustomerPayBillOnline' : 'CustomerBuyGoodsOnline'),
     Amount: amount,
     PartyA: formattedPhone,
-    PartyB: config.shortcode,
+    PartyB: config.tillNumber || config.shortcode,
     PhoneNumber: formattedPhone,
     CallBackURL: config.callbackUrl,
     AccountReference: String(params.accountReference || 'SOWE-SACCO').trim().slice(0, 12),

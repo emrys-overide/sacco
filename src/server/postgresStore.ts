@@ -1013,11 +1013,11 @@ export async function savePostgresPayment(pool: Pool | PoolClient, payment: Paym
          reconciled_at = CASE WHEN EXCLUDED.status = 'Reconciled' THEN now() ELSE mpesa_payments.reconciled_at END
        RETURNING *`,
       [
-        payment.refCode, payment.accountReference, '400200',
+        payment.refCode, payment.accountReference, process.env.MPESA_TILL_NUMBER || process.env.MPESA_SHORTCODE || '400200',
         payment.payerPhone, payment.payerName, payment.tillNumber, payment.amount, payment.timestamp,
         payment.status, MATCH_TO_DB[payment.matchMethod], payment.memberId || null, payment.destinationAccount || null, payment.vehiclePlate || '',
         payment.transactionId || null, JSON.stringify(payment.rawPayload || {}),
-        'Manual', JSON.stringify(metadata)
+        payment.source === 'Webhook' ? 'DarajaWebhook' : 'Manual', JSON.stringify(metadata)
       ]
     );
     return mapPayment(result.rows[0]);
@@ -1151,39 +1151,26 @@ export async function completeStkTransaction(
     const memberName = memberResult.rows[0]?.full_name || 'Member';
 
     let hasActiveLoanRow = false;
+    let activeLoanId: string | null = null;
+    let newLoanStatus: 'Cleared' | 'Active' = 'Active';
+
     if (tx.transaction_type === 'LOAN_REPAYMENT') {
       const activeLoan = await client.query(
-        `SELECT id, remaining_balance FROM loans
-          WHERE member_id = $1 AND status IN ('Active', 'Approved')
-          ORDER BY created_at DESC LIMIT 1`,
+        `SELECT l.id, l.principal_amount, l.interest_rate,
+                COALESCE((SELECT SUM(lr.amount) FROM loan_repayments lr WHERE lr.loan_id = l.id), 0) AS repaid_amount
+           FROM loans l
+          WHERE l.member_id = $1 AND l.status IN ('Active', 'Approved')
+          ORDER BY l.created_at DESC LIMIT 1`,
         [tx.member_id]
       );
       if (activeLoan.rows[0]) {
         hasActiveLoanRow = true;
-        const loanId = activeLoan.rows[0].id;
-        const currentBal = Number(activeLoan.rows[0].remaining_balance);
+        activeLoanId = String(activeLoan.rows[0].id);
+        const totalPayable = Number(activeLoan.rows[0].principal_amount) * (1 + Number(activeLoan.rows[0].interest_rate) / 100);
+        const currentBal = Math.max(0, totalPayable - Number(activeLoan.rows[0].repaid_amount));
         const newBal = Math.max(0, currentBal - effectiveAmount);
-        const newStatus = newBal <= 0 ? 'Cleared' : 'Active';
-        await client.query(
-          `UPDATE loans SET remaining_balance = $1, status = $2, updated_at = now() WHERE id = $3`,
-          [newBal, newStatus, loanId]
-        );
-        await client.query(
-          `INSERT INTO loan_repayments (
-             loan_id, amount, payment_method, reference_code, notes
-           ) VALUES ($1, $2, 'M-Pesa', $3, 'STK Push Collection')`,
-          [loanId, effectiveAmount, input.mpesaReceiptNumber]
-        );
+        newLoanStatus = newBal <= 0 ? 'Cleared' : 'Active';
       }
-      await client.query(
-        `UPDATE members
-           SET loan_balance = GREATEST(0, COALESCE(loan_balance, 0) - $1),
-               last_daily_collection_at = now(),
-               inactivity_warned_at = NULL,
-               updated_at = now()
-           WHERE id = $2`,
-        [effectiveAmount, tx.member_id]
-      );
     }
 
     let ledgerEntryId: string | null = null;
@@ -1216,7 +1203,7 @@ export async function completeStkTransaction(
        ) VALUES (
          current_date, now(), 'Credit', $1, $2, $3, $4,
          (SELECT id FROM vehicles WHERE upper(replace(plate_number, ' ', '')) = upper(replace($5, ' ', '')) LIMIT 1),
-         $6, $7, 'Webhook', 'Posted', $8::jsonb
+         $6, $7, 'DarajaWebhook', 'Posted', $8::jsonb
        ) RETURNING id`,
       [
         accountType,
@@ -1230,6 +1217,93 @@ export async function completeStkTransaction(
       ]
     );
     ledgerEntryId = String(ledgerResult.rows[0].id);
+
+    if (tx.transaction_type === 'LOAN_REPAYMENT') {
+      if (hasActiveLoanRow && activeLoanId) {
+        await client.query(
+          `UPDATE loans SET status = $1, updated_at = now() WHERE id = $2`,
+          [newLoanStatus, activeLoanId]
+        );
+        await client.query(
+          `INSERT INTO loan_repayments (
+             loan_id, ledger_entry_id, repayment_date, amount
+           ) VALUES ($1, $2, current_date, $3)
+           ON CONFLICT (ledger_entry_id) DO NOTHING`,
+          [activeLoanId, ledgerEntryId, effectiveAmount]
+        );
+      }
+      await client.query(
+        `UPDATE members
+           SET loan_balance = GREATEST(0, COALESCE(loan_balance, 0) - $1),
+               last_daily_collection_at = now(),
+               inactivity_warned_at = NULL,
+               status = CASE WHEN status = 'Pending' THEN 'Active'::member_status ELSE status END,
+               updated_at = now()
+           WHERE id = $2`,
+        [effectiveAmount, tx.member_id]
+      );
+    } else {
+      await client.query(
+        `INSERT INTO savings_accounts (member_id, balance, updated_at)
+         VALUES ($1, $2, now())
+         ON CONFLICT (member_id) DO UPDATE
+           SET balance = savings_accounts.balance + EXCLUDED.balance,
+               updated_at = now()`,
+        [tx.member_id, effectiveAmount]
+      );
+      await client.query(
+        `UPDATE members
+           SET last_daily_collection_at = now(),
+               inactivity_warned_at = NULL,
+               status = CASE WHEN status = 'Pending' THEN 'Active'::member_status ELSE status END,
+               updated_at = now()
+           WHERE id = $1`,
+        [tx.member_id]
+      );
+    }
+
+    const activeShortcode = process.env.MPESA_TILL_NUMBER || process.env.MPESA_SHORTCODE || '174379';
+    const paymentMeta = {
+      category: tx.transaction_type === 'SAVINGS' ? 'Savings Contribution' : 'Daily Contribution',
+      accountType,
+      memberName,
+      vehiclePlate,
+      checkoutRequestId: input.checkoutRequestId
+    };
+    await client.query(
+      `INSERT INTO mpesa_payments (
+         trans_id, bill_ref_number, business_short_code, msisdn, payer_name, till_type,
+         amount, transaction_time, status, match_method, matched_member_id,
+         matched_vehicle_id, ledger_entry_id, raw_payload, source, reconciled_at, metadata
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6,
+         $7, now(), 'Reconciled', 'PhoneNumber', $8,
+         (SELECT id FROM vehicles WHERE upper(replace(plate_number, ' ', '')) = upper(replace($9, ' ', '')) LIMIT 1),
+         $10, $11::jsonb, 'DarajaWebhook', now(), $12::jsonb
+       )
+       ON CONFLICT (trans_id) DO UPDATE SET
+         status = 'Reconciled',
+         match_method = 'PhoneNumber',
+         matched_member_id = EXCLUDED.matched_member_id,
+         matched_vehicle_id = COALESCE(EXCLUDED.matched_vehicle_id, mpesa_payments.matched_vehicle_id),
+         ledger_entry_id = EXCLUDED.ledger_entry_id,
+         reconciled_at = now(),
+         metadata = EXCLUDED.metadata`,
+      [
+        input.mpesaReceiptNumber,
+        tx.account_reference,
+        activeShortcode,
+        tx.phone_number,
+        memberName,
+        tillType,
+        effectiveAmount,
+        tx.member_id,
+        vehiclePlate,
+        ledgerEntryId,
+        JSON.stringify({ checkoutRequestId: input.checkoutRequestId, mpesaReceiptNumber: input.mpesaReceiptNumber }),
+        JSON.stringify(paymentMeta)
+      ]
+    );
 
     const mergedMetadata = {
       ...txMetadata,

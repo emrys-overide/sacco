@@ -7,6 +7,8 @@ export interface DarajaConfig {
   consumerSecret: string;
   passkey: string;
   shortcode: string;
+  tillNumber: string;
+  transactionType: 'CustomerPayBillOnline' | 'CustomerBuyGoodsOnline';
   callbackUrl: string;
 }
 
@@ -55,12 +57,25 @@ export interface MpesaCallbackPayload {
 let cachedToken: { token: string; expiresAt: number } | null = null;
 
 export function getDarajaConfig(): DarajaConfig {
+  const environment = (process.env.MPESA_ENVIRONMENT as 'sandbox' | 'production') || 'sandbox';
+  const shortcode = (process.env.MPESA_SHORTCODE || '174379').trim();
+  const tillNumber = (process.env.MPESA_TILL_NUMBER || shortcode).trim();
+  const defaultTxType =
+    process.env.MPESA_TILL_NUMBER || environment === 'production'
+      ? 'CustomerBuyGoodsOnline'
+      : 'CustomerPayBillOnline';
+  const transactionType =
+    (process.env.MPESA_TRANSACTION_TYPE as 'CustomerPayBillOnline' | 'CustomerBuyGoodsOnline') ||
+    defaultTxType;
+
   return {
-    environment: (process.env.MPESA_ENVIRONMENT as 'sandbox' | 'production') || 'sandbox',
-    consumerKey: process.env.MPESA_CONSUMER_KEY || 'vI0Bis5GmtBHEKrRD12oLH4PSBwpjbrDAq7jS0NU3FeRWtNR',
-    consumerSecret: process.env.MPESA_CONSUMER_SECRET || 'i2B7NMRUxJmBYMRltQ89u8iqS6SSk3eyQq26Ah7qTcrCSVedHpeBZHsLpbbWLNG9',
-    passkey: process.env.MPESA_PASSKEY || 'bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919',
-    shortcode: process.env.MPESA_SHORTCODE || '174379', // 174379 is the standard Daraja sandbox shortcode
+    environment,
+    consumerKey: (process.env.MPESA_CONSUMER_KEY || 'vI0Bis5GmtBHEKrRD12oLH4PSBwpjbrDAq7jS0NU3FeRWtNR').trim(),
+    consumerSecret: (process.env.MPESA_CONSUMER_SECRET || 'i2B7NMRUxJmBYMRltQ89u8iqS6SSk3eyQq26Ah7qTcrCSVedHpeBZHsLpbbWLNG9').trim(),
+    passkey: (process.env.MPESA_PASSKEY || 'bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919').trim(),
+    shortcode,
+    tillNumber,
+    transactionType,
     callbackUrl:
       process.env.MPESA_CALLBACK_URL ||
       `${process.env.APP_BASE_URL || 'https://sacco-vq1v.onrender.com'}/api/v1/mpesa/callback`
@@ -180,10 +195,10 @@ export async function initiateStkPush(
     BusinessShortCode: config.shortcode,
     Password: password,
     Timestamp: timestamp,
-    TransactionType: 'CustomerPayBillOnline',
+    TransactionType: config.transactionType || 'CustomerPayBillOnline',
     Amount: roundedAmount,
     PartyA: normalizedPhone,
-    PartyB: config.shortcode,
+    PartyB: config.tillNumber || config.shortcode,
     PhoneNumber: normalizedPhone,
     CallBackURL: config.callbackUrl,
     AccountReference: (params.accountReference || 'SACCO').slice(0, 12),

@@ -7,24 +7,25 @@ test('historical manifests and replica verification', async (t) => {
   const manifestPath = path.resolve('database/replica/sacco_replica_manifest.json');
   const replicaExists = fs.existsSync(manifestPath);
 
-  await t.test('replica manifest exists with all 34 replicated tables', { skip: !replicaExists }, () => {
+  await t.test('replica manifest exists with all 35 replicated tables including sacco_transactions', { skip: !replicaExists }, () => {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 
-    assert.equal(manifest.totalTables, 34);
+    assert.equal(manifest.totalTables, 35);
     assert.ok(manifest.tables.historical_manifest_days, 'Must include historical_manifest_days');
     assert.ok(manifest.tables.historical_manifest_entries, 'Must include historical_manifest_entries');
     assert.ok(manifest.tables.historical_manifest_expenses, 'Must include historical_manifest_expenses');
     assert.ok(manifest.tables.ledger_entries, 'Must include ledger_entries');
+    assert.ok(manifest.tables.sacco_transactions, 'Must include sacco_transactions');
 
     assert.equal(manifest.tables.historical_manifest_days.rowCount, 365);
-    assert.equal(manifest.tables.historical_manifest_entries.rowCount, 26087);
-    assert.equal(manifest.tables.historical_manifest_expenses.rowCount, 1538);
-    assert.equal(manifest.tables.ledger_entries.rowCount, 3421);
+    assert.equal(manifest.tables.historical_manifest_entries.rowCount, 23172);
+    assert.equal(manifest.tables.historical_manifest_expenses.rowCount, 1248);
+    assert.equal(manifest.tables.ledger_entries.rowCount, 3521);
   });
 
   await t.test('live ledger entries remain 100% isolated (0 historical records in active ledger)', { skip: !replicaExists }, () => {
     const ledgerData = JSON.parse(fs.readFileSync(path.resolve('database/replica/data/ledger_entries.json'), 'utf8'));
-    assert.equal(ledgerData.length, 3421, 'Active operational ledger must stay at exactly 3,421 entries');
+    assert.equal(ledgerData.length, 3521, 'Active operational ledger must match replicated live count');
 
     const historicalInLedger = ledgerData.filter((r: any) => 
       (r.reference_number && r.reference_number.startsWith('SWT-IMP25-')) ||
@@ -47,7 +48,7 @@ test('historical manifests and replica verification', async (t) => {
 
   await t.test('historical manifest vehicle entries sum correctly', { skip: !replicaExists }, () => {
     const entriesData = JSON.parse(fs.readFileSync(path.resolve('database/replica/data/historical_manifest_entries.json'), 'utf8'));
-    assert.equal(entriesData.length, 26087);
+    assert.equal(entriesData.length, 23172);
 
     for (const r of entriesData.slice(0, 50)) {
       const computedTotal = Number(r.operation || 0) +

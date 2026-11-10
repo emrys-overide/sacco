@@ -18,7 +18,7 @@ function databaseSsl(env = process.env) {
 }
 
 export function createDatabasePool(env = process.env) {
-  if (env.ALLOW_IN_MEMORY_DB === 'true') return null;
+  if (env.SACCO_TEST_MODE === 'true') return null;
   const connectionString = databaseUrl(env);
   if (!connectionString) return null;
   return new Pool({
