@@ -10,6 +10,7 @@ import LoginModal from './components/LoginModal';
 import Sidebar from './components/Sidebar';
 import PwaInstallPrompt from './components/PwaInstallPrompt';
 import NotificationCenter from './components/NotificationCenter';
+import MemberPortal from './components/MemberPortal';
 
 const GlobalSearchResultsView = lazy(() => import('./components/GlobalSearchResultsView'));
 const DashboardView = lazy(() => import('./components/DashboardView'));
@@ -21,7 +22,6 @@ const HistoricalManifestView = lazy(() => import('./components/HistoricalManifes
 const BlueprintView = lazy(() => import('./components/BlueprintView'));
 const ExpensesView = lazy(() => import('./components/ExpensesView'));
 const CoopBankView = lazy(() => import('./components/CoopBankView'));
-const MemberPortal = lazy(() => import('./components/MemberPortal'));
 const OfficerAccountsView = lazy(() => import('./components/OfficerAccountsView'));
 const ChairmanRecoveryView = lazy(() => import('./components/ChairmanRecoveryView'));
 const LoansView = lazy(() => import('./components/LoansView'));
@@ -104,17 +104,37 @@ export default function App() {
     let active = true;
     async function loadSaccoData() {
       try {
-        setIsLoading(true);
         if (currentUser.role === 'Member') {
+          if (!memberPortal) {
+            try {
+              const cached = sessionStorage.getItem('sacco_member_portal_' + currentUser.id);
+              if (cached) {
+                const parsed = JSON.parse(cached);
+                setMemberPortal(parsed);
+                setMembers([parsed.member]);
+                setVehicles(parsed.vehicles);
+                setTransactions(parsed.transactions);
+              } else {
+                setIsLoading(true);
+              }
+            } catch {
+              setIsLoading(true);
+            }
+          }
           const portal = await fetchSaccoJson<MemberPortalData>('/api/member-portal', {}, authToken);
           if (active) {
             setMemberPortal(portal);
+            try {
+              sessionStorage.setItem(`sacco_member_portal_${currentUser.id}`, JSON.stringify(portal));
+            } catch {}
             setMembers([portal.member]);
             setVehicles(portal.vehicles);
             setTransactions(portal.transactions);
           }
           return;
         }
+
+        setIsLoading(true);
         const [mData, vData, tData] = await Promise.all([
           fetchSaccoJson<Member[]>('/api/members', {}, authToken),
           fetchSaccoJson<Vehicle[]>('/api/vehicles', {}, authToken),
@@ -194,13 +214,32 @@ export default function App() {
   };
 
   const handleLogin = (user: User, token: string) => {
+    if (user.role === 'Member') {
+      try {
+        const cached = sessionStorage.getItem('sacco_member_portal_' + user.id);
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          setMemberPortal(parsed);
+          setMembers([parsed.member]);
+          setVehicles(parsed.vehicles);
+          setTransactions(parsed.transactions);
+          setIsLoading(false);
+        }
+      } catch {}
+    }
     setCurrentUser(user);
     setCurrentTab(user.role === 'Member' ? 'My Account' : 'Dashboard');
     setAuthToken(token);
   };
 
   const handleLogout = () => {
+    if (currentUser?.id) {
+      try {
+        sessionStorage.removeItem(`sacco_member_portal_${currentUser.id}`);
+      } catch {}
+    }
     setCurrentUser(null);
+    setMemberPortal(null);
     setAuthToken('');
   };
 
@@ -465,6 +504,27 @@ export default function App() {
 
   // Render correct view based on navigation tab
   const renderViewContent = () => {
+    if (currentUser.role === 'Member') {
+      return memberPortal ? (
+        <MemberPortal
+          data={memberPortal}
+          token={authToken}
+          currentUser={currentUser}
+          onApplicationCreated={handleRefreshData}
+          onAccountSuspended={handleLogout}
+          onLogout={handleLogout}
+        />
+      ) : (
+        <div className="min-h-dvh flex flex-col items-center justify-center bg-slate-950 p-6 text-center space-y-4">
+          <div className="w-12 h-12 rounded-full border-4 border-emerald-500/20 border-t-emerald-400 animate-spin" />
+          <div>
+            <h2 className="text-white font-bold text-base tracking-wide">M-SACCO</h2>
+            <p className="text-emerald-400/80 text-xs mt-1">Connecting to your member portal...</p>
+          </div>
+        </div>
+      );
+    }
+
     if (isLoading) {
       return (
         <div className="flex-1 flex flex-col items-center justify-center bg-slate-50 p-8 space-y-4">
@@ -477,23 +537,6 @@ export default function App() {
           <p className="text-xs font-mono text-slate-500 uppercase tracking-widest animate-pulse">
             Connecting Ledger Node...
           </p>
-        </div>
-      );
-    }
-
-    if (currentUser.role === 'Member') {
-      return memberPortal ? (
-        <MemberPortal
-          data={memberPortal}
-          token={authToken}
-          currentUser={currentUser}
-          onApplicationCreated={handleRefreshData}
-          onAccountSuspended={handleLogout}
-          onLogout={handleLogout}
-        />
-      ) : (
-        <div className="min-h-dvh flex items-center justify-center bg-slate-950 text-sm font-bold text-emerald-200">
-          Loading your M-Sacco mobile account...
         </div>
       );
     }
@@ -640,15 +683,7 @@ export default function App() {
     return (
       <div className="w-full min-h-dvh font-sans text-slate-900 relative">
         <PwaInstallPrompt showInstallButton={false} />
-        <Suspense
-          fallback={
-            <div className="min-h-dvh flex items-center justify-center bg-slate-950 text-xs font-bold uppercase tracking-widest text-emerald-300">
-              Loading M-Sacco Mobile App...
-            </div>
-          }
-        >
-          {renderViewContent()}
-        </Suspense>
+        {renderViewContent()}
       </div>
     );
   }

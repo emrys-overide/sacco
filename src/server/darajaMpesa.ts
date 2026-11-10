@@ -57,13 +57,13 @@ let cachedToken: { token: string; expiresAt: number } | null = null;
 export function getDarajaConfig(): DarajaConfig {
   return {
     environment: (process.env.MPESA_ENVIRONMENT as 'sandbox' | 'production') || 'sandbox',
-    consumerKey: process.env.MPESA_CONSUMER_KEY || '',
-    consumerSecret: process.env.MPESA_CONSUMER_SECRET || '',
-    passkey: process.env.MPESA_PASSKEY || '',
+    consumerKey: process.env.MPESA_CONSUMER_KEY || 'vI0Bis5GmtBHEKrRD12oLH4PSBwpjbrDAq7jS0NU3FeRWtNR',
+    consumerSecret: process.env.MPESA_CONSUMER_SECRET || 'i2B7NMRUxJmBYMRltQ89u8iqS6SSk3eyQq26Ah7qTcrCSVedHpeBZHsLpbbWLNG9',
+    passkey: process.env.MPESA_PASSKEY || 'bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919',
     shortcode: process.env.MPESA_SHORTCODE || '174379', // 174379 is the standard Daraja sandbox shortcode
     callbackUrl:
       process.env.MPESA_CALLBACK_URL ||
-      `${process.env.APP_BASE_URL || 'https://sacco.onrender.com'}/api/v1/mpesa/callback`
+      `${process.env.APP_BASE_URL || 'https://sacco-vq1v.onrender.com'}/api/v1/mpesa/callback`
   };
 }
 
@@ -153,7 +153,7 @@ export async function initiateStkPush(
   const timestamp = getDarajaTimestamp();
 
   // If no passkey or credentials in sandbox/local, return a mock STK push result
-  if (!config.consumerKey || !config.consumerSecret || !config.passkey) {
+  if (process.env.SACCO_TEST_MODE === 'true' || !config.consumerKey || !config.consumerSecret || !config.passkey) {
     if (config.environment === 'production') {
       throw new Error('Production Daraja configuration missing consumerKey, consumerSecret, or passkey.');
     }
@@ -229,7 +229,7 @@ export async function queryDarajaStkStatus(
 ): Promise<StkQueryResult> {
   const timestamp = getDarajaTimestamp();
 
-  if (!config.consumerKey || !config.consumerSecret || !config.passkey) {
+  if (process.env.SACCO_TEST_MODE === 'true' || !config.consumerKey || !config.consumerSecret || !config.passkey) {
     return {
       merchantRequestId: 'MOCK_MERCHANT',
       checkoutRequestId,
