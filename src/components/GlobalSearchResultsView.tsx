@@ -61,6 +61,7 @@ export default function GlobalSearchResultsView({
   // 1. Filter Members
   const filteredMembers = members.filter(m => 
     m.name.toLowerCase().includes(normalizedQuery) ||
+    m.membershipNumber?.toLowerCase().includes(normalizedQuery) ||
     m.phoneNumber.toLowerCase().includes(normalizedQuery) ||
     m.idNumber.toLowerCase().includes(normalizedQuery) ||
     m.status.toLowerCase().includes(normalizedQuery) ||
@@ -181,7 +182,7 @@ export default function GlobalSearchResultsView({
             <ul className="text-[11px] text-slate-600 list-disc list-inside space-y-1">
               <li>Check your spelling (e.g. "Matatu", "Ref").</li>
               <li>Search for exact license plates like <code className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono">KCJ</code>.</li>
-              <li>Search for transaction M-Pesa IDs like <code className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono">QRT</code>.</li>
+              <li>Search for transaction bank references like <code className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono">QRT</code>.</li>
               <li>Filter by status e.g. <code className="bg-slate-200 text-slate-800 px-1 py-0.5 rounded font-mono">Active</code> or category names.</li>
             </ul>
           </div>
@@ -205,7 +206,7 @@ export default function GlobalSearchResultsView({
                   <div key={member.id} className="bg-white border border-slate-200 rounded-2xl p-5 hover:border-emerald-600 hover:shadow-md transition-all flex flex-col justify-between space-y-4">
                     <div className="space-y-1.5">
                       <div className="flex items-center justify-between">
-                        <span className="text-[9px] font-mono font-bold text-slate-400 uppercase">ID: {member.id}</span>
+                        <span className="text-[9px] font-mono font-bold text-emerald-700 uppercase">Member No. {highlightText(member.membershipNumber || 'Not assigned', query)}</span>
                         <span className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-full ${
                           member.status === 'Active' ? 'bg-emerald-100 text-emerald-800' :
                           member.status === 'Pending' ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-600'
@@ -379,7 +380,7 @@ export default function GlobalSearchResultsView({
                               {highlightText(tx.recorderName, query)}
                             </span>
                             <span className="text-[8px] font-mono text-slate-400 uppercase tracking-widest block font-bold">
-                              {tx.tillNumber === 'VehicleTill' ? '🚜 VEHICLE TILL' : tx.tillNumber === 'UtilityTill' ? '🏢 CENTRAL UTILITY' : '💼 CASH TILL'}
+                              {tx.tillNumber === 'VehicleTill' ? '🏦 OPERATIONS 48277' : tx.tillNumber === 'UtilityTill' ? '💰 SAVINGS 871671' : '💼 CASH DRAWER'}
                             </span>
                           </td>
                           <td className="p-4 text-right">

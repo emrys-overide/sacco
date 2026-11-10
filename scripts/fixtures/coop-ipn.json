@@ -1,0 +1,12 @@
+{
+  "valid-credit": { "AcctNo": "01134248358600", "Amount": "22459.00", "Currency": "KES", "EventType": "CREDIT", "TransactionId": "SIM-CREDIT-001", "PaymentRef": "MEM-001", "Narration": "Member contribution", "PostingDate": "2026-07-17+03:00" },
+  "valid-debit": { "AcctNo": "01134248358600", "Amount": "500.00", "Currency": "KES", "EventType": "DEBIT", "TransactionId": "SIM-DEBIT-001", "PaymentRef": "BANK-FEE", "Narration": "Bank charge", "PostingDate": "2026-07-17+03:00" },
+  "duplicate-credit": { "AcctNo": "01134248358600", "Amount": "22459.00", "Currency": "KES", "EventType": "CREDIT", "TransactionId": "SIM-CREDIT-001", "PaymentRef": "MEM-001", "Narration": "Repeated delivery", "PostingDate": "2026-07-17+03:00" },
+  "unmatched-reference": { "AcctNo": "01134248358600", "Amount": "1000.00", "Currency": "KES", "EventType": "CREDIT", "TransactionId": "SIM-UNMATCHED-001", "PaymentRef": "UNKNOWN-REF", "Narration": "No internal identifier", "PostingDate": "2026-07-17+03:00" },
+  "ambiguous-reference": { "AcctNo": "01134248358600", "Amount": "1000.00", "Currency": "KES", "EventType": "CREDIT", "TransactionId": "SIM-AMBIGUOUS-001", "PaymentRef": "MEM-001", "CustMemoLine1": "MEM-002", "Narration": "Conflicting references", "PostingDate": "2026-07-17+03:00" },
+  "missing-transaction-id": { "AcctNo": "01134248358600", "Amount": "100.00", "Currency": "KES", "EventType": "CREDIT", "PaymentRef": "MEM-001" },
+  "invalid-amount": { "AcctNo": "01134248358600", "Amount": "NaN", "Currency": "KES", "EventType": "CREDIT", "TransactionId": "SIM-BAD-AMOUNT-001" },
+  "wrong-account": { "AcctNo": "99999999999999", "Amount": "100.00", "Currency": "KES", "EventType": "CREDIT", "TransactionId": "SIM-WRONG-ACCOUNT-001" },
+  "invalid-token": { "AcctNo": "01134248358600", "Amount": "100.00", "Currency": "KES", "EventType": "CREDIT", "TransactionId": "SIM-BAD-TOKEN-001", "_invalidToken": true },
+  "unsupported-event": { "AcctNo": "01134248358600", "Amount": "100.00", "Currency": "KES", "EventType": "REVERSAL", "TransactionId": "SIM-UNSUPPORTED-001" }
+}

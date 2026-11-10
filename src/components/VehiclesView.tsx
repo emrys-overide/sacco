@@ -1,363 +1,311 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import { Vehicle, Member, UserRole } from '../types';
-import { Search, Bus, PlusCircle, Wrench, Ban, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { Search, Bus, PlusCircle, Wrench, Ban, CheckCircle2, LogOut, LogIn, Pencil, UserRound, UsersRound } from 'lucide-react';
+import {
+  isValidPersonName,
+  isValidPhoneNumber,
+  sanitizePersonName,
+  sanitizePhoneNumber,
+  sanitizeVehiclePlate
+} from '../lib/inputValidation';
+import { APPROVED_VEHICLE_ROUTES, VEHICLE_CAPACITIES, isApprovedVehicleRoute, isSupportedVehicleCapacity } from '../lib/vehicleRegistration';
+
+type OwnerMode = 'member' | 'other';
+type VehicleDraft = {
+  plateNumber: string;
+  ownerMode: OwnerMode;
+  ownerId: string;
+  ownerName: string;
+  ownerPhone: string;
+  ownerIdNumber: string;
+  driverName: string;
+  driverPhone: string;
+  route: string;
+  capacity: Vehicle['capacity'];
+  dateRegistered: string;
+};
 
 interface VehiclesViewProps {
   vehicles: Vehicle[];
   members: Member[];
-  onAddVehicle: (newVehicle: Omit<Vehicle, 'id'>) => void;
+  onAddVehicle: (newVehicle: Omit<Vehicle, 'id'>) => Promise<void>;
+  onUpdateVehicle: (vehicleId: string, changes: Pick<Vehicle, 'plateNumber' | 'ownerId' | 'ownerName' | 'ownerPhone' | 'ownerIdNumber' | 'driverName' | 'driverPhone' | 'route' | 'capacity' | 'dateRegistered'>) => Promise<void>;
+  onVehicleLifecycle: (vehicleId: string, action: 'onboard' | 'offboard', reason?: string) => Promise<void>;
   currentUserRole: UserRole;
 }
 
-export default function VehiclesView({ vehicles, members, onAddVehicle, currentUserRole }: VehiclesViewProps) {
-  const [searchTerm, setSearchTerm] = useState('');
-  const [routeFilter, setRouteFilter] = useState('All');
-  const [showAddModal, setShowAddModal] = useState(false);
+const emptyDraft = (): VehicleDraft => ({
+  plateNumber: '',
+  ownerMode: 'member',
+  ownerId: '',
+  ownerName: '',
+  ownerPhone: '',
+  ownerIdNumber: '',
+  driverName: '',
+  driverPhone: '',
+  route: APPROVED_VEHICLE_ROUTES[0],
+  capacity: 14,
+  dateRegistered: new Date().toISOString().slice(0, 10)
+});
 
-  // New Vehicle form state
-  const [plateNumber, setPlateNumber] = useState('');
-  const [ownerId, setOwnerId] = useState('');
-  const [driverName, setDriverName] = useState('');
-  const [driverPhone, setDriverPhone] = useState('');
-  const [route, setRoute] = useState('17 Stage & Cabbanas');
-  const [capacity, setCapacity] = useState<7 | 14 | 33 | 50>(14);
-  const [error, setError] = useState('');
-
-  // Role validation
-  const canRegister = currentUserRole === 'Chairman' || currentUserRole === 'Secretary';
-
-  // Extract unique routes for filtering
-  const uniqueRoutes = ['All', ...Array.from(new Set(vehicles.map(v => v.route)))];
-
-  const filteredVehicles = vehicles.filter(vehicle => {
-    const matchesSearch = vehicle.plateNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                          vehicle.driverName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                          vehicle.ownerName.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesRoute = routeFilter === 'All' || vehicle.route === routeFilter;
-    return matchesSearch && matchesRoute;
-  });
-
-  const handleOwnerChange = (nextOwnerId: string) => {
-    setOwnerId(nextOwnerId);
-    const owner = members.find(member => member.id === nextOwnerId);
-    if (owner?.vehicleAssigned?.trim()) {
-      setPlateNumber(owner.vehicleAssigned.trim().toUpperCase());
-    }
-    setError('');
-  };
-
-  const handleCreate = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!plateNumber.trim() || !ownerId || !driverName.trim() || !driverPhone.trim()) {
-      setError('Please fill in all required fields.');
-      return;
-    }
-
-    const owner = members.find(m => m.id === ownerId);
-    if (!owner) {
-      setError('Selected owner is invalid.');
-      return;
-    }
-
-    // Plate format simulation check e.g. KAA 000A or KCJ 402X
-    const plateRegex = /^[Kk][A-Dd][A-Zz]\s?\d{3}[A-Zz]$/;
-    if (!plateRegex.test(plateNumber.trim())) {
-      setError('Invalid Kenyan plate number format (e.g. KCJ 402X or KBB 112L).');
-      return;
-    }
-
-    onAddVehicle({
-      plateNumber: plateNumber.toUpperCase().trim(),
-      ownerId,
-      ownerName: owner.name,
-      driverName: driverName.trim(),
-      driverPhone: driverPhone.trim(),
-      route,
-      status: 'Active',
-      capacity
-    });
-
-    // Reset Form
-    setPlateNumber('');
-    setOwnerId('');
-    setDriverName('');
-    setDriverPhone('');
-    setRoute('17 Stage & Cabbanas');
-    setCapacity(14);
-    setError('');
-    setShowAddModal(false);
-  };
-
-  const getStatusBadge = (status: Vehicle['status']) => {
-    switch (status) {
-      case 'Active':
-        return (
-          <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-emerald-50 text-emerald-700 border border-emerald-200">
-            <CheckCircle2 className="w-3 h-3 mr-1" />
-            Active
-          </span>
-        );
-      case 'Maintenance':
-        return (
-          <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-amber-50 text-amber-700 border border-amber-200">
-            <Wrench className="w-3 h-3 mr-1" />
-            Maintenance
-          </span>
-        );
-      case 'Suspended':
-        return (
-          <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-rose-50 text-rose-700 border border-rose-200">
-            <Ban className="w-3 h-3 mr-1" />
-            Suspended
-          </span>
-        );
-    }
+function VehicleFormFields({ draft, setDraft, members, allowMemberPlatePrefill = false }: {
+  draft: VehicleDraft;
+  setDraft: React.Dispatch<React.SetStateAction<VehicleDraft>>;
+  members: Member[];
+  allowMemberPlatePrefill?: boolean;
+}) {
+  const selectMember = (memberId: string) => {
+    const owner = members.find(member => member.id === memberId);
+    setDraft(current => ({
+      ...current,
+      ownerId: memberId,
+      ownerName: owner?.name || '',
+      plateNumber: allowMemberPlatePrefill && owner?.vehicleAssigned?.trim()
+        ? owner.vehicleAssigned.trim().toUpperCase()
+        : current.plateNumber
+    }));
   };
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 5 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.35, ease: 'easeOut' }}
-      className="flex-1 p-4 sm:p-8 overflow-y-auto bg-slate-50 font-sans flex flex-col space-y-6"
-    >
-      {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between pb-4 border-b border-slate-200 gap-4">
-        <div>
-          <h2 className="text-xl font-bold font-display text-slate-800">Vehicle Fleet Register</h2>
-          <p className="text-xs text-slate-500">Track active matatus, routes, drivers, and capacity configurations</p>
-        </div>
+    <div className="space-y-5">
+      <div className="grid gap-4 sm:grid-cols-2">
+        <label className="block">
+          <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-slate-500">Plate number *</span>
+          <input required value={draft.plateNumber} onChange={event => setDraft(current => ({ ...current, plateNumber: sanitizeVehiclePlate(event.target.value) }))} placeholder="KDA 123A" className="w-full rounded-xl border border-slate-200 px-3 py-2.5 font-mono text-sm font-bold uppercase outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100" />
+        </label>
+        <label className="block">
+          <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-slate-500">Approved route *</span>
+          <select required value={draft.route} onChange={event => setDraft(current => ({ ...current, route: event.target.value }))} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-semibold outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100">
+            {APPROVED_VEHICLE_ROUTES.map(route => <option key={route} value={route}>{route}</option>)}
+          </select>
+        </label>
+      </div>
 
-        {canRegister ? (
-          <button
-            onClick={() => setShowAddModal(true)}
-            id="open-register-vehicle-modal"
-            className="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold rounded uppercase tracking-wider flex items-center space-x-2 shadow-sm self-start md:self-auto"
-          >
-            <Bus className="w-4 h-4" />
-            <span>Onboard New Matatu</span>
-          </button>
+      <fieldset className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
+        <legend className="px-1 text-[10px] font-bold uppercase tracking-widest text-slate-500">Vehicle owner *</legend>
+        <div className="mb-4 grid grid-cols-2 gap-2 rounded-xl bg-slate-200/70 p-1">
+          <button type="button" onClick={() => setDraft(current => ({ ...current, ownerMode: 'member', ownerName: '', ownerPhone: '', ownerIdNumber: '' }))} className={`flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-[11px] font-bold transition ${draft.ownerMode === 'member' ? 'bg-white text-emerald-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><UsersRound className="h-4 w-4" />Registered member</button>
+          <button type="button" onClick={() => setDraft(current => ({ ...current, ownerMode: 'other', ownerId: '', ownerName: '', ownerPhone: '', ownerIdNumber: '' }))} className={`flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-[11px] font-bold transition ${draft.ownerMode === 'other' ? 'bg-white text-sky-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><UserRound className="h-4 w-4" />Other owner</button>
+        </div>
+        {draft.ownerMode === 'member' ? (
+          <label className="block">
+            <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-slate-500">Select SACCO member</span>
+            <select required value={draft.ownerId} onChange={event => selectMember(event.target.value)} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs outline-none focus:border-emerald-600">
+              <option value="">Select a registered member...</option>
+              {members.map(member => <option key={member.id} value={member.id}>{member.membershipNumber} · {member.name}</option>)}
+            </select>
+          </label>
         ) : (
-          <div className="text-[11px] bg-amber-50 border border-amber-200 text-amber-800 px-3 py-1.5 rounded self-start md:self-auto">
-            Role <strong>{currentUserRole}</strong> does not have vehicle registration rights.
+          <div className="grid gap-4 sm:grid-cols-3">
+            <label className="block"><span className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-slate-500">Owner's full name *</span><input required value={draft.ownerName} onChange={event => setDraft(current => ({ ...current, ownerName: sanitizePersonName(event.target.value) }))} placeholder="Owner's full name" pattern="[A-Za-z .'-]+" title="Use letters only." className="w-full rounded-xl border border-sky-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-sky-600" /></label>
+            <label className="block"><span className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-slate-500">Owner phone *</span><input type="tel" required value={draft.ownerPhone} onChange={event => setDraft(current => ({ ...current, ownerPhone: sanitizePhoneNumber(event.target.value) }))} placeholder="0700000000" pattern="[+]?[0-9]{9,15}" className="w-full rounded-xl border border-sky-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-sky-600" /></label>
+            <label className="block"><span className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-slate-500">Owner ID number *</span><input required inputMode="numeric" value={draft.ownerIdNumber} onChange={event => setDraft(current => ({ ...current, ownerIdNumber: event.target.value.replace(/\D/g, '').slice(0, 12) }))} placeholder="National ID" pattern="[0-9]{5,12}" className="w-full rounded-xl border border-sky-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-sky-600" /></label>
+            <p className="text-[10px] text-slate-500 sm:col-span-3">These details identify an owner who is not registered as a SACCO member.</p>
           </div>
         )}
+      </fieldset>
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <label className="block">
+          <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-slate-500">Current driver *</span>
+          <input required value={draft.driverName} onChange={event => setDraft(current => ({ ...current, driverName: sanitizePersonName(event.target.value) }))} placeholder="Driver's full name" pattern="[A-Za-z .'-]+" title="Use letters only." className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-emerald-600" />
+        </label>
+        <label className="block">
+          <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-slate-500">Driver phone *</span>
+          <input type="tel" required value={draft.driverPhone} onChange={event => setDraft(current => ({ ...current, driverPhone: sanitizePhoneNumber(event.target.value) }))} placeholder="0700000000" inputMode="tel" pattern="[+]?[0-9]{9,15}" title="Use a phone number only." className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-emerald-600" />
+        </label>
       </div>
 
-      {/* Fleet Controls */}
-      <div className="bg-white p-4 rounded-lg border border-slate-200 flex flex-col md:flex-row gap-4 items-center justify-between">
-        <div className="relative w-full md:w-72">
-          <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400">
-            <Search className="w-4 h-4" />
-          </span>
-          <input
-            type="text"
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full pl-9 pr-4 py-2 border border-slate-200 rounded text-xs bg-slate-50 focus:outline-none focus:border-emerald-600 focus:bg-white"
-          />
-        </div>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <label className="block">
+          <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-slate-500">Vehicle capacity *</span>
+          <select value={draft.capacity} onChange={event => setDraft(current => ({ ...current, capacity: Number(event.target.value) as Vehicle['capacity'] }))} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs outline-none focus:border-emerald-600">
+            {VEHICLE_CAPACITIES.map(capacity => <option key={capacity} value={capacity}>{capacity}-Seater</option>)}
+          </select>
+        </label>
+        <label className="block"><span className="mb-1.5 block text-[10px] font-bold uppercase tracking-widest text-slate-500">Registration date *</span><input type="date" required max={new Date().toISOString().slice(0, 10)} value={draft.dateRegistered} onChange={event => setDraft(current => ({ ...current, dateRegistered: event.target.value }))} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs outline-none focus:border-emerald-600" /><span className="mt-1.5 block text-[10px] text-slate-500">Use the original date for vehicles that joined earlier.</span></label>
+      </div>
+    </div>
+  );
+}
 
-        <div className="flex space-x-2 overflow-x-auto w-full md:w-auto">
-          {uniqueRoutes.map((route) => (
-            <button
-              key={route}
-              onClick={() => setRouteFilter(route)}
-              className={`px-3 py-1.5 text-xs font-medium rounded whitespace-nowrap transition-colors ${
-                routeFilter === route
-                  ? 'bg-emerald-800 text-white'
-                  : 'bg-slate-100 hover:bg-slate-200 text-slate-600'
-              }`}
-            >
-              {route === 'All' ? 'All Routes' : route.split('(')[0]}
-            </button>
-          ))}
+function validateDraft(draft: VehicleDraft, members: Member[]): string {
+  if (!draft.plateNumber.trim() || !draft.driverName.trim() || !draft.driverPhone.trim()) return 'Fill in every required vehicle and driver field.';
+  if (draft.ownerMode === 'member' && !members.some(member => member.id === draft.ownerId)) return 'Select a valid registered member as the owner.';
+  if (draft.ownerMode === 'other' && !isValidPersonName(draft.ownerName)) return 'Enter a valid vehicle owner name using letters only.';
+  if (draft.ownerMode === 'other' && !isValidPhoneNumber(draft.ownerPhone)) return 'Enter a valid phone number for the unregistered owner.';
+  if (draft.ownerMode === 'other' && !/^\d{5,12}$/.test(draft.ownerIdNumber)) return 'Enter a valid ID number for the unregistered owner.';
+  if (!isValidPersonName(draft.driverName)) return 'Driver name must use letters only.';
+  if (!isValidPhoneNumber(draft.driverPhone)) return 'Enter a valid driver phone number using digits only.';
+  if (!isApprovedVehicleRoute(draft.route)) return 'Select an approved SACCO route.';
+  if (!isSupportedVehicleCapacity(draft.capacity)) return 'Select a supported vehicle capacity.';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(draft.dateRegistered) || draft.dateRegistered > new Date().toISOString().slice(0, 10)) return 'Select a valid registration date that is not in the future.';
+  if (!/^[Kk][A-Dd][A-Zz]\s?\d{3}[A-Zz]$/.test(draft.plateNumber.trim())) return 'Use a valid Kenyan plate number such as KCJ 402X.';
+  return '';
+}
+
+export default function VehiclesView({ vehicles, members, onAddVehicle, onUpdateVehicle, onVehicleLifecycle, currentUserRole }: VehiclesViewProps) {
+  const [searchTerm, setSearchTerm] = useState('');
+  const [routeFilter, setRouteFilter] = useState('All');
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [createDraft, setCreateDraft] = useState<VehicleDraft>(emptyDraft);
+  const [editingVehicle, setEditingVehicle] = useState<Vehicle | null>(null);
+  const [editDraft, setEditDraft] = useState<VehicleDraft>(emptyDraft);
+  const [error, setError] = useState('');
+  const [actionMessage, setActionMessage] = useState('');
+  const [busyVehicleId, setBusyVehicleId] = useState<string | null>(null);
+  const canRegister = currentUserRole === 'Chairman' || currentUserRole === 'Secretary';
+  const routeOptions = ['All', ...Array.from(new Set([...APPROVED_VEHICLE_ROUTES, ...vehicles.map(vehicle => vehicle.route)]))];
+
+  const filteredVehicles = vehicles.filter(vehicle => {
+    const term = searchTerm.toLowerCase();
+    const matchesSearch = vehicle.plateNumber.toLowerCase().includes(term) || vehicle.driverName.toLowerCase().includes(term) || vehicle.ownerName.toLowerCase().includes(term) || vehicle.route.toLowerCase().includes(term);
+    return matchesSearch && (routeFilter === 'All' || vehicle.route === routeFilter);
+  });
+
+  const vehicleChanges = (draft: VehicleDraft) => {
+    const member = draft.ownerMode === 'member' ? members.find(item => item.id === draft.ownerId) : undefined;
+    return {
+      plateNumber: draft.plateNumber.toUpperCase().trim(),
+      ownerId: member?.id || '',
+      ownerName: member?.name || draft.ownerName.trim(),
+      ownerPhone: member?.phoneNumber || draft.ownerPhone.trim(),
+      ownerIdNumber: member?.idNumber || draft.ownerIdNumber.trim(),
+      driverName: draft.driverName.trim(),
+      driverPhone: draft.driverPhone.trim(),
+      route: draft.route,
+      capacity: draft.capacity,
+      dateRegistered: draft.dateRegistered
+    };
+  };
+
+  const handleCreate = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const validationError = validateDraft(createDraft, members);
+    if (validationError) return setError(validationError);
+    try {
+      await onAddVehicle({ ...vehicleChanges(createDraft), status: 'Active' });
+      setCreateDraft(emptyDraft());
+      setError('');
+      setShowAddModal(false);
+      setActionMessage(`${createDraft.plateNumber.toUpperCase().trim()} was registered and onboarded.`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Vehicle registration failed.');
+    }
+  };
+
+  const openEdit = (vehicle: Vehicle) => {
+    setEditingVehicle(vehicle);
+    setEditDraft({
+      plateNumber: vehicle.plateNumber,
+      ownerMode: vehicle.ownerId ? 'member' : 'other',
+      ownerId: vehicle.ownerId,
+      ownerName: vehicle.ownerName,
+      ownerPhone: vehicle.ownerPhone || '',
+      ownerIdNumber: vehicle.ownerIdNumber || '',
+      driverName: vehicle.driverName,
+      driverPhone: vehicle.driverPhone,
+      route: isApprovedVehicleRoute(vehicle.route) ? vehicle.route : APPROVED_VEHICLE_ROUTES[0],
+      capacity: vehicle.capacity,
+      dateRegistered: vehicle.dateRegistered || new Date().toISOString().slice(0, 10)
+    });
+    setError('');
+  };
+
+  const handleEdit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!editingVehicle) return;
+    const validationError = validateDraft(editDraft, members);
+    if (validationError) return setError(validationError);
+    setBusyVehicleId(editingVehicle.id);
+    try {
+      await onUpdateVehicle(editingVehicle.id, vehicleChanges(editDraft));
+      setActionMessage(`${editDraft.plateNumber.toUpperCase().trim()} details were updated.`);
+      setEditingVehicle(null);
+      setError('');
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Vehicle details could not be updated.');
+    } finally {
+      setBusyVehicleId(null);
+    }
+  };
+
+  const handleLifecycle = async (vehicle: Vehicle) => {
+    const action = vehicle.status === 'Exited' ? 'onboard' : 'offboard';
+    let reason = '';
+    if (action === 'offboard') {
+      const response = window.prompt(`Reason for offboarding ${vehicle.plateNumber}? This is optional.`);
+      if (response === null) return;
+      reason = response;
+    }
+    const confirmation = action === 'onboard'
+      ? `Onboard ${vehicle.plateNumber} and allow it to operate again?`
+      : `Offboard ${vehicle.plateNumber}? It will no longer accept collections.`;
+    if (!window.confirm(confirmation)) return;
+    setBusyVehicleId(vehicle.id);
+    setActionMessage('');
+    try {
+      await onVehicleLifecycle(vehicle.id, action, reason);
+      setActionMessage(`${vehicle.plateNumber} was ${action === 'onboard' ? 'onboarded' : 'offboarded'}.`);
+    } catch (caught) {
+      setActionMessage(caught instanceof Error ? caught.message : `The vehicle could not be ${action}ed.`);
+    } finally {
+      setBusyVehicleId(null);
+    }
+  };
+
+  const statusBadge = (status: Vehicle['status']) => {
+    if (status === 'Active') return <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[10px] font-bold uppercase text-emerald-700"><CheckCircle2 className="mr-1 h-3 w-3" />Onboarded</span>;
+    if (status === 'Maintenance') return <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[10px] font-bold uppercase text-amber-700"><Wrench className="mr-1 h-3 w-3" />Maintenance</span>;
+    if (status === 'Suspended') return <span className="inline-flex items-center rounded-full border border-rose-200 bg-rose-50 px-2.5 py-1 text-[10px] font-bold uppercase text-rose-700"><Ban className="mr-1 h-3 w-3" />Suspended</span>;
+    return <span className="inline-flex items-center rounded-full border border-slate-300 bg-slate-100 px-2.5 py-1 text-[10px] font-bold uppercase text-slate-600"><LogOut className="mr-1 h-3 w-3" />Offboarded</span>;
+  };
+
+  return (
+    <motion.div initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.35, ease: 'easeOut' }} className="flex flex-1 flex-col space-y-6 overflow-y-auto bg-slate-50 p-4 font-sans sm:p-8">
+      <div className="flex flex-col justify-between gap-4 border-b border-slate-200 pb-4 md:flex-row md:items-center">
+        <div>
+          <p className="mb-1 font-mono text-[10px] font-bold uppercase tracking-[0.24em] text-emerald-700">Fleet desk</p>
+          <h2 className="font-display text-xl font-bold text-slate-800">Vehicle Registration</h2>
+          <p className="text-xs text-slate-500">Register owners, assign drivers and routes, then control each vehicle's service status.</p>
         </div>
+        {canRegister ? (
+          <button onClick={() => { setCreateDraft(emptyDraft()); setError(''); setShowAddModal(true); }} id="open-register-vehicle-modal" className="flex items-center gap-2 self-start rounded-xl bg-emerald-700 px-4 py-2.5 text-xs font-bold uppercase tracking-wider text-white shadow-sm transition hover:bg-emerald-800 md:self-auto"><PlusCircle className="h-4 w-4" />Register vehicle</button>
+        ) : <div className="self-start rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-[11px] text-amber-800 md:self-auto">Role <strong>{currentUserRole}</strong> has view-only access.</div>}
       </div>
 
-      {/* Fleet Table */}
-      <div className="bg-white border border-slate-200 rounded shadow-sm overflow-hidden flex-1">
+      {actionMessage && <p className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs font-bold text-emerald-800">{actionMessage}</p>}
+      <div className="flex flex-col items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white p-4 md:flex-row">
+        <div className="relative w-full md:w-80"><Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" /><input type="search" value={searchTerm} onChange={event => setSearchTerm(event.target.value)} placeholder="Search plate, owner, driver or route" className="w-full rounded-lg border border-slate-200 bg-slate-50 py-2 pl-9 pr-4 text-xs outline-none focus:border-emerald-600 focus:bg-white" /></div>
+        <select value={routeFilter} onChange={event => setRouteFilter(event.target.value)} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 outline-none focus:border-emerald-600 md:w-auto"><option value="All">All approved routes</option>{routeOptions.filter(route => route !== 'All').map(route => <option key={route} value={route}>{route}</option>)}</select>
+      </div>
+
+      <div className="flex-1 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
         <div className="overflow-x-auto">
           <table className="w-full text-left">
-            <thead className="bg-slate-50 text-[10px] text-slate-400 font-bold uppercase tracking-wider border-b border-slate-200">
-              <tr>
-                <th className="px-6 py-4">Plate Number</th>
-                <th className="px-6 py-4">Assigned Route</th>
-                <th className="px-6 py-4">Vehicle Owner</th>
-                <th className="px-6 py-4">Driver Details</th>
-                <th className="px-6 py-4">Capacity</th>
-                <th className="px-6 py-4">Status</th>
-                <th className="px-6 py-4 text-center">Compliance</th>
-              </tr>
-            </thead>
+            <thead className="border-b border-slate-200 bg-slate-50 text-[10px] font-bold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-4">Plate</th><th className="px-5 py-4">Route</th><th className="px-5 py-4">Owner</th><th className="px-5 py-4">Driver</th><th className="px-5 py-4">Capacity</th><th className="px-5 py-4">Registered</th><th className="px-5 py-4">Status</th><th className="px-5 py-4 text-right">Actions</th></tr></thead>
             <tbody className="divide-y divide-slate-100 text-xs">
-              {filteredVehicles.length > 0 ? (
-                filteredVehicles.map((vehicle) => (
-                  <tr key={vehicle.id} className="hover:bg-slate-50/50">
-                    <td className="px-6 py-4">
-                      <span className="bg-emerald-950 text-emerald-400 font-bold text-xs tracking-wider px-3 py-1.5 rounded border border-emerald-800 font-mono">
-                        {vehicle.plateNumber}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 font-semibold text-slate-700">{vehicle.route}</td>
-                    <td className="px-6 py-4">
-                      <div className="flex flex-col">
-                        <span className="font-bold text-slate-800">{vehicle.ownerName}</span>
-                        <span className="text-[10px] text-slate-400 font-mono">ID: {vehicle.ownerId}</span>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4">
-                      <div className="flex flex-col">
-                        <span className="font-semibold text-slate-800">{vehicle.driverName}</span>
-                        <span className="text-[10px] text-slate-500">{vehicle.driverPhone}</span>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 font-mono font-medium text-slate-600">{vehicle.capacity} Seater</td>
-                    <td className="px-6 py-4">{getStatusBadge(vehicle.status)}</td>
-                    <td className="px-6 py-4 text-center">
-                      <span className="text-[10px] text-emerald-600 font-semibold bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded">
-                        Matched OK
-                      </span>
-                    </td>
-                  </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan={7} className="px-6 py-12 text-center text-slate-400">
-                    No Sacco vehicles matched the search criteria.
-                  </td>
+              {filteredVehicles.length ? filteredVehicles.map(vehicle => (
+                <tr key={vehicle.id} className="transition hover:bg-slate-50/70">
+                  <td className="px-5 py-4"><span className="rounded-lg border border-emerald-800 bg-emerald-950 px-3 py-1.5 font-mono text-xs font-bold tracking-wider text-emerald-400">{vehicle.plateNumber}</span></td>
+                  <td className="max-w-48 px-5 py-4 font-semibold text-slate-700">{vehicle.route}</td>
+                  <td className="px-5 py-4"><div className="flex flex-col"><span className="font-bold text-slate-800">{vehicle.ownerName}</span>{vehicle.ownerMembershipNumber ? <span className="font-mono text-[10px] font-bold text-emerald-700">Member · {vehicle.ownerMembershipNumber}</span> : <><span className="text-[10px] font-semibold text-sky-700">Non-member owner</span><span className="text-[10px] text-slate-500">{vehicle.ownerPhone} · ID {vehicle.ownerIdNumber}</span></>}</div></td>
+                  <td className="px-5 py-4"><div className="flex flex-col"><span className="font-semibold text-slate-800">{vehicle.driverName}</span><span className="text-[10px] text-slate-500">{vehicle.driverPhone}</span></div></td>
+                  <td className="px-5 py-4 font-mono font-medium text-slate-600">{vehicle.capacity} seats</td>
+                  <td className="px-5 py-4 font-mono text-slate-600">{vehicle.dateRegistered || 'Not recorded'}</td>
+                  <td className="px-5 py-4">{statusBadge(vehicle.status)}</td>
+                  <td className="px-5 py-4"><div className="flex justify-end gap-2">{canRegister && <><button type="button" onClick={() => openEdit(vehicle)} className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] font-bold uppercase text-slate-600 hover:border-slate-300 hover:bg-slate-50"><Pencil className="h-3.5 w-3.5" />Edit</button><button type="button" disabled={busyVehicleId === vehicle.id} onClick={() => void handleLifecycle(vehicle)} className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[10px] font-bold uppercase transition disabled:opacity-50 ${vehicle.status === 'Exited' ? 'border-emerald-200 bg-emerald-600 text-white hover:bg-emerald-700' : 'border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100'}`}>{vehicle.status === 'Exited' ? <LogIn className="h-3.5 w-3.5" /> : <LogOut className="h-3.5 w-3.5" />}{busyVehicleId === vehicle.id ? 'Updating...' : vehicle.status === 'Exited' ? 'Onboard' : 'Offboard'}</button></>}</div></td>
                 </tr>
-              )}
+              )) : <tr><td colSpan={8} className="px-6 py-14 text-center text-slate-400"><Bus className="mx-auto mb-2 h-6 w-6" />No vehicles matched this search.</td></tr>}
             </tbody>
           </table>
         </div>
       </div>
 
-      {/* Add Modal */}
-      {showAddModal && (
-        <div className="fixed inset-0 bg-slate-950/40 backdrop-blur-xs flex items-center justify-center p-4 z-50">
-          <div className="bg-white border-4 border-slate-200 rounded max-w-md w-full p-6 shadow-xl">
-            <h3 className="text-sm font-bold uppercase tracking-wider text-slate-800 border-b border-slate-100 pb-2 mb-4 font-display">
-              Onboard New Sacco Vehicle
-            </h3>
+      {showAddModal && <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-950/45 p-4 backdrop-blur-sm"><div className="my-6 w-full max-w-2xl rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl"><div className="mb-5 border-b border-slate-100 pb-4"><p className="font-mono text-[10px] font-bold uppercase tracking-[0.22em] text-emerald-700">New fleet record</p><h3 className="mt-1 font-display text-lg font-bold text-slate-800">Register vehicle</h3><p className="mt-1 text-xs text-slate-500">The vehicle will be onboarded immediately after registration.</p></div><form onSubmit={handleCreate}><VehicleFormFields draft={createDraft} setDraft={setCreateDraft} members={members} allowMemberPlatePrefill />{error && <p className="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700">{error}</p>}<div className="mt-6 flex justify-end gap-2 border-t border-slate-100 pt-4"><button type="button" onClick={() => { setShowAddModal(false); setError(''); }} className="rounded-lg border border-slate-200 px-4 py-2 text-xs font-bold uppercase text-slate-500">Cancel</button><button type="submit" id="register-vehicle-submit" className="rounded-lg bg-emerald-700 px-4 py-2 text-xs font-bold uppercase text-white shadow-sm hover:bg-emerald-800">Register and onboard</button></div></form></div></div>}
 
-            <form onSubmit={handleCreate} className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
-                    Plate Number *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={plateNumber}
-                    onChange={(e) => setPlateNumber(e.target.value.toUpperCase())}
-                    className="w-full p-2 border border-slate-200 rounded text-xs font-mono uppercase focus:outline-none focus:border-emerald-600"
-                  />
-                  <p className="mt-1 text-[9px] text-slate-400">Prefilled from the selected member when available; you can still type another plate.</p>
-                </div>
-
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
-                    Asset Owner *
-                  </label>
-                  <select
-                    required
-                    value={ownerId}
-                    onChange={(e) => handleOwnerChange(e.target.value)}
-                    className="w-full p-2 border border-slate-200 rounded text-xs focus:outline-none focus:border-emerald-600 bg-white"
-                  >
-                    <option value="">Select Sacco Member...</option>
-                    {members.map(member => (
-                      <option key={member.id} value={member.id}>{member.name}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
-                  Active Driver Full Name *
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={driverName}
-                  onChange={(e) => setDriverName(e.target.value)}
-                  className="w-full p-2 border border-slate-200 rounded text-xs focus:outline-none focus:border-emerald-600"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
-                    Driver Mobile Phone *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={driverPhone}
-                    onChange={(e) => setDriverPhone(e.target.value)}
-                    className="w-full p-2 border border-slate-200 rounded text-xs focus:outline-none focus:border-emerald-600"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
-                    Matatu Capacity *
-                  </label>
-                  <select
-                    value={capacity}
-                    onChange={(e) => setCapacity(Number(e.target.value) as 7 | 14 | 33 | 50)}
-                    className="w-full p-2 border border-slate-200 rounded text-xs focus:outline-none focus:border-emerald-600 bg-white"
-                  >
-                    <option value="7">7-Seater Sienta</option>
-                    <option value="14">14-Seater Nissan</option>
-                    <option value="33">33-Seater Minibus</option>
-                    <option value="50">50-Seater Coach</option>
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
-                  Approved Transit Corridor Route *
-                </label>
-                <select
-                  value={route}
-                  onChange={(e) => setRoute(e.target.value)}
-                  className="w-full p-2 border border-slate-200 rounded text-xs focus:outline-none focus:border-emerald-600 bg-white"
-                >
-                  <option value="17 Stage & Cabbanas">17 Stage &amp; Cabbanas</option>
-                </select>
-              </div>
-
-              {error && <p className="text-xs text-rose-600 font-bold">{error}</p>}
-
-              <div className="flex justify-end space-x-2 pt-4 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowAddModal(false);
-                    setError('');
-                  }}
-                  className="px-3 py-1.5 border border-slate-200 rounded text-xs font-bold text-slate-500 uppercase tracking-wider"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  id="register-vehicle-submit"
-                  className="px-4 py-1.5 bg-emerald-800 text-white rounded text-xs font-bold uppercase tracking-wider shadow-sm hover:bg-emerald-900"
-                >
-                  Confirm Asset Onboard
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {editingVehicle && <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-950/45 p-4 backdrop-blur-sm"><div className="my-6 w-full max-w-2xl rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl"><div className="mb-5 border-b border-slate-100 pb-4"><p className="font-mono text-[10px] font-bold uppercase tracking-[0.22em] text-sky-700">Fleet correction</p><h3 className="mt-1 font-display text-lg font-bold text-slate-800">Edit {editingVehicle.plateNumber}</h3><p className="mt-1 text-xs text-slate-500">Update the owner, driver, route, plate or capacity. Driver changes remain in the assignment history.</p></div><form onSubmit={handleEdit}><VehicleFormFields draft={editDraft} setDraft={setEditDraft} members={members} />{error && <p className="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700">{error}</p>}<div className="mt-6 flex justify-end gap-2 border-t border-slate-100 pt-4"><button type="button" onClick={() => { setEditingVehicle(null); setError(''); }} className="rounded-lg border border-slate-200 px-4 py-2 text-xs font-bold uppercase text-slate-500">Cancel</button><button type="submit" disabled={busyVehicleId === editingVehicle.id} className="rounded-lg bg-sky-700 px-4 py-2 text-xs font-bold uppercase text-white shadow-sm hover:bg-sky-800 disabled:opacity-50">{busyVehicleId === editingVehicle.id ? 'Saving...' : 'Save vehicle changes'}</button></div></form></div></div>}
     </motion.div>
   );
 }

@@ -103,7 +103,7 @@ export default function BlueprintView({ onApprove, isApproved, signerName }: Blu
             Chief Technical Architect Lead Board
           </span>
           <h2 className="text-xl font-bold font-display tracking-tight mt-2 text-white">
-            Matatu Sacco Pro &mdash; Technical Enterprise Blueprint
+            Sowetamu Sacco &mdash; Technical Enterprise Blueprint
           </h2>
           <p className="text-xs text-emerald-400 mt-1">
             System schemas, API models, encryption, scaling roadmap and database indices designed for 10,000+ members.

@@ -2,6 +2,10 @@ import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import { Transaction, Vehicle, Member, UserRole, VehicleClass } from '../types';
 import { PlusCircle, Search, FileDown, ShieldCheck, DollarSign, Activity, AlertCircle, ArrowUpRight, CheckCircle2, Sparkles, Minimize2, Maximize2, LayoutDashboard } from 'lucide-react';
+import { sanitizeDecimalInput, sanitizePersonName, sanitizeVehiclePlate } from '../lib/inputValidation';
+import { isExpenseTransactionCategory, requiresRegisteredMember } from '../lib/transactionPolicy';
+import { calculateDashboardMetrics, getRecentDailySeries } from '../lib/dashboardMetrics';
+import ChairmanOnboardingTour from './ChairmanOnboardingTour';
 
 interface SparklineProps {
   data: number[];
@@ -36,33 +40,6 @@ interface SaccoAnalyticsChartProps {
   transactions: Transaction[];
 }
 
-function getRecentDailySeries(
-  transactions: Transaction[],
-  include: (transaction: Transaction) => boolean,
-  days: number
-) {
-  const latestTimestamp = transactions.reduce<string | null>((latest, transaction) => {
-    return !latest || transaction.timestamp > latest ? transaction.timestamp : latest;
-  }, null);
-  const baseDate = latestTimestamp ? new Date(latestTimestamp) : new Date();
-  const series = [] as { dateString: string; label: string; amount: number }[];
-
-  for (let index = days - 1; index >= 0; index--) {
-    const date = new Date(baseDate);
-    date.setDate(date.getDate() - index);
-    const dateString = date.toISOString().slice(0, 10);
-    series.push({
-      dateString,
-      label: date.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric' }),
-      amount: transactions
-        .filter(transaction => include(transaction) && transaction.timestamp.slice(0, 10) === dateString)
-        .reduce((sum, transaction) => sum + transaction.amount, 0)
-    });
-  }
-
-  return series;
-}
-
 function SaccoAnalyticsChart({ transactions }: SaccoAnalyticsChartProps) {
   const chartData = getRecentDailySeries(transactions, transaction => transaction.type === 'Credit', 7);
   const hasActivity = chartData.some(day => day.amount > 0);
@@ -92,7 +69,7 @@ function SaccoAnalyticsChart({ transactions }: SaccoAnalyticsChartProps) {
     : '';
 
   return (
-    <div className="bg-white border border-slate-200 rounded-3xl p-5 sm:p-6 shadow-[0_4px_30px_rgba(0,0,0,0.015)] flex flex-col justify-between h-full hover:shadow-md transition-all duration-300">
+    <div className="dashboard-panel bg-white border border-slate-200 rounded-3xl p-5 sm:p-6 shadow-[0_4px_30px_rgba(0,0,0,0.015)] flex flex-col justify-between h-full hover:shadow-md transition-all duration-300">
       <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
         <div>
           <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider font-display">Sacco Cash Collection Flow</h3>
@@ -110,8 +87,8 @@ function SaccoAnalyticsChart({ transactions }: SaccoAnalyticsChartProps) {
         <svg className="w-full h-full min-h-[220px]" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none">
           <defs>
             <linearGradient id="chartGlow" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#2563eb" stopOpacity="0.15" />
-              <stop offset="100%" stopColor="#2563eb" stopOpacity="0.0" />
+              <stop offset="0%" stopColor="#4f46e5" stopOpacity="0.2" />
+              <stop offset="100%" stopColor="#06b6d4" stopOpacity="0.0" />
             </linearGradient>
           </defs>
 
@@ -126,7 +103,7 @@ function SaccoAnalyticsChart({ transactions }: SaccoAnalyticsChartProps) {
                   y1={y}
                   x2={width - paddingRight}
                   y2={y}
-                  stroke="#f1f5f9"
+                  stroke="#e7e5f4"
                   strokeDasharray="4 4"
                   strokeWidth="1.5"
                 />
@@ -152,7 +129,7 @@ function SaccoAnalyticsChart({ transactions }: SaccoAnalyticsChartProps) {
             <path
               d={linePath}
               fill="none"
-              stroke="#2563eb"
+              stroke="#4f46e5"
               strokeWidth="3.5"
               strokeLinecap="round"
               strokeLinejoin="round"
@@ -167,14 +144,14 @@ function SaccoAnalyticsChart({ transactions }: SaccoAnalyticsChartProps) {
                 cy={p.y}
                 r="4.5"
                 fill="#ffffff"
-                stroke="#2563eb"
+                stroke="#4f46e5"
                 strokeWidth="2.5"
               />
               <circle
                 cx={p.x}
                 cy={p.y}
                 r="10"
-                fill="#2563eb"
+                fill="#06b6d4"
                 fillOpacity="0"
                 className="hover:fill-opacity-15 transition-all duration-200"
               />
@@ -213,6 +190,7 @@ interface DashboardViewProps {
   members: Member[];
   onAddTransaction: (newTx: Omit<Transaction, 'id' | 'timestamp' | 'recorderName'>) => void;
   currentUserRole: UserRole;
+  currentUserId: string;
   currentUserName: string;
   onNavigateToTab: (tab: string) => void;
 }
@@ -223,6 +201,7 @@ export default function DashboardView({
   members,
   onAddTransaction,
   currentUserRole,
+  currentUserId,
   currentUserName,
   onNavigateToTab
 }: DashboardViewProps) {
@@ -231,10 +210,11 @@ export default function DashboardView({
   const [isMinimized, setIsMinimized] = useState(false);
 
   // Form State
+  const [transactionDate, setTransactionDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [memberId, setMemberId] = useState('');
   const [personName, setPersonName] = useState('');
   const [vehiclePlate, setVehiclePlate] = useState('');
-  const [category, setCategory] = useState<'Daily Contribution' | 'Registration Fee' | 'Management Fee' | 'Office Expenses' | 'Petty Cash' | 'Penalty' | 'Utilities' | 'Equipment'>('Daily Contribution');
+  const [category, setCategory] = useState<'Daily Contribution' | 'Savings Contribution' | 'Registration Fee' | 'Management Fee' | 'Office Expenses' | 'Petty Cash' | 'Penalty' | 'Utilities' | 'Equipment'>('Daily Contribution');
   const [type, setType] = useState<'Credit' | 'Debit'>('Credit');
   const [amount, setAmount] = useState('');
   const [description, setDescription] = useState('');
@@ -251,47 +231,76 @@ export default function DashboardView({
   const dailyGrossAmount = [operationAmount, entranceFee, loanRepay, savingsContribution, sTicket, legalFee]
     .reduce((sum, value) => sum + (Number(value) || 0), 0);
   const dailyNetAmount = Math.max(0, dailyGrossAmount - (Number(expenseDeduction) || 0));
+  const isExpenseEntry = isExpenseTransactionCategory(category);
+  const activeVehicles = vehicles.filter(vehicle => vehicle.status === 'Active');
 
-  // Calculations
-  const todayCredits = transactions
-    .filter(t => t.type === 'Credit')
-    .reduce((acc, t) => acc + t.amount, 0);
-
-  const activeFleetCount = vehicles.filter(v => v.status === 'Active').length;
-  const pendingMembersCount = members.filter(m => m.status === 'Pending').length;
-
-  const totalMpesaDeposits = transactions
-    .filter(t => t.type === 'Credit' && t.refCode.toUpperCase().startsWith('Q'))
-    .reduce((acc, t) => acc + t.amount, 0);
-
-  const fleetSparkData = getRecentDailySeries(transactions, transaction => transaction.type === 'Credit' && transaction.tillNumber === 'VehicleTill', 6)
-    .map(day => day.amount);
-  const utilitySparkData = getRecentDailySeries(transactions, transaction => transaction.type === 'Debit' && transaction.tillNumber === 'UtilityTill', 6)
-    .map(day => day.amount);
-  const recentWeekDates = new Set(getRecentDailySeries(transactions, () => true, 7).map(day => day.dateString));
-  const weeklyCreditTotal = getRecentDailySeries(transactions, transaction => transaction.type === 'Credit', 7).reduce((sum, day) => sum + day.amount, 0);
-  const weeklySavings = transactions
-    .filter(transaction => transaction.type === 'Credit' && transaction.savingsContribution !== undefined)
-    .filter(transaction => recentWeekDates.has(transaction.timestamp.slice(0, 10)))
-    .reduce((sum, transaction) => sum + Number(transaction.savingsContribution || 0), 0);
-  const weeklyLoanRepayments = transactions
-    .filter(transaction => transaction.type === 'Credit' && transaction.loanRepay !== undefined)
-    .filter(transaction => recentWeekDates.has(transaction.timestamp.slice(0, 10)))
-    .reduce((sum, transaction) => sum + Number(transaction.loanRepay || 0), 0);
-  const savingsShare = weeklyCreditTotal > 0 ? Math.min(100, (weeklySavings / weeklyCreditTotal) * 100) : 0;
-  const loanRepaymentShare = weeklyCreditTotal > 0 ? Math.min(100, (weeklyLoanRepayments / weeklyCreditTotal) * 100) : 0;
-  const ledgerEntryCount = transactions.length;
+  const dashboardMetrics = calculateDashboardMetrics(transactions, vehicles, members);
+  const {
+    todayCredits,
+    operationalDateLabel,
+    activeOperationalDate,
+    yesterdayCredits,
+    dailyPercentChange,
+    monthToDateCredits,
+    monthToDateDebits,
+    allTimeCredits,
+    allTimeDebits,
+    operationsAccountBalance,
+    utilityTillCredits,
+    activeFleetCount,
+    pendingMembersCount,
+    totalMpesaDeposits,
+    fleetSparkData,
+    utilitySparkData,
+    weeklySavings,
+    weeklyLoanRepayments,
+    savingsShare,
+    loanRepaymentShare,
+    ledgerEntryCount
+  } = dashboardMetrics;
 
   // Auto set Type & Till depending on category
   const handleCategoryChange = (cat: typeof category) => {
     setCategory(cat);
-    if (cat === 'Office Expenses' || cat === 'Petty Cash' || cat === 'Utilities' || cat === 'Equipment') {
+    if (isExpenseTransactionCategory(cat)) {
       setType('Debit');
+      setTillNumber('VehicleTill');
+      setMemberId('');
+      setVehiclePlate('');
+    } else if (cat === 'Savings Contribution') {
+      setType('Credit');
       setTillNumber('UtilityTill');
     } else {
       setType('Credit');
       setTillNumber('VehicleTill');
     }
+  };
+
+  const handleVehiclePlateChange = (rawVal: string) => {
+    const nextPlate = sanitizeVehiclePlate(rawVal);
+    setVehiclePlate(nextPlate);
+    const normalized = nextPlate.replace(/\s+/g, '').toUpperCase();
+    if (normalized) {
+      const matched = vehicles.find(v => v.plateNumber.replace(/\s+/g, '').toUpperCase() === normalized);
+      if (matched) {
+        const ownerMember = members.find(m => m.id === matched.ownerId && m.status === 'Active') ||
+          (matched.ownerName ? members.find(m => m.name.trim().toLowerCase() === matched.ownerName.trim().toLowerCase() && m.status === 'Active') : undefined);
+        if (ownerMember) {
+          setPersonName(ownerMember.name);
+          setMemberId(ownerMember.id);
+        } else if (matched.ownerName) {
+          setPersonName(matched.ownerName);
+          setMemberId(matched.ownerId || '');
+        }
+      }
+    }
+  };
+
+  const handlePersonNameChange = (rawVal: string) => {
+    const nextName = sanitizePersonName(rawVal);
+    setPersonName(nextName);
+    const member = members.find(item => item.name.trim().toLowerCase() === nextName.trim().toLowerCase() && item.status === 'Active');
+    setMemberId(member?.id || '');
   };
 
   const handleCreateTx = (e: React.FormEvent) => {
@@ -304,35 +313,62 @@ export default function DashboardView({
       return;
     }
 
-    if (category === 'Daily Contribution' && vehicleClass === 'Member Contribution' && !personName.trim()) {
-      setError('Enter the contributor’s name for a Member Contribution.');
-      return;
+    const normalizedVehiclePlate = vehiclePlate.trim().toUpperCase();
+    const matchedVehicle = normalizedVehiclePlate
+      ? vehicles.find(v => v.plateNumber.replace(/\s+/g, '').toUpperCase() === normalizedVehiclePlate.replace(/\s+/g, ''))
+      : undefined;
+
+    let matchedMember = members.find(member =>
+      member.status === 'Active' && member.name.trim().toLowerCase() === personName.trim().toLowerCase()
+    );
+
+    if (!matchedMember && matchedVehicle) {
+      matchedMember = members.find(member => member.id === matchedVehicle.ownerId && member.status === 'Active') ||
+        (matchedVehicle.ownerName ? members.find(member => member.name.trim().toLowerCase() === matchedVehicle.ownerName.trim().toLowerCase() && member.status === 'Active') : undefined);
     }
 
-    const normalizedVehiclePlate = vehiclePlate.trim().toUpperCase();
-    const matchedVehicle = vehicles.find(v => v.plateNumber.trim().toUpperCase() === normalizedVehiclePlate);
-    const memberAssignedToPlate = members.find(member =>
-      member.vehicleAssigned?.trim().toUpperCase() === normalizedVehiclePlate
-    );
-    const matchedMember = members.find(m => m.id === (memberId || matchedVehicle?.ownerId || memberAssignedToPlate?.id));
-    if (category === 'Daily Contribution' && Number(loanRepay) > 0 && !matchedMember) {
-      setError('Select the member or enter a registered V.REG before recording a loan repayment.');
-      return;
+    if (requiresRegisteredMember(category)) {
+      if (normalizedVehiclePlate && !matchedVehicle) {
+        setError(`Car/V.REG "${normalizedVehiclePlate}" is not registered. Register the vehicle first.`);
+        return;
+      }
+      if (matchedVehicle && matchedVehicle.status !== 'Active') {
+        setError(`Car/V.REG "${matchedVehicle.plateNumber}" is not active.`);
+        return;
+      }
+      if (!matchedMember && !matchedVehicle) {
+        setError(`Please enter a registered vehicle plate number or member name.`);
+        return;
+      }
+      if (!matchedMember && matchedVehicle && !matchedVehicle.ownerName) {
+        setError(`No active member record is linked to vehicle "${matchedVehicle.plateNumber}".`);
+        return;
+      }
+      if (matchedVehicle && matchedMember && matchedVehicle.ownerId && matchedVehicle.ownerId !== matchedMember.id) {
+        setError(`Car/V.REG "${matchedVehicle.plateNumber}" is not registered under ${matchedMember.name}.`);
+        return;
+      }
     }
     const automaticRefCode = `SWT-MAN-${Date.now()}`;
+    const resolvedMemberId = isExpenseEntry ? undefined : (matchedMember?.id || matchedVehicle?.ownerId);
+    const resolvedMemberName = isExpenseEntry ? undefined : (matchedMember?.name || matchedVehicle?.ownerName || personName.trim() || undefined);
+    const effectiveTimestamp = transactionDate
+      ? new Date(`${transactionDate}T${new Date().toTimeString().slice(0, 8)}`).toISOString()
+      : new Date().toISOString();
     
     onAddTransaction({
-      memberId: memberId || matchedMember?.id,
-      memberName: personName.trim() || matchedMember?.name || undefined,
-      vehiclePlate: normalizedVehiclePlate || undefined,
+      memberId: resolvedMemberId,
+      memberName: resolvedMemberName,
+      vehiclePlate: isExpenseEntry ? undefined : (matchedVehicle?.plateNumber || normalizedVehiclePlate || undefined),
       category,
       type,
       amount: transactionAmount,
       refCode: automaticRefCode,
       description: description.trim() || (category === 'Daily Contribution'
         ? `${vehicleClass} daily collection: gross KES ${dailyGrossAmount}, deductions KES ${Number(expenseDeduction) || 0}`
-        : `${category} recorded for ${matchedMember ? matchedMember.name : 'Sacco Office'}`),
+        : `${category} recorded for ${resolvedMemberName || 'Sacco Office'}`),
       tillNumber: tillNumber,
+      timestamp: effectiveTimestamp,
       ...(category === 'Daily Contribution' ? {
         vehicleClass,
         operationAmount: Number(operationAmount) || 0,
@@ -344,9 +380,10 @@ export default function DashboardView({
         expenseDeduction: Number(expenseDeduction) || 0,
         grossAmount: dailyGrossAmount
       } : {})
-    });
+    } as any);
 
     // Reset Form
+    setTransactionDate(new Date().toISOString().slice(0, 10));
     setMemberId('');
     setPersonName('');
     setVehiclePlate('');
@@ -366,7 +403,9 @@ export default function DashboardView({
     setShowAddModal(false);
   };
 
-  const isTreasurer = currentUserRole === 'Treasurer' || currentUserRole === 'Chairman';
+  const canRecordTransaction = ['Chairman', 'Secretary', 'Treasurer', 'Accountant'].includes(currentUserRole);
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
 
   return (
     <motion.div
@@ -376,21 +415,29 @@ export default function DashboardView({
       className="flex-1 flex flex-col overflow-y-auto bg-slate-50 font-sans"
     >
       {/* Premium Dashboard Header Greeting */}
-      <header className="py-6 sm:py-8 bg-white border-b border-slate-200/80 px-4 sm:px-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shrink-0">
-        <div className="space-y-1">
+      <header className="dashboard-hero py-7 sm:py-9 bg-white border-b border-slate-200/80 px-4 sm:px-8 flex flex-col sm:flex-row sm:items-center justify-between gap-5 shrink-0">
+        <div className="space-y-2">
+          <span className="dashboard-eyebrow">Operations command centre</span>
           <h2 className="text-2xl font-bold tracking-tight text-slate-900 font-display">
-            Good morning, {currentUserName.split(' ')[0]} 👋
+            {greeting}, {currentUserName.split(' ')[0]}.
           </h2>
           <p className="text-xs sm:text-sm text-slate-500">
-            Here's what's happening with Sowetamu Sacco today.
+            Your live collections, fleet activity and financial controls—at a glance.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          {isTreasurer ? (
+          {currentUserRole === 'Chairman' && members.length === 0 && (
+            <ChairmanOnboardingTour
+              currentUserId={currentUserId}
+              isEligible
+              onNavigateToTab={onNavigateToTab}
+            />
+          )}
+          {canRecordTransaction ? (
             <button
               onClick={() => setShowAddModal(true)}
               id="dashboard-new-tx-btn"
-              className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl tracking-wide shadow-sm shadow-blue-200 flex items-center space-x-2 transition-all cursor-pointer transform active:scale-95"
+              className="dashboard-primary-action px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl tracking-wide shadow-sm shadow-blue-200 flex items-center space-x-2 transition-all cursor-pointer transform active:scale-95"
             >
               <PlusCircle className="w-4 h-4" />
               <span>Record Transaction</span>
@@ -453,7 +500,7 @@ export default function DashboardView({
             {/* Stat Preview inside minimized card */}
             <div className="w-full bg-slate-50 border border-slate-100 rounded-2xl p-4 flex items-center justify-between font-mono text-left">
               <div>
-                <p className="text-[9px] text-slate-400 uppercase tracking-wider font-bold">Today's Pool</p>
+                <p className="text-[9px] text-slate-400 uppercase tracking-wider font-bold">Daily Pool ({operationalDateLabel})</p>
                 <p className="text-sm font-black text-slate-700">KES {todayCredits.toLocaleString()}</p>
               </div>
               <div className="text-right">
@@ -472,7 +519,7 @@ export default function DashboardView({
           </div>
         </div>
       ) : (
-        <div className="p-4 sm:p-8 grid grid-cols-1 md:grid-cols-12 gap-6 flex-1 bg-slate-50/50">
+        <div className="dashboard-grid p-4 sm:p-8 grid grid-cols-1 md:grid-cols-12 gap-6 flex-1 bg-slate-50/50">
         
         {/* Brand New App guided flow */}
         {members.length === 0 && (
@@ -490,7 +537,7 @@ export default function DashboardView({
               
               <div className="space-y-2">
                 <h3 className="text-xl sm:text-2xl font-black font-display tracking-tight text-white">
-                  Start Testing the Complete Flow
+                  Set up your SACCO records
                 </h3>
                 <p className="text-xs text-blue-100/70 leading-relaxed">
                   Welcome to Sowetamu Sacco. This installation starts with empty registries, fleets, and ledgers. Follow this setup roadmap to build your live SACCO records from scratch:
@@ -570,17 +617,50 @@ export default function DashboardView({
           </div>
         )}
 
+        {/* SUMMARY PERIOD TOTALS STRIP (Clear separation of Daily, Month-to-date, and 2-Month All-Time) */}
+        <div className="md:col-span-12 bg-white border border-slate-200/80 rounded-2xl p-4 shadow-2xs flex flex-wrap items-center justify-between gap-4 font-mono">
+          <div className="flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+            <span className="text-xs font-bold text-slate-800 font-sans">Active Ledger Metrics</span>
+            <span className="text-[10px] text-slate-400 font-sans">({new Date(activeOperationalDate + 'T00:00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' })})</span>
+          </div>
+          <div className="flex flex-wrap items-center gap-4 text-xs">
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-400 font-sans">Daily Pool ({operationalDateLabel}):</span>
+              <span className="font-bold text-slate-900 bg-slate-100 px-2 py-0.5 rounded-lg">KES {todayCredits.toLocaleString()}</span>
+            </div>
+            <div className="text-slate-200">|</div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-400 font-sans">This Month Total:</span>
+              <span className="font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-lg">KES {monthToDateCredits.toLocaleString()}</span>
+            </div>
+            <div className="text-slate-200">|</div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-400 font-sans">2-Month Cumulative (Sept 1 – Present):</span>
+              <span className="font-bold text-purple-700 bg-purple-50 px-2 py-0.5 rounded-lg">KES {allTimeCredits.toLocaleString()}</span>
+            </div>
+            <div className="text-slate-200">|</div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-400 font-sans">Expenses Disbursed:</span>
+              <span className="font-bold text-rose-700 bg-rose-50 px-2 py-0.5 rounded-lg">KES {allTimeDebits.toLocaleString()}</span>
+            </div>
+          </div>
+        </div>
+
         {/* BENTO STATS CARDS */}
-        {/* Card 1: Unified Conjunction Pool */}
+        {/* Card 1: Daily Collections Pool */}
         <motion.div 
           initial={{ opacity: 0, y: 15 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.3, delay: 0.05 }}
-          className="md:col-span-3 bg-white border border-slate-200/80 p-5 rounded-3xl shadow-[0_4px_20px_rgba(0,0,0,0.02)] hover:shadow-lg hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between group backdrop-blur-md bg-white/90 relative overflow-hidden"
+          className="dashboard-metric md:col-span-3 bg-white border border-slate-200/80 p-5 rounded-3xl shadow-[0_4px_20px_rgba(0,0,0,0.02)] hover:shadow-lg hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between group backdrop-blur-md bg-white/90 relative overflow-hidden"
         >
           <div>
             <div className="flex items-center justify-between">
-              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest font-mono">Unified Conjunction Pool</span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest font-mono">Daily Pool</span>
+                <span className="text-[9px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-md font-mono">{operationalDateLabel}</span>
+              </div>
               <div className="w-8 h-8 rounded-full bg-amber-50 flex items-center justify-center group-hover:scale-110 transition-transform duration-300">
                 <DollarSign className="w-4 h-4 text-amber-600" />
               </div>
@@ -588,60 +668,68 @@ export default function DashboardView({
             <p className="text-2xl font-black text-slate-800 mt-3 font-mono tracking-tight">KES {todayCredits.toLocaleString()}</p>
           </div>
           <div className="flex items-end justify-between mt-4 pt-4 border-t border-slate-50">
-            <div className="text-[10px] text-emerald-600 font-bold flex items-center bg-emerald-50/70 px-2 py-1 rounded-lg border border-emerald-100">
-              <ArrowUpRight className="w-3.5 h-3.5 mr-0.5 text-emerald-500" /> +12.4% vs yesterday
+            <div className={`text-[10px] font-bold flex items-center px-2 py-1 rounded-lg border ${
+              dailyPercentChange >= 0
+                ? 'text-emerald-600 bg-emerald-50/70 border-emerald-100'
+                : 'text-slate-600 bg-slate-50 border-slate-200'
+            }`}>
+              <ArrowUpRight className={`w-3.5 h-3.5 mr-0.5 ${dailyPercentChange >= 0 ? 'text-emerald-500' : 'text-slate-400 rotate-90'}`} />
+              {dailyPercentChange >= 0 ? `+${dailyPercentChange.toFixed(1)}%` : `${dailyPercentChange.toFixed(1)}%`} vs prev day
             </div>
-            <Sparkline data={[todayCredits * 0.72, todayCredits * 0.81, todayCredits * 0.75, todayCredits * 0.89, todayCredits]} color="#eab308" />
+            <Sparkline data={fleetSparkData} color="#eab308" />
           </div>
         </motion.div>
 
-        {/* Card 2: Fleet Till */}
+        {/* Card 2: Operations Account: 48277 */}
         <motion.div 
           initial={{ opacity: 0, y: 15 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.3, delay: 0.1 }}
-          className="md:col-span-3 bg-white border border-slate-200/80 p-5 rounded-3xl shadow-[0_4px_20px_rgba(0,0,0,0.02)] hover:shadow-lg hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between group backdrop-blur-md bg-white/90 relative overflow-hidden"
+          className="dashboard-metric md:col-span-3 bg-white border border-slate-200/80 p-5 rounded-3xl shadow-[0_4px_20px_rgba(0,0,0,0.02)] hover:shadow-lg hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between group backdrop-blur-md bg-white/90 relative overflow-hidden"
         >
           <div>
             <div className="flex items-center justify-between">
-              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest font-mono">Fleet Till: 824 9102</span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest font-mono">Operations: 48277</span>
+                <span className="text-[9px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-md font-mono">Net Balance</span>
+              </div>
               <div className="w-8 h-8 rounded-full bg-emerald-50 flex items-center justify-center group-hover:scale-110 transition-transform duration-300">
                 <Activity className="w-4 h-4 text-emerald-600" />
               </div>
             </div>
             <p className="text-2xl font-black text-slate-800 mt-3 font-mono tracking-tight">
-              KES {transactions.filter(t => t.tillNumber === 'VehicleTill' && t.type === 'Credit').reduce((acc, t) => acc + t.amount, 0).toLocaleString()}
+              KES {operationsAccountBalance.toLocaleString()}
             </p>
           </div>
           <div className="flex items-end justify-between mt-4 pt-4 border-t border-slate-50">
             <p className="text-[10px] text-slate-400 font-medium">
-              Collects daily fleet quota
+              This Month: <span className="font-semibold text-slate-600">KES {monthToDateCredits.toLocaleString()}</span>
             </p>
             <Sparkline data={fleetSparkData} color="#10b981" />
           </div>
         </motion.div>
 
-        {/* Card 3: Utility Till */}
+        {/* Card 3: Savings account */}
         <motion.div 
           initial={{ opacity: 0, y: 15 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.3, delay: 0.15 }}
-          className="md:col-span-3 bg-white border border-slate-200/80 p-5 rounded-3xl shadow-[0_4px_20px_rgba(0,0,0,0.02)] hover:shadow-lg hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between group backdrop-blur-md bg-white/90 relative overflow-hidden"
+          className="dashboard-metric md:col-span-3 bg-white border border-slate-200/80 p-5 rounded-3xl shadow-[0_4px_20px_rgba(0,0,0,0.02)] hover:shadow-lg hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between group backdrop-blur-md bg-white/90 relative overflow-hidden"
         >
           <div>
             <div className="flex items-center justify-between">
-              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest font-mono">Utility Till: 481 0294</span>
+              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest font-mono">Savings Account: 871671</span>
               <div className="w-8 h-8 rounded-full bg-rose-50 flex items-center justify-center group-hover:scale-110 transition-transform duration-300">
                 <AlertCircle className="w-4 h-4 text-rose-500" />
               </div>
             </div>
             <p className="text-2xl font-black text-slate-800 mt-3 font-mono tracking-tight">
-              KES {transactions.filter(t => t.tillNumber === 'UtilityTill' && t.type === 'Debit').reduce((acc, t) => acc + t.amount, 0).toLocaleString()}
+              KES {utilityTillCredits.toLocaleString()}
             </p>
           </div>
           <div className="flex items-end justify-between mt-4 pt-4 border-t border-slate-50">
             <div className="text-[10px] text-rose-600 font-bold flex items-center bg-rose-50/70 px-2 py-0.5 rounded border border-rose-100">
-              Operations debits
+              Dedicated savings deposits
             </div>
             <Sparkline data={utilitySparkData} color="#ef4444" />
           </div>
@@ -652,7 +740,7 @@ export default function DashboardView({
           initial={{ opacity: 0, y: 15 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.3, delay: 0.2 }}
-          className="md:col-span-3 bg-white border border-slate-200/80 p-5 rounded-3xl shadow-[0_4px_20px_rgba(0,0,0,0.02)] hover:shadow-lg hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between group backdrop-blur-md bg-white/90 relative overflow-hidden"
+          className="dashboard-metric md:col-span-3 bg-white border border-slate-200/80 p-5 rounded-3xl shadow-[0_4px_20px_rgba(0,0,0,0.02)] hover:shadow-lg hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between group backdrop-blur-md bg-white/90 relative overflow-hidden"
         >
           <div>
             <div className="flex items-center justify-between">
@@ -672,6 +760,17 @@ export default function DashboardView({
             <Sparkline data={[2, 3, 3, 4, 3, activeFleetCount]} color="#3b82f6" />
           </div>
         </motion.div>
+
+        <section className="flow-visual-band md:col-span-12" aria-label="SACCO collections in motion">
+          <div className="flow-visual-content">
+            <span>Paybill 400200 · One connected ledger</span>
+            <h2>Every collection,<br />moving in one direction.</h2>
+            <p>
+              Operations settle to account 48277 while member savings remain
+              protected in account 871671.
+            </p>
+          </div>
+        </section>
 
         {/* ANALYTICS ROW */}
         {/* Sacco Analytics Chart */}
@@ -757,7 +856,7 @@ export default function DashboardView({
             <table className="w-full text-left">
               <thead className="bg-slate-50/50 text-[10px] text-slate-400 font-bold uppercase tracking-wider border-b border-slate-100">
                 <tr>
-                  <th className="px-6 py-4">Timestamp / Ref</th>
+                  <th className="px-6 py-4">Date / Ref</th>
                   <th className="px-6 py-4">Member / Matatu</th>
                   <th className="px-6 py-4">Description</th>
                   <th className="px-6 py-4 text-right">Amount</th>
@@ -768,7 +867,10 @@ export default function DashboardView({
                   <tr key={tx.id} className="hover:bg-slate-50/40 transition-colors duration-150">
                     <td className="px-6 py-4 text-slate-500">
                       <div className="flex flex-col">
-                        <span className="font-bold text-slate-700 font-mono">
+                        <span className="font-bold text-slate-800 font-mono">
+                          {new Date(tx.timestamp).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}
+                        </span>
+                        <span className="text-[10px] text-slate-500 font-mono">
                           {new Date(tx.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                         </span>
                         <span className="text-[10px] text-slate-400 uppercase tracking-widest font-mono mt-0.5">{tx.refCode}</span>
@@ -795,7 +897,7 @@ export default function DashboardView({
                               ? 'bg-blue-50 text-blue-700 border border-blue-100'
                               : 'bg-slate-100 text-slate-600 border border-slate-200'
                           }`}>
-                            {tx.tillNumber === 'VehicleTill' ? 'Till: 8249102 (Fleet)' : tx.tillNumber === 'UtilityTill' ? 'Till: 4810294 (Admin)' : 'Cash Drawer'}
+                            {tx.tillNumber === 'VehicleTill' ? 'Account: 48277 (Operations)' : tx.tillNumber === 'UtilityTill' ? 'Account: 871671 (Savings)' : 'Cash Drawer'}
                           </span>
                         </div>
                       </div>
@@ -826,7 +928,7 @@ export default function DashboardView({
             </h3>
 
             <form onSubmit={handleCreateTx} className="space-y-4">
-              <div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
                     Book Category *
@@ -837,6 +939,7 @@ export default function DashboardView({
                     className="w-full p-2.5 border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 bg-white"
                   >
                     <option value="Daily Contribution">Daily Contribution</option>
+                    <option value="Savings Contribution">Savings Contribution</option>
                     <option value="Registration Fee">Registration Fee</option>
                     <option value="Management Fee">Management Fee</option>
                     <option value="Office Expenses">Office Expenses</option>
@@ -847,6 +950,18 @@ export default function DashboardView({
                   </select>
                 </div>
 
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
+                    Transaction Date *
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={transactionDate}
+                    onChange={(e) => setTransactionDate(e.target.value)}
+                    className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-mono focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 bg-white"
+                  />
+                </div>
               </div>
 
               {category === 'Daily Contribution' && (
@@ -861,7 +976,6 @@ export default function DashboardView({
                       onChange={(e) => {
                         const nextClass = e.target.value as VehicleClass;
                         setVehicleClass(nextClass);
-                        if (nextClass === 'Member Contribution') setVehiclePlate('');
                       }}
                       className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold"
                     >
@@ -886,7 +1000,8 @@ export default function DashboardView({
                           type="number"
                           min="0"
                           value={value as string}
-                          onChange={(e) => (setter as React.Dispatch<React.SetStateAction<string>>)(e.target.value)}
+                          onChange={(e) => (setter as React.Dispatch<React.SetStateAction<string>>)(sanitizeDecimalInput(e.target.value))}
+                          inputMode="decimal"
                           className="mt-1 w-full rounded-lg border border-slate-200 bg-white p-2 text-right font-mono text-xs text-slate-900"
                         />
                       </label>
@@ -896,7 +1011,7 @@ export default function DashboardView({
                   <div className="grid grid-cols-3 gap-2 border-t border-slate-300 pt-3 font-mono text-xs">
                     <div><span className="block text-[9px] text-slate-500">GROSS</span><strong>KES {dailyGrossAmount.toLocaleString()}</strong></div>
                     <label className="text-[9px] font-bold text-rose-600">DEDUCTION
-                      <input type="number" min="0" value={expenseDeduction} onChange={(e) => setExpenseDeduction(e.target.value)} className="mt-1 w-full rounded border border-rose-200 bg-white p-1.5 text-right text-xs" />
+                      <input type="number" min="0" value={expenseDeduction} onChange={(e) => setExpenseDeduction(sanitizeDecimalInput(e.target.value))} inputMode="decimal" className="mt-1 w-full rounded border border-rose-200 bg-white p-1.5 text-right text-xs" />
                     </label>
                     <div className="text-right"><span className="block text-[9px] text-emerald-700">NET BANKABLE</span><strong className="text-emerald-700">KES {dailyNetAmount.toLocaleString()}</strong></div>
                   </div>
@@ -905,15 +1020,15 @@ export default function DashboardView({
 
               <div>
                 <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
-                  Active Till Account Assignment *
+                  Co-op Account Assignment *
                 </label>
                 <select
                   value={tillNumber}
                   onChange={(e) => setTillNumber(e.target.value as any)}
                   className="w-full p-2.5 border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 bg-white font-mono"
                 >
-                  <option value="VehicleTill">Till No: 824 9102 (Sacco Vehicle Fleet Account)</option>
-                  <option value="UtilityTill">Till No: 481 0294 (Sacco Administrative Utility Account)</option>
+                  <option value="VehicleTill">Account 48277 (Operations / Daily Collection)</option>
+                  <option value="UtilityTill">Account 871671 (Member Savings)</option>
                   <option value="None">None (Direct Petty Cash Voucher Draw)</option>
                 </select>
               </div>
@@ -927,7 +1042,8 @@ export default function DashboardView({
                     type="number"
                     required
                     value={category === 'Daily Contribution' ? dailyNetAmount : amount}
-                    onChange={(e) => setAmount(e.target.value)}
+                    onChange={(e) => setAmount(sanitizeDecimalInput(e.target.value))}
+                    inputMode="decimal"
                     disabled={category === 'Daily Contribution'}
                     className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-mono focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 disabled:bg-emerald-50 disabled:text-emerald-800 disabled:font-bold"
                   />
@@ -946,55 +1062,64 @@ export default function DashboardView({
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              {isExpenseEntry ? (
                 <div>
                   <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
-                    Paying Member (Optional)
-                  </label>
-                  <select
-                    value={memberId}
-                    onChange={(e) => setMemberId(e.target.value)}
-                    className="w-full p-2.5 border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 bg-white"
-                  >
-                    <option value="">N/A (Office Account)</option>
-                    {members.map(member => (
-                      <option key={member.id} value={member.id}>{member.name}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
-                    Person's Name
+                    External Payee / Recipient (Optional)
                   </label>
                   <input
                     type="text"
                     value={personName}
-                    onChange={(e) => setPersonName(e.target.value)}
-                    placeholder="Enter payer or driver's name"
+                    onChange={(e) => setPersonName(sanitizePersonName(e.target.value))}
+                    inputMode="text"
+                    pattern="[A-Za-z .'-]*"
+                    title="Use letters only."
+                    placeholder="Enter the person receiving the expense"
                     className="w-full p-2.5 border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 bg-white"
                   />
                 </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
+                      V.REG / Car Plate {vehiclePlate.trim() ? '(Selected)' : '(Auto-fills Member)'}
+                    </label>
+                    <input
+                      type="text"
+                      list="active-onboarded-vehicles"
+                      value={vehiclePlate}
+                      onChange={(e) => handleVehiclePlateChange(e.target.value)}
+                      placeholder="Type plate (e.g. KCA 123A)"
+                      className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-mono uppercase focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 bg-white"
+                    />
+                    <datalist id="active-onboarded-vehicles">
+                      {activeVehicles.map(vehicle => (
+                        <option key={vehicle.id} value={vehicle.plateNumber}>{vehicle.ownerName}</option>
+                      ))}
+                    </datalist>
+                  </div>
 
-                <div className="col-span-2">
-                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
-                    V.REG — Vehicle Registration
-                  </label>
-                  <input
-                    type="text"
-                    list="registered-vehicle-plates"
-                    value={vehiclePlate}
-                    onChange={(e) => setVehiclePlate(e.target.value.toUpperCase())}
-                    placeholder="e.g. KDA 123A"
-                    className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-mono uppercase focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 bg-white"
-                  />
-                  <datalist id="registered-vehicle-plates">
-                    {vehicles.map(v => (
-                      <option key={v.id} value={v.plateNumber}>{v.plateNumber}</option>
-                    ))}
-                  </datalist>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
+                      Registered Member Name {vehiclePlate.trim() ? '(Auto-reconciled)' : '*'}
+                    </label>
+                    <input
+                      type="text"
+                      required={!vehiclePlate.trim()}
+                      list="registered-member-names"
+                      value={personName}
+                      onChange={(e) => handlePersonNameChange(e.target.value)}
+                      placeholder={vehiclePlate.trim() ? "Auto-detected from plate" : "Type registered member name"}
+                      className="w-full p-2.5 border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-100 bg-white"
+                    />
+                    <datalist id="registered-member-names">
+                      {members.filter(member => member.status === 'Active').map(member => (
+                        <option key={member.id} value={member.name} />
+                      ))}
+                    </datalist>
+                  </div>
                 </div>
-              </div>
+              )}
 
               <div>
                 <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">

@@ -1,0 +1,44 @@
+const CACHE_VERSION = 'sowetamu-shell-v4';
+const SHELL_FILES = ['/offline.html', '/manifest.webmanifest', '/icons/sacco-icon-192.png', '/icons/sacco-icon-512.png'];
+
+self.addEventListener('install', event => {
+  event.waitUntil(caches.open(CACHE_VERSION).then(cache => cache.addAll(SHELL_FILES)));
+});
+
+self.addEventListener('activate', event => {
+  event.waitUntil(
+    caches.keys()
+      .then(keys => Promise.all(keys.filter(key => key !== CACHE_VERSION).map(key => caches.delete(key))))
+      .then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener('message', event => {
+  if (event.data?.type === 'SKIP_WAITING') self.skipWaiting();
+});
+
+self.addEventListener('fetch', event => {
+  const request = event.request;
+  const url = new URL(request.url);
+
+  // Financial APIs, authentication, non-GET requests, and cross-origin data are
+  // always network-only. A failed write must never look successfully cached.
+  if (request.method !== 'GET' || url.origin !== self.location.origin || url.pathname.startsWith('/api/')) return;
+
+  if (request.mode === 'navigate') {
+    event.respondWith(fetch(request).catch(() => caches.match('/offline.html')));
+    return;
+  }
+
+  if (url.pathname.startsWith('/assets/') || url.pathname.startsWith('/icons/')) {
+    event.respondWith(
+      caches.match(request).then(cached => cached || fetch(request).then(response => {
+        if (response.ok && response.type === 'basic') {
+          const copy = response.clone();
+          void caches.open(CACHE_VERSION).then(cache => cache.put(request, copy));
+        }
+        return response;
+      }))
+    );
+  }
+});

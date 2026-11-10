@@ -1,4 +1,3 @@
-import type { User } from '../types';
 import { buildSaccoAuthHeaders } from './auth';
 
 export class ApiError extends Error {
@@ -13,10 +12,18 @@ export class ApiError extends Error {
   }
 }
 
-export async function fetchSaccoJson<T>(url: string, user: User, init: RequestInit = {}, token?: string): Promise<T> {
-  const headers = new Headers(init.headers);
+export async function getSaccoAccessToken(fallbackToken = ''): Promise<string> {
+  return fallbackToken;
+}
 
-  Object.entries(buildSaccoAuthHeaders(user, token)).forEach(([key, value]) => {
+export async function fetchSaccoJson<T>(url: string, init: RequestInit = {}, fallbackToken = ''): Promise<T> {
+  const headers = new Headers(init.headers);
+  const token = await getSaccoAccessToken(fallbackToken);
+  if (!token) {
+    throw new ApiError('Your session has ended. Sign in again.', 401);
+  }
+
+  Object.entries(buildSaccoAuthHeaders(token)).forEach(([key, value]) => {
     headers.set(key, value);
   });
 
@@ -44,17 +51,16 @@ export async function fetchSaccoJson<T>(url: string, user: User, init: RequestIn
   return response.json() as Promise<T>;
 }
 
-export function postSaccoJson<TResponse, TPayload>(
+export function postSaccoJson<TResponse = unknown, TPayload = unknown>(
   url: string,
-  user: User,
   payload: TPayload,
-  token?: string
+  fallbackToken = ''
 ): Promise<TResponse> {
-  return fetchSaccoJson<TResponse>(url, user, {
+  return fetchSaccoJson<TResponse>(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify(payload)
-  }, token);
+  }, fallbackToken);
 }

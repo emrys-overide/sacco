@@ -7,8 +7,8 @@ WHERE NOT EXISTS (SELECT 1 FROM sacco_settings);
 
 INSERT INTO mpesa_tills (till_type, business_short_code, display_name, default_account_type)
 VALUES
-  ('VehicleTill', '8249102', 'Vehicle Fleet Till', 'DailyContribution'),
-  ('UtilityTill', '4810294', 'Operating Utility Till', 'ManagementFee')
+  ('VehicleTill', '48277', 'Operations / Daily Collection Account', 'DailyContribution'),
+  ('UtilityTill', '871671', 'Member Savings Account', 'Savings')
 ON CONFLICT (till_type) DO UPDATE SET
   business_short_code = EXCLUDED.business_short_code,
   display_name = EXCLUDED.display_name,

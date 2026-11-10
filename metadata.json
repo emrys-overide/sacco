@@ -1,6 +1,6 @@
 {
-  "name": "Matatu Sacco Management System",
-  "description": "A comprehensive financial and operational management system for Kenyan Matatu Saccos, enabling secure role-based access, registrations, transaction recording, and financial reporting.",
+  "name": "Sowetamu Sacco",
+  "description": "Sowetamu Sacco is a comprehensive financial and operational management system for Kenyan Matatu Saccos, enabling secure role-based access, registrations, transaction recording, and financial reporting.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
