@@ -1,6 +1,7 @@
 import React, { lazy, Suspense, useState, useEffect, useRef } from 'react';
 import type { MemberPortalData, User, Member, Vehicle, Transaction, UserRole } from './types';
-import { Menu, ShieldAlert, Search, X } from 'lucide-react';
+import { Menu, ShieldAlert, Search, X, Sparkles } from 'lucide-react';
+import { ConversationalAssistantModal } from './components/ConversationalAssistantModal';
 import { canRole, STORAGE_KEYS } from './lib/auth';
 import { ApiError, fetchSaccoJson, postSaccoJson } from './lib/api';
 
@@ -61,6 +62,7 @@ export default function App() {
 
   // Navigation Tab
   const [currentTab, setCurrentTab] = useState<string>('Dashboard');
+  const [isAssistantOpen, setIsAssistantOpen] = useState<boolean>(false);
 
   // Real-Time Global Search State
   const [globalSearchQuery, setGlobalSearchQuery] = useState<string>('');
@@ -480,8 +482,19 @@ export default function App() {
     }
 
     if (currentUser.role === 'Member') {
-      return memberPortal ? <MemberPortal data={memberPortal} currentUser={currentUser} /> : (
-        <div className="flex-1 flex items-center justify-center bg-slate-50 text-sm text-slate-600">Loading your member account...</div>
+      return memberPortal ? (
+        <MemberPortal
+          data={memberPortal}
+          token={authToken}
+          currentUser={currentUser}
+          onApplicationCreated={handleRefreshData}
+          onAccountSuspended={handleLogout}
+          onLogout={handleLogout}
+        />
+      ) : (
+        <div className="min-h-dvh flex items-center justify-center bg-slate-950 text-sm font-bold text-emerald-200">
+          Loading your M-Sacco mobile account...
+        </div>
       );
     }
 
@@ -553,6 +566,7 @@ export default function App() {
             currentUserRole={currentUser.role}
             currentUserName={currentUser.name}
             onRefreshData={handleRefreshData}
+            authToken={authToken}
           />
         );
       case 'Historical Archives':
@@ -621,6 +635,23 @@ export default function App() {
         return <div className="p-8">View not found</div>;
     }
   };
+
+  if (currentUser.role === 'Member') {
+    return (
+      <div className="w-full min-h-dvh font-sans text-slate-900 relative">
+        <PwaInstallPrompt showInstallButton={false} />
+        <Suspense
+          fallback={
+            <div className="min-h-dvh flex items-center justify-center bg-slate-950 text-xs font-bold uppercase tracking-widest text-emerald-300">
+              Loading M-Sacco Mobile App...
+            </div>
+          }
+        >
+          {renderViewContent()}
+        </Suspense>
+      </div>
+    );
+  }
 
   return (
     <div className="app-shell w-full h-screen flex flex-col md:flex-row overflow-hidden font-sans text-slate-900 relative">

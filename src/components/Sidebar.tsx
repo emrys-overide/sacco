@@ -8,7 +8,6 @@ import {
   FileSpreadsheet, 
   FileCode, 
   LogOut, 
-  ChevronUp, 
   ClipboardList, 
   X, 
   Receipt,
@@ -24,7 +23,8 @@ import {
   Bug,
   KeyRound,
   History,
-  Settings
+  Settings,
+  Sparkles
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -39,6 +39,12 @@ interface SidebarProps {
   onClearBrowserCache: () => void;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
+}
+
+interface MenuItem {
+  name: string;
+  icon: React.ReactNode;
+  category: 'Operations' | 'Registers' | 'Financials' | 'Administration' | 'Portal';
 }
 
 export default function Sidebar({
@@ -57,33 +63,59 @@ export default function Sidebar({
   const [isHovered, setIsHovered] = React.useState(false);
   const displayCollapsed = isCollapsed && !isHovered;
 
-  const administratorMenuItems = [
-    { name: 'Dashboard', icon: <LayoutDashboard className="w-4 h-4" /> },
-    { name: 'Daily Collections', icon: <ClipboardList className="w-4 h-4" /> },
-    { name: 'Historical Archives', icon: <History className="w-4 h-4" /> },
-    { name: 'Expenses', icon: <Receipt className="w-4 h-4" /> },
-    { name: 'Members', icon: <Users className="w-4 h-4" /> },
-    { name: 'Loans', icon: <Landmark className="w-4 h-4" /> },
-    { name: 'Fleet', icon: <Bus className="w-4 h-4" /> },
-    { name: 'Banking', icon: <Building2 className="w-4 h-4" /> },
-    { name: 'Reports', icon: <FileSpreadsheet className="w-4 h-4" /> },
-    { name: 'Blueprint', icon: <FileCode className="w-4 h-4" /> }
-  ];
-  const officerMenus: Record<Exclude<User['role'], 'Member'>, Array<{ name: string; icon: React.ReactNode }>> = {
-    Chairman: [...administratorMenuItems, { name: 'Month-end Close', icon: <CalendarClock className="w-4 h-4" /> }, { name: 'Account Access', icon: <UserRoundPlus className="w-4 h-4" /> }],
-    Secretary: [...administratorMenuItems, { name: 'Chairman Recovery', icon: <KeyRound className="w-4 h-4" /> }],
-    Treasurer: administratorMenuItems,
-    Accountant: administratorMenuItems,
-    Auditor: administratorMenuItems.filter(item => !['Daily Collections', 'Expenses'].includes(item.name))
-  };
-  const menuItems = currentUser.role === 'Member'
-    ? [{ name: 'My Account', icon: <LayoutDashboard className="w-4 h-4" /> }]
-    : [
-      ...officerMenus[currentUser.role],
-      { name: 'Roles & Responsibilities', icon: <BookOpenCheck className="w-4 h-4" /> },
-      { name: 'Account Settings', icon: <Settings className="w-4 h-4" /> },
-      ...(showDeveloperErrors ? [{ name: 'Developer Errors', icon: <Bug className="w-4 h-4" /> }] : [])
+  const getCategorizedMenuItems = (): MenuItem[] => {
+    if (currentUser.role === 'Member') {
+      return [{ name: 'My Account', icon: <LayoutDashboard className="w-4 h-4" />, category: 'Portal' }];
+    }
+
+    const items: MenuItem[] = [
+      // Operations
+      { name: 'Dashboard', icon: <LayoutDashboard className="w-4 h-4" />, category: 'Operations' },
+      ...(currentUser.role !== 'Auditor' ? [
+        { name: 'Daily Collections', icon: <ClipboardList className="w-4 h-4" />, category: 'Operations' as const },
+        { name: 'Historical Archives', icon: <History className="w-4 h-4" />, category: 'Operations' as const },
+        { name: 'Expenses', icon: <Receipt className="w-4 h-4" />, category: 'Operations' as const }
+      ] : [
+        { name: 'Historical Archives', icon: <History className="w-4 h-4" />, category: 'Operations' as const }
+      ]),
+
+      // Registers
+      { name: 'Members', icon: <Users className="w-4 h-4" />, category: 'Registers' },
+      { name: 'Fleet', icon: <Bus className="w-4 h-4" />, category: 'Registers' },
+      { name: 'Banking', icon: <Building2 className="w-4 h-4" />, category: 'Registers' },
+
+      // Financials
+      { name: 'Loans', icon: <Landmark className="w-4 h-4" />, category: 'Financials' },
+      ...(currentUser.role === 'Chairman' ? [
+        { name: 'Month-end Close', icon: <CalendarClock className="w-4 h-4" />, category: 'Financials' as const }
+      ] : []),
+      { name: 'Reports', icon: <FileSpreadsheet className="w-4 h-4" />, category: 'Financials' },
+
+      // Administration
+      ...(currentUser.role === 'Chairman' ? [
+        { name: 'Account Access', icon: <UserRoundPlus className="w-4 h-4" />, category: 'Administration' as const }
+      ] : []),
+      ...(currentUser.role === 'Secretary' ? [
+        { name: 'Chairman Recovery', icon: <KeyRound className="w-4 h-4" />, category: 'Administration' as const }
+      ] : []),
+      { name: 'Roles & Responsibilities', icon: <BookOpenCheck className="w-4 h-4" />, category: 'Administration' },
+      { name: 'Account Settings', icon: <Settings className="w-4 h-4" />, category: 'Administration' },
+      { name: 'Blueprint', icon: <FileCode className="w-4 h-4" />, category: 'Administration' },
+      ...(showDeveloperErrors ? [
+        { name: 'Developer Errors', icon: <Bug className="w-4 h-4" />, category: 'Administration' as const }
+      ] : [])
     ];
+
+    return items;
+  };
+
+  const menuItems = getCategorizedMenuItems();
+  const categories: Array<'Operations' | 'Registers' | 'Financials' | 'Administration'> = [
+    'Operations',
+    'Registers',
+    'Financials',
+    'Administration'
+  ];
 
   return (
     <aside 
@@ -100,15 +132,15 @@ export default function Sidebar({
       }`}>
         {!displayCollapsed ? (
           <div className="flex items-center space-x-2.5">
-            <div className="brand-mark w-9 h-9 bg-blue-600 rounded-xl flex items-center justify-center shadow-sm shadow-blue-200">
-              <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3">
+            <div className="brand-mark w-9 h-9 bg-emerald-700 rounded-xl flex items-center justify-center shadow-sm shadow-emerald-200 text-white">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
               </svg>
             </div>
             <div>
               <h1 className="text-sm font-bold font-display uppercase tracking-wider text-slate-900 flex items-center space-x-1">
                 <span>Sowetamu</span>
-                <span className="text-blue-600">Sacco</span>
+                <span className="text-emerald-700">Sacco</span>
               </h1>
               <p className="text-[9px] text-slate-400 font-mono tracking-wider font-semibold">
                 FINANCIAL OS V1.0
@@ -117,8 +149,8 @@ export default function Sidebar({
           </div>
         ) : (
           <div className="flex flex-col items-center md:items-center space-y-1.5 md:block hidden" title="Sowetamu Sacco OS">
-            <div className="brand-mark w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center shadow-sm shadow-blue-200">
-              <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3">
+            <div className="brand-mark w-10 h-10 bg-emerald-700 rounded-xl flex items-center justify-center shadow-sm shadow-emerald-200 text-white">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
               </svg>
             </div>
@@ -129,7 +161,7 @@ export default function Sidebar({
         <div className="md:hidden block">
           <h1 className="text-sm font-bold font-display uppercase tracking-wider text-slate-900 flex items-center space-x-1">
             <span>Sowetamu</span>
-            <span className="text-blue-600 font-black">Sacco</span>
+            <span className="text-emerald-700 font-black">Sacco</span>
           </h1>
         </div>
         
@@ -156,71 +188,101 @@ export default function Sidebar({
       </div>
 
       {/* Nav Actions inside Scrollable Container */}
-      <div className="flex-1 overflow-y-auto space-y-5 py-4 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent">
-        <nav className={`p-3 space-y-1 ${displayCollapsed ? 'md:flex md:flex-col md:items-center md:px-2' : ''}`}>
-          {!displayCollapsed && currentUser.role !== 'Member' && (
-            <p className="px-2 pb-2 text-[8px] font-bold uppercase tracking-[0.22em] text-emerald-200/45 font-mono">
-              Operations workspace
-            </p>
-          )}
-          {menuItems.map((item) => {
-            const isActive = currentTab === item.name;
-            return (
-              <motion.button
-                key={item.name}
-                onClick={() => {
-                  onSelectTab(item.name);
-                  setIsHovered(false);
-                }}
-                title={displayCollapsed ? `${item.name} Directory` : undefined}
-                whileHover={{ scale: 1.015, x: displayCollapsed ? 0 : 2 }}
-                whileTap={{ scale: 0.985 }}
-                className={`sidebar-nav-item ${isActive ? 'is-active' : ''} w-full flex items-center transition-all duration-200 text-left cursor-pointer relative ${
-                  displayCollapsed 
-                    ? `md:justify-center md:p-2.5 rounded-xl ${
-                        isActive 
-                          ? 'bg-blue-50 text-blue-600 font-semibold shadow-sm' 
-                          : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
-                      }`
-                    : `justify-between p-2 rounded-lg ${
-                        isActive
-                          ? 'bg-blue-50 text-blue-600 font-semibold'
-                          : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
-                      }`
-                }`}
-              >
-                <div className="flex items-center space-x-3">
-                  <span className={`${isActive ? 'text-blue-600' : 'text-slate-400 hover:text-slate-600'} shrink-0`}>
-                    {item.icon}
-                  </span>
-                  {(!displayCollapsed || window.innerWidth < 768) && (
-                    <span className="text-[13px] font-medium">
-                      {item.name === 'Blueprint' ? 'Architecture Blueprint' : `${item.name}`}
-                    </span>
+      <div className="flex-1 overflow-y-auto space-y-4 py-3 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent">
+        
+
+        {currentUser.role === 'Member' ? (
+          <nav className={`p-3 space-y-1 ${displayCollapsed ? 'md:flex md:flex-col md:items-center md:px-2' : ''}`}>
+            {menuItems.map(item => {
+              const isActive = currentTab === item.name;
+              return (
+                <motion.button
+                  key={item.name}
+                  onClick={() => {
+                    onSelectTab(item.name);
+                    setIsHovered(false);
+                  }}
+                  className={`sidebar-nav-item ${isActive ? 'is-active bg-emerald-50 text-emerald-800 font-bold border-r-2 border-emerald-600' : 'text-slate-600 hover:bg-slate-50'} w-full flex items-center justify-between p-2 rounded-lg text-left text-xs`}
+                >
+                  <div className="flex items-center space-x-3">
+                    <span className={isActive ? 'text-emerald-700' : 'text-slate-400'}>{item.icon}</span>
+                    <span>{item.name}</span>
+                  </div>
+                </motion.button>
+              );
+            })}
+          </nav>
+        ) : (
+          <div className="space-y-4 px-3">
+            {categories.map(category => {
+              const catItems = menuItems.filter(i => i.category === category);
+              if (catItems.length === 0) return null;
+
+              return (
+                <div key={category} className="space-y-1">
+                  {!displayCollapsed && (
+                    <p className="px-2 pb-1 text-[9px] font-bold uppercase tracking-wider text-slate-400 font-mono">
+                      {category}
+                    </p>
                   )}
+                  <div className={`space-y-0.5 ${displayCollapsed ? 'md:flex md:flex-col md:items-center' : ''}`}>
+                    {catItems.map(item => {
+                      const isActive = currentTab === item.name;
+                      return (
+                        <motion.button
+                          key={item.name}
+                          onClick={() => {
+                            onSelectTab(item.name);
+                            setIsHovered(false);
+                          }}
+                          title={displayCollapsed ? item.name : undefined}
+                          whileHover={{ scale: 1.01, x: displayCollapsed ? 0 : 2 }}
+                          whileTap={{ scale: 0.99 }}
+                          className={`sidebar-nav-item ${
+                            isActive
+                              ? 'is-active bg-emerald-50 text-emerald-800 font-bold border-r-2 border-emerald-600 shadow-xs'
+                              : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+                          } w-full flex items-center transition-all duration-150 text-left cursor-pointer rounded-lg ${
+                            displayCollapsed ? 'md:justify-center md:p-2.5' : 'justify-between p-2'
+                          }`}
+                        >
+                          <div className="flex items-center space-x-2.5">
+                            <span className={`${isActive ? 'text-emerald-700' : 'text-slate-400'} shrink-0`}>
+                              {item.icon}
+                            </span>
+                            {(!displayCollapsed || window.innerWidth < 768) && (
+                              <span className="text-xs font-medium">
+                                {item.name === 'Blueprint' ? 'Architecture Blueprint' : item.name}
+                              </span>
+                            )}
+                          </div>
+
+                          {(!displayCollapsed || window.innerWidth < 768) && item.name === 'Blueprint' && (
+                            <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded font-mono ${
+                              blueprintApproved ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-amber-50 text-amber-700 border border-amber-200'
+                            }`}>
+                              {blueprintApproved ? 'APPROVED' : 'REVIEW'}
+                            </span>
+                          )}
+
+                          {displayCollapsed && item.name === 'Blueprint' && (
+                            <span className={`absolute top-2 right-2 w-2 h-2 rounded-full hidden md:block ${
+                              blueprintApproved ? 'bg-green-500' : 'bg-amber-400 animate-pulse'
+                            }`} title={blueprintApproved ? 'Blueprint Approved' : 'Review Required'} />
+                          )}
+                        </motion.button>
+                      );
+                    })}
+                  </div>
                 </div>
-                
-                {(!displayCollapsed || window.innerWidth < 768) && item.name === 'Blueprint' && (
-                  <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded font-mono ${
-                    blueprintApproved ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-amber-50 text-amber-700 border border-amber-200'
-                  }`}>
-                    {blueprintApproved ? 'APPROVED' : 'REVIEW'}
-                  </span>
-                )}
+              );
+            })}
+          </div>
+        )}
 
-                {displayCollapsed && item.name === 'Blueprint' && (
-                  <span className={`absolute top-2 right-2 w-2 h-2 rounded-full hidden md:block ${
-                    blueprintApproved ? 'bg-green-500' : 'bg-amber-400 animate-pulse'
-                  }`} title={blueprintApproved ? 'Blueprint Approved' : 'Review Required'} />
-                )}
-              </motion.button>
-            );
-          })}
-        </nav>
-
-        {/* Local reset controls are an administrator-only convenience. */}
+        {/* Database Status Card */}
         {currentUser.role !== 'Member' && (!displayCollapsed ? (
-          <div className="sidebar-section-card mx-4 p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+          <div className="sidebar-section-card mx-3 p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-[9px] font-mono font-bold text-slate-500 uppercase tracking-widest">
                 Sacco Database
@@ -228,13 +290,13 @@ export default function Sidebar({
               <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded font-mono ${
                 isDatabaseEmpty 
                   ? 'bg-red-50 text-red-700 border border-red-200' 
-                  : 'bg-green-50 text-green-700 border border-green-200'
+                  : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
               }`}>
                 {isDatabaseEmpty ? 'EMPTY' : 'ACTIVE'}
               </span>
             </div>
             <p className="text-[10px] text-slate-400 leading-normal">
-              New installs start empty. Add members, vehicles, and ledger entries through the app workflow.
+              Continuous audit ledger is online and synchronized.
             </p>
             <div className="pt-1">
               <button
@@ -252,28 +314,19 @@ export default function Sidebar({
               className={`p-1.5 rounded-lg border ${
                 isDatabaseEmpty 
                   ? 'bg-red-50 border-red-200 text-red-500' 
-                  : 'bg-green-50 border-green-200 text-green-500'
+                  : 'bg-emerald-50 border-emerald-200 text-emerald-600'
               }`}
               title={isDatabaseEmpty ? 'Database Status: Empty Sacco Registry' : 'Database Status: Active Sacco Registry'}
             >
               <Database className="w-4 h-4" />
             </span>
-            <div className="flex flex-col space-y-1.5 w-full items-center">
-              <button
-                onClick={onClearBrowserCache}
-                className="p-1 bg-red-50 hover:bg-red-100 text-red-600 border border-red-100 rounded text-xs transition-all cursor-pointer hover:scale-105 active:scale-95"
-                title="Clear Browser Cache"
-              >
-                CACHE
-              </button>
-            </div>
           </div>
         ))}
       </div>
 
       {/* Profile Selector & User Meta (Fixed Bottom) */}
-      <div className={`sidebar-profile p-4 border-t border-slate-100 bg-white flex flex-col transition-all duration-300 ${
-        displayCollapsed ? 'md:space-y-4 md:items-center md:justify-center' : 'space-y-3'
+      <div className={`sidebar-profile p-3 border-t border-slate-100 bg-white flex flex-col transition-all duration-300 ${
+        displayCollapsed ? 'md:space-y-4 md:items-center md:justify-center' : 'space-y-2.5'
       }`}>
         <a
           href="/documentation"
@@ -288,9 +341,9 @@ export default function Sidebar({
         <div className={`flex items-center justify-between pt-2 border-t border-slate-100 w-full ${
           displayCollapsed ? 'md:flex-col md:space-y-3' : 'space-x-3'
         }`}>
-          <div className="flex items-center space-x-3">
+          <div className="flex items-center space-x-2.5">
             <div 
-              className="sidebar-avatar w-9 h-9 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center font-bold text-xs font-display shrink-0"
+              className="sidebar-avatar w-8 h-8 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center font-bold text-xs font-display shrink-0 border border-emerald-200"
               title={`${currentUser.name} (${currentUser.role})`}
             >
               {currentUser.name.split(' ').map(n => n[0]).join('')}

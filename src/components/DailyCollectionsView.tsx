@@ -17,8 +17,10 @@ import {
   History,
   RefreshCw,
   Clock,
-  Car
+  Car,
+  CreditCard
 } from "lucide-react";
+import { CollectionPaymentModal } from "./CollectionPaymentModal";
 
 interface DailyCollectionsViewProps {
   vehicles: Vehicle[];
@@ -30,6 +32,7 @@ interface DailyCollectionsViewProps {
   onRefreshData?: () => void;
   currentUserRole: string;
   currentUserName: string;
+  authToken?: string;
 }
 
 interface CollectionRow {
@@ -43,6 +46,11 @@ interface CollectionRow {
   savings: number;
   sTicket: number;
   legalFee: number;
+  isPaid?: boolean;
+  notes?: string;
+  refCode?: string;
+  memberName?: string;
+  memberId?: string;
 }
 
 interface ExpenseRow {
@@ -128,8 +136,31 @@ export default function DailyCollectionsView({
   onDeleteTransaction,
   onRefreshData,
   currentUserRole,
-  currentUserName
+  currentUserName,
+  authToken
 }: DailyCollectionsViewProps) {
+  
+  // Payment Form Modal State
+  const [isPaymentModalOpen, setIsPaymentModalOpen] = useState<boolean>(false);
+  const [paymentModalRow, setPaymentModalRow] = useState<CollectionRow | null>(null);
+
+  const handleOpenNewPaymentModal = () => {
+    setPaymentModalRow(null);
+    setIsPaymentModalOpen(true);
+  };
+
+  const handleOpenRowPaymentModal = (row: CollectionRow) => {
+    setPaymentModalRow(row);
+    setIsPaymentModalOpen(true);
+  };
+
+  const handlePaymentModalComplete = async (savedTx: Omit<Transaction, "id" | "recorderName">) => {
+    await onAddTransaction(savedTx);
+    setIsDirty(false);
+    setSuccessMessage(`Payment of KES ${Number(savedTx.amount).toLocaleString()} successfully processed and recorded!`);
+    setTimeout(() => setSuccessMessage(""), 4000);
+    if (onRefreshData) onRefreshData();
+  };
   
   // Basic Sheet State
   const [selectedDate, setSelectedDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
@@ -257,7 +288,9 @@ export default function DailyCollectionsView({
         legalFee: leg,
         isPaid: true,
         notes: tx.description || "",
-        refCode: tx.refCode || ""
+        refCode: tx.refCode || "",
+        memberName: tx.memberName || (members.find(m => m.id === tx.memberId)?.name) || "",
+        memberId: tx.memberId || ""
       };
     });
 
@@ -322,14 +355,19 @@ export default function DailyCollectionsView({
   const handleVehiclePlateChange = (no: number, plate: string) => {
     if (isReadOnly) return;
     const cleanPlate = plate.toUpperCase().trim();
-    const matchedVehicle = vehicles.find(v => v.plateNumber.replace(/\s+/g, "").toUpperCase() === cleanPlate.replace(/\s+/g, ""));
+    const matchedVehicle = cleanPlate
+      ? vehicles.find(v => v.plateNumber.replace(/\s+/g, "").toUpperCase() === cleanPlate.replace(/\s+/g, ""))
+      : undefined;
+    const ownerMember = matchedVehicle ? members.find(m => m.id === matchedVehicle.ownerId) : undefined;
 
     setRows(prev => prev.map(r => {
       if (r.no === no) {
         return {
           ...r,
           vehiclePlate: cleanPlate,
-          vehicleClass: matchedVehicle?.capacity === 7 ? "Sienta" : (r.vehicleClass || "Nissan")
+          vehicleClass: matchedVehicle?.capacity === 7 ? "Sienta" : (!cleanPlate ? "Member Contribution" : (r.vehicleClass || "Nissan")),
+          memberName: ownerMember?.name || r.memberName,
+          memberId: ownerMember?.id || r.memberId
         };
       }
       return r;
@@ -518,7 +556,7 @@ export default function DailyCollectionsView({
       return;
     }
 
-    const unpostedRows = rows.filter(row => !row.transactionId && (row.vehiclePlate || getRowTotal(row) > 0));
+    const unpostedRows = rows.filter(row => !row.transactionId && (row.vehiclePlate || row.memberName || getRowTotal(row) > 0));
     const unpostedExpenses = expenses.filter(exp => !exp.transactionId && exp.amount > 0 && exp.description.trim());
 
     // Check updated rows
@@ -586,10 +624,19 @@ export default function DailyCollectionsView({
           const createdRowIds = new Map<number, string>();
           for (const row of unpostedRows) {
             const grossAmount = getRowTotal(row);
-            if (grossAmount <= 0 && !row.vehiclePlate.trim()) continue;
+            const cleanPlate = row.vehiclePlate.trim().toUpperCase();
+            const payer = row.memberName?.trim();
+            if (grossAmount <= 0 && !cleanPlate && !payer) continue;
+
+            const txDesc = cleanPlate
+              ? `${row.vehicleClass} daily collection (${cleanPlate}${payer ? ` - ${payer}` : ""})`
+              : `Member contribution (${payer || "Registered Member"})`;
+            const refId = cleanPlate ? cleanPlate.replace(/\s+/g, "") : (payer ? payer.replace(/[^a-zA-Z0-9]/g, "").slice(0, 8) : "MEM");
 
             const transaction = await onAddTransaction({
-              vehiclePlate: row.vehiclePlate.trim().toUpperCase(),
+              vehiclePlate: cleanPlate || undefined,
+              memberName: payer || undefined,
+              memberId: row.memberId || undefined,
               vehicleClass: row.vehicleClass,
               operationAmount: row.operation,
               entranceFee: row.entranceFee,
@@ -598,8 +645,8 @@ export default function DailyCollectionsView({
               sTicket: row.sTicket,
               legalFee: row.legalFee,
               grossAmount,
-              description: `${row.vehicleClass} daily collection (${selectedRoute || "field sheet"} - row ${row.no})`,
-              refCode: `SWT-DLY-${row.vehiclePlate.replace(/\s+/g, "")}-${timestampShort.replace(/-/g, "")}-${row.no}`,
+              description: txDesc,
+              refCode: `SWT-DLY-${refId}-${timestampShort.replace(/-/g, "")}-${row.no}`,
               type: "Credit",
               category: "Daily Contribution",
               amount: grossAmount,
@@ -850,6 +897,14 @@ export default function DailyCollectionsView({
                 <span>Sync Server</span>
               </button>
             )}
+            <button
+              onClick={handleOpenNewPaymentModal}
+              className="px-4 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white font-black text-xs uppercase tracking-wider rounded-xl border border-emerald-800 flex items-center space-x-2 transition-all shadow-md active:scale-95 cursor-pointer"
+              title="Open payment form capturing all table fields to Pay"
+            >
+              <CreditCard className="w-4 h-4 text-emerald-300" />
+              <span>Payment Form (Pay)</span>
+            </button>
             <button
               onClick={triggerPrint}
               className="px-4 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs uppercase tracking-wider rounded-xl border border-emerald-600 flex items-center space-x-2 transition-all shadow-md active:scale-95 cursor-pointer"
@@ -1182,7 +1237,7 @@ export default function DailyCollectionsView({
               <thead className="bg-slate-100 text-[10px] font-black uppercase tracking-wider border-b-2 border-slate-900 text-slate-800 font-mono">
                 <tr>
                   <th className="px-3 py-2.5 border-r border-slate-300 w-12 text-center">NO</th>
-                  <th className="px-3 py-2.5 border-r border-slate-300 w-36">V.REG (PLATE)</th>
+                  <th className="px-3 py-2.5 border-r border-slate-300 w-44">V.REG / MEMBER</th>
                   <th className="px-3 py-2.5 border-r border-slate-300 w-28">CLASS</th>
                   <th className="px-3 py-2.5 border-r border-slate-300 text-right">OPERATION</th>
                   <th className="px-3 py-2.5 border-r border-slate-300 text-right">ENTRANCE</th>
@@ -1209,9 +1264,17 @@ export default function DailyCollectionsView({
                           value={row.vehiclePlate}
                           disabled={isReadOnly}
                           onChange={(e) => handleVehiclePlateChange(row.no, e.target.value)}
-                          placeholder="KCA 123A"
+                          placeholder={row.memberName ? `No plate (${row.memberName})` : "Plate (Optional)"}
                           className="w-full p-1 border border-transparent hover:border-slate-300 focus:border-slate-900 font-mono font-bold uppercase bg-transparent text-slate-900 text-xs rounded focus:outline-none focus:bg-white"
                         />
+                        {row.memberName && (
+                          <div className="text-[10px] text-slate-500 font-sans font-medium truncate flex items-center gap-1 mt-0.5">
+                            <span className="truncate">👤 {row.memberName}</span>
+                            {!row.vehiclePlate && (
+                              <span className="rounded bg-emerald-50 text-emerald-700 px-1 font-bold text-[9px] shrink-0">Direct Member</span>
+                            )}
+                          </div>
+                        )}
                       </td>
 
                       <td className="px-3 py-2 border-r border-slate-200">
@@ -1298,14 +1361,27 @@ export default function DailyCollectionsView({
                       </td>
 
                       <td className="px-3 py-2 text-center no-print">
-                        <button
-                          onClick={() => handleDeleteRowClick(row.no)}
-                          disabled={isReadOnly}
-                          className="text-slate-300 hover:text-rose-600 p-1 rounded transition-colors cursor-pointer"
-                          title="Delete this log record"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        <div className="flex items-center justify-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenRowPaymentModal(row)}
+                            disabled={isReadOnly}
+                            className="px-2 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded font-bold text-[10.5px] uppercase tracking-wider flex items-center space-x-1 transition-all cursor-pointer shadow-2xs"
+                            title="Open Payment Form with these table details"
+                          >
+                            <CreditCard className="w-3 h-3 text-emerald-700" />
+                            <span>Pay</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteRowClick(row.no)}
+                            disabled={isReadOnly}
+                            className="text-slate-300 hover:text-rose-600 p-1 rounded transition-colors cursor-pointer"
+                            title="Delete this log record"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -1354,6 +1430,14 @@ export default function DailyCollectionsView({
 
           {!isReadOnly && (
             <div className="flex space-x-2 mb-6 no-print">
+              <button
+                type="button"
+                onClick={handleOpenNewPaymentModal}
+                className="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white border-2 border-emerald-800 rounded-xl font-bold text-xs uppercase tracking-wider flex items-center space-x-1.5 transition-all cursor-pointer shadow-md active:scale-95"
+              >
+                <CreditCard className="w-4 h-4 text-emerald-300" />
+                <span>Payment Form (Pay)</span>
+              </button>
               <button
                 onClick={handleAddRow}
                 className="px-4 py-2 bg-slate-100 hover:bg-slate-200 border-2 border-slate-900 rounded-xl font-bold text-xs uppercase tracking-wider flex items-center space-x-1.5 transition-all cursor-pointer"
@@ -1523,7 +1607,7 @@ export default function DailyCollectionsView({
                   <tr key={row.no}>
                     <td style={{ textAlign: "center", color: "#64748b" }}>{idx + 1}</td>
                     <td style={{ fontFamily: "monospace", fontWeight: 900, letterSpacing: "0.5px" }}>
-                      {row.vehiclePlate || "—"}
+                      {row.vehiclePlate || row.memberName || "—"}
                     </td>
                     <td style={{ textAlign: "right" }}>{row.operation > 0 ? row.operation.toLocaleString() : "—"}</td>
                     <td style={{ textAlign: "right" }}>{row.entranceFee > 0 ? row.entranceFee.toLocaleString() : "—"}</td>
@@ -1666,7 +1750,7 @@ export default function DailyCollectionsView({
                   <tr key={row.no}>
                     <td style={{ textAlign: "center", color: "#64748b" }}>{idx + 1}</td>
                     <td style={{ fontFamily: "monospace", fontWeight: 900, letterSpacing: "0.5px" }}>
-                      {row.vehiclePlate || "—"}
+                      {row.vehiclePlate || row.memberName || "—"}
                     </td>
                     <td style={{ textAlign: "right" }}>{row.operation > 0 ? row.operation.toLocaleString() : "—"}</td>
                     <td style={{ textAlign: "right" }}>{row.entranceFee > 0 ? row.entranceFee.toLocaleString() : "—"}</td>
@@ -1926,6 +2010,18 @@ export default function DailyCollectionsView({
         </div>
 
       </div>
+
+      {/* COLLECTION PAYMENT MODAL */}
+      <CollectionPaymentModal
+        isOpen={isPaymentModalOpen}
+        onClose={() => setIsPaymentModalOpen(false)}
+        selectedDate={selectedDate}
+        vehicles={vehicles}
+        members={members}
+        token={authToken}
+        initialRow={paymentModalRow}
+        onComplete={handlePaymentModalComplete}
+      />
 
       {/* CONFIRMATION / WARNING MODAL */}
       {confirmationConfig && (

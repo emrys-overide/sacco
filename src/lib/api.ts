@@ -51,7 +51,7 @@ export async function fetchSaccoJson<T>(url: string, init: RequestInit = {}, fal
   return response.json() as Promise<T>;
 }
 
-export function postSaccoJson<TResponse, TPayload>(
+export function postSaccoJson<TResponse = unknown, TPayload = unknown>(
   url: string,
   payload: TPayload,
   fallbackToken = ''

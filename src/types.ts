@@ -225,6 +225,7 @@ export interface MemberPortalData {
   transactions: Transaction[];
   payments: PaymentRecord[];
   loans: MemberLoanSummary[];
+  saccoTransactions?: SaccoTransaction[];
 }
 
 export interface TargetCollection {
@@ -232,4 +233,27 @@ export interface TargetCollection {
   current: number;
   target: number;
   unit: string;
+}
+
+
+export type SaccoTransactionType = 'SAVINGS' | 'LOAN_REPAYMENT';
+export type SaccoTransactionStatus = 'PENDING' | 'SUCCESS' | 'FAILED' | 'RESOLVED_RECONCILED' | 'EXPIRED_UNPAID';
+
+export interface SaccoTransaction {
+  id: string;
+  memberId: string;
+  transactionType: SaccoTransactionType;
+  accountReference: string;
+  amount: number;
+  phoneNumber: string;
+  merchantRequestId: string;
+  checkoutRequestId: string;
+  mpesaReceiptNumber?: string;
+  status: SaccoTransactionStatus;
+  resultCode?: number;
+  resultDescription?: string;
+  ledgerEntryId?: string;
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
 }
